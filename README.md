@@ -4,10 +4,11 @@
 > driven by GitHub Actions, stored on Cloudflare R2.
 
 A small, **profile-driven** tool any project can adopt: point it at a Postgres connection string and an
-R2 bucket and you get the **3-2-1-1-0** pattern — ≥3 copies, 2 media, 1 off-site, 1 immutable, 0 restore
-errors — with a daily Slack status row and a static backup-history dashboard. The engine knows nothing
-about any one project; everything project-specific lives in a `profiles/*.env` file kept in *your* repo,
-and credentials come from the environment (GitHub secrets), never from the repo.
+R2 bucket and you get the **off-site, immutable, restore-verified** pillars of the **3-2-1-1-0** backup
+pattern (the *1-1-0*) — plus one independent off-site copy toward the *3-2* — with a daily Slack status
+row and a static backup-history dashboard. The engine knows nothing about any one project; everything
+project-specific lives in a `profiles/*.env` file kept in *your* repo, and credentials come from the
+environment (GitHub secrets), never from the repo. See [Where this fits: 3-2-1-1-0](#where-this-fits-3-2-1-1-0).
 
 ```
 the-gitfather/
@@ -27,6 +28,37 @@ the-gitfather/
 ```
 
 Built as a GitHub-Actions toolkit, but every script is runnable locally for testing.
+
+---
+
+## Where this fits: 3-2-1-1-0
+
+**3-2-1-1-0** is the hardened evolution of the classic 3-2-1 backup rule:
+
+| Digit | Rule | What it's for |
+|---|---|---|
+| **3** | ≥3 copies of the data | One primary + two backups, so no single loss is fatal |
+| **2** | on ≥2 different media | Different *failure domains* — a flaw that kills one medium doesn't kill both |
+| **1** | ≥1 copy off-site | Survives a site-level disaster (fire, theft, region outage) |
+| **1** | ≥1 copy immutable / offline | Survives ransomware or a leaked/malicious credential that tries to delete backups |
+| **0** | **0** recovery-verification errors | A backup you've never restored is a hope, not a backup — prove it restores |
+
+The last two digits are what most setups skip, and they're exactly where this tool is strong. Here's
+the honest mapping of what the-gitfather delivers:
+
+| Digit | Coverage | How |
+|---|---|---|
+| **3** copies | ⚠️ partial | Manages **one** backup destination (a single R2 bucket). The GFS tiers are point-in-time *versions of the same dump in the same bucket* — more restore points, not independent copies. Your production DB is copy #1 (the source, not the tool's job); R2 is copy #2; a 3rd copy is on you. |
+| **2** media | ❌ not provided | Every copy the tool writes lives on one medium / provider / failure domain (R2). "2 media" only exists incidentally because your prod DB lives elsewhere. |
+| **1** off-site | ✅ delivered | Dumps go to Cloudflare R2 — a different provider and location from your Postgres host. |
+| **1** immutable | ✅ delivered* | R2 bucket locks (WORM) + a no-delete CI token make the durable tiers immutable for 14 days against the primary threat (a leaked CI key). *It's immutable, not air-gapped — a full account takeover can strip the locks. See [Threat model](#threat-model). |
+| **0** errors | ✅ delivered | `restore-drill-pg.sh` restores the newest dump into a throwaway DB and asserts row counts, backed by the staleness check, Slack status, and an external dead-man's switch. |
+
+**Net:** the tool nails the back half (**1-1-0**) and supplies **one off-site copy** toward the front
+half — it does not by itself give you 3 independent copies on 2 distinct media. To earn the full
+**3-2-1-1-0**, add a second, independent backup leg on a different medium / failure domain (e.g. a
+periodic `pg_dump` to local disk/NAS, or replicate the R2 bucket to another provider or region). The
+dump this tool already produces is the natural feed for it.
 
 ---
 
