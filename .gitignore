@@ -1,0 +1,9 @@
+node_modules/
+dashboard/dist/
+dist/
+*.dump
+*.dump.age
+*.dump.enc
+.env
+.env.*
+.DS_Store

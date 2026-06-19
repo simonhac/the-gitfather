@@ -1,0 +1,64 @@
+name: pg-staleness-check (reusable)
+
+# Reusable hourly assertion that a fresh backup landed in R2. Alerts 🔴 if the newest 2hourly/ object
+# is older than STALE_HOURS, and self-heals a *missed* tick by re-triggering the backup workflow.
+# Complements the backup's dead-man's-switch ping (object-landed vs run-succeeded). See README.
+
+on:
+  workflow_call:
+    inputs:
+      profile:
+        description: "Path (within the CALLER repo) to the profile .env."
+        type: string
+        required: true
+      gitfather_ref:
+        type: string
+        required: false
+        default: main
+      backup_workflow:
+        description: "Caller's backup workflow file name, re-triggered on a missed tick."
+        type: string
+        required: false
+        default: pg-backup.yml
+    secrets:
+      R2_ACCOUNT_ID: { required: true }
+      R2_ACCESS_KEY_ID: { required: true }
+      R2_SECRET_ACCESS_KEY: { required: true }
+      SLACK_BOT_TOKEN: { required: false }
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # actions:write lets the staleness check self-heal a *missed* backup by re-triggering the caller's
+    # backup workflow via `gh workflow run`. Capped by the caller's grant — the caller must also grant it.
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Checkout caller repo (holds the profile)
+        uses: actions/checkout@v4
+        with:
+          path: caller
+
+      - name: Checkout the-gitfather (holds the scripts)
+        uses: actions/checkout@v4
+        with:
+          repository: simonhac/the-gitfather
+          ref: ${{ inputs.gitfather_ref }}
+          path: engine
+
+      - uses: ./engine/.github/actions/setup-tools
+
+      - name: Staleness check
+        env:
+          PROFILE: ${{ github.workspace }}/caller/${{ inputs.profile }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL: ${{ vars.SLACK_CHANNEL }}
+          BACKUP_WORKFLOW: ${{ inputs.backup_workflow }}
+          GH_TOKEN: ${{ github.token }}   # self-heal: `gh workflow run <backup_workflow>` on a missed tick
+        run: bash engine/scripts/check-staleness.sh

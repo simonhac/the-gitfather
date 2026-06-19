@@ -1,0 +1,79 @@
+name: pg-dashboard (reusable)
+
+# Reusable: render the static backup-history dashboard from the private R2 run-logs and publish the
+# (scrubbed) index.html to the PUBLIC dashboard bucket. A consuming repo typically calls this from a
+# caller workflow triggered `on: workflow_run` after its backup workflow completes.
+
+on:
+  workflow_call:
+    inputs:
+      profile:
+        description: "Path (within the CALLER repo) to the profile .env (for FILE_BASENAME / DASHBOARD_LABEL / DISPLAY_TZ)."
+        type: string
+        required: true
+      gitfather_ref:
+        type: string
+        required: false
+        default: main
+    secrets:
+      R2_ACCOUNT_ID: { required: true }
+      R2_ACCESS_KEY_ID: { required: true }            # private dump bucket (read the logs)
+      R2_SECRET_ACCESS_KEY: { required: true }
+      DASHBOARD_R2_ACCESS_KEY_ID: { required: true }  # public dashboard bucket (write index.html)
+      DASHBOARD_R2_SECRET_ACCESS_KEY: { required: true }
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout caller repo (holds the profile)
+        uses: actions/checkout@v4
+        with:
+          path: caller
+
+      - name: Checkout the-gitfather (holds the scripts)
+        uses: actions/checkout@v4
+        with:
+          repository: simonhac/the-gitfather
+          ref: ${{ inputs.gitfather_ref }}
+          path: engine
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: engine/package-lock.json
+
+      - uses: ./engine/.github/actions/setup-tools
+
+      - name: Build + publish dashboard
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          DASHBOARD_R2_BUCKET: ${{ vars.DASHBOARD_R2_BUCKET }}
+          DASHBOARD_R2_ACCESS_KEY_ID: ${{ secrets.DASHBOARD_R2_ACCESS_KEY_ID }}
+          DASHBOARD_R2_SECRET_ACCESS_KEY: ${{ secrets.DASHBOARD_R2_SECRET_ACCESS_KEY }}
+          PROFILE: ${{ github.workspace }}/caller/${{ inputs.profile }}
+        run: |
+          set -euo pipefail
+          ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          # `r2` = private dump bucket (read the logs); `r2dash` = public dashboard bucket (write index.html).
+          export RCLONE_CONFIG_R2_TYPE=s3 RCLONE_CONFIG_R2_PROVIDER=Cloudflare \
+            RCLONE_CONFIG_R2_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID" \
+            RCLONE_CONFIG_R2_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY" \
+            RCLONE_CONFIG_R2_ENDPOINT="$ENDPOINT"
+          export RCLONE_CONFIG_R2DASH_TYPE=s3 RCLONE_CONFIG_R2DASH_PROVIDER=Cloudflare \
+            RCLONE_CONFIG_R2DASH_ACCESS_KEY_ID="$DASHBOARD_R2_ACCESS_KEY_ID" \
+            RCLONE_CONFIG_R2DASH_SECRET_ACCESS_KEY="$DASHBOARD_R2_SECRET_ACCESS_KEY" \
+            RCLONE_CONFIG_R2DASH_ENDPOINT="$ENDPOINT"
+          # Export the profile (FILE_BASENAME, DASHBOARD_LABEL, DISPLAY_TZ) so the dashboard label +
+          # rendered timezone match the project.
+          set -a; source "$PROFILE"; set +a
+          cd engine
+          npm ci
+          npx tsx scripts/build-dashboard.ts --upload

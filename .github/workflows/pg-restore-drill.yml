@@ -1,0 +1,75 @@
+name: pg-restore-drill (reusable)
+
+# Reusable weekly proof that the latest off-site R2 dump actually restores — the "0 restore errors"
+# leg of 3-2-1-1-0. Pulls the newest object, pg_restores it into a throwaway postgres service, and
+# asserts the restored sentinel-table count is within tolerance of live. See README.
+
+on:
+  workflow_call:
+    inputs:
+      profile:
+        description: "Path (within the CALLER repo) to the profile .env."
+        type: string
+        required: true
+      gitfather_ref:
+        type: string
+        required: false
+        default: main
+    secrets:
+      PG_BACKUP_DATABASE_URL: { required: true }   # used read-only as the live row-count reference
+      R2_ACCOUNT_ID: { required: true }
+      R2_ACCESS_KEY_ID: { required: true }
+      R2_SECRET_ACCESS_KEY: { required: true }
+      SLACK_BOT_TOKEN: { required: false }
+      AGE_IDENTITY: { required: false }            # required only if backups are .age-encrypted
+
+jobs:
+  drill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      pg:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: drill
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    steps:
+      - name: Checkout caller repo (holds the profile)
+        uses: actions/checkout@v4
+        with:
+          path: caller
+
+      - name: Checkout the-gitfather (holds the scripts)
+        uses: actions/checkout@v4
+        with:
+          repository: simonhac/the-gitfather
+          ref: ${{ inputs.gitfather_ref }}
+          path: engine
+
+      - name: Read profile (PG_CLIENT_MAJOR for the client install)
+        run: |
+          set -euo pipefail
+          set -a; source "$GITHUB_WORKSPACE/caller/${{ inputs.profile }}"; set +a
+          echo "PG_CLIENT_MAJOR=${PG_CLIENT_MAJOR:-17}" >> "$GITHUB_ENV"
+
+      - uses: ./engine/.github/actions/setup-tools
+        with:
+          pg-client-major: ${{ env.PG_CLIENT_MAJOR }}
+
+      - name: Restore drill
+        env:
+          PROFILE: ${{ github.workspace }}/caller/${{ inputs.profile }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          DRILL_DATABASE_URL: postgres://postgres:drill@localhost:5432/postgres?sslmode=disable
+          PG_LIVE_DATABASE_URL: ${{ secrets.PG_BACKUP_DATABASE_URL }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL: ${{ vars.SLACK_CHANNEL }}
+          AGE_IDENTITY: ${{ secrets.AGE_IDENTITY }}
+        run: bash engine/scripts/restore-drill-pg.sh

@@ -1,0 +1,73 @@
+name: pg-backup (reusable)
+
+# Reusable off-site backup of a Postgres DB → Cloudflare R2 with GFS tiering. A consuming repo calls
+# this from a thin caller workflow that owns the cron schedule + secrets and passes its profile path.
+# GFS: every run → 2hourly/; the anchor-hour run is promoted to daily/weekly/monthly. Retention +
+# immutability are enforced by R2 lifecycle rules + bucket locks (see README), not by this workflow.
+
+on:
+  workflow_call:
+    inputs:
+      profile:
+        description: "Path (within the CALLER repo) to the profile .env, e.g. pg-backup/myproject.env"
+        type: string
+        required: true
+      gitfather_ref:
+        description: "Ref of this repo (the-gitfather) to run the scripts from."
+        type: string
+        required: false
+        default: main
+    secrets:
+      # Forwarded by the caller via `secrets: inherit`. Repo *variables* (R2_BUCKET, SLACK_CHANNEL)
+      # are inherited automatically and read via `vars.*` below.
+      PG_BACKUP_DATABASE_URL: { required: true }
+      R2_ACCOUNT_ID: { required: true }
+      R2_ACCESS_KEY_ID: { required: true }
+      R2_SECRET_ACCESS_KEY: { required: true }
+      SLACK_BOT_TOKEN: { required: false }
+      HEARTBEAT_URL: { required: false }
+      AGE_RECIPIENT: { required: false }
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout caller repo (holds the profile)
+        uses: actions/checkout@v4
+        with:
+          path: caller
+
+      - name: Checkout the-gitfather (holds the scripts)
+        uses: actions/checkout@v4
+        with:
+          repository: simonhac/the-gitfather
+          ref: ${{ inputs.gitfather_ref }}
+          path: engine
+
+      - name: Read profile (PG_CLIENT_MAJOR for the client install)
+        run: |
+          set -euo pipefail
+          set -a; source "$GITHUB_WORKSPACE/caller/${{ inputs.profile }}"; set +a
+          echo "PG_CLIENT_MAJOR=${PG_CLIENT_MAJOR:-17}" >> "$GITHUB_ENV"
+
+      - uses: ./engine/.github/actions/setup-tools
+        with:
+          pg-client-major: ${{ env.PG_CLIENT_MAJOR }}
+
+      - name: Verify pg_dump version
+        run: pg_dump --version
+
+      - name: Dump + upload to R2
+        env:
+          PROFILE: ${{ github.workspace }}/caller/${{ inputs.profile }}
+          PG_BACKUP_DATABASE_URL: ${{ secrets.PG_BACKUP_DATABASE_URL }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL: ${{ vars.SLACK_CHANNEL }}
+          HEARTBEAT_URL: ${{ secrets.HEARTBEAT_URL }}
+          AGE_RECIPIENT: ${{ secrets.AGE_RECIPIENT }}
+        run: bash engine/scripts/backup-pg-to-r2.sh

@@ -1,0 +1,43 @@
+name: Set up backup tools
+description: Install a pinned rclone + jq, and (optionally) the PostgreSQL client of a given major version.
+
+inputs:
+  pg-client-major:
+    description: "PostgreSQL client major version to install (e.g. 17). Leave empty to skip pg client install."
+    required: false
+    default: ""
+  rclone-version:
+    description: "rclone version to pin."
+    required: false
+    default: "v1.74.3"
+
+runs:
+  using: composite
+  steps:
+    - name: Install rclone + jq (+ optional pg client)
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq jq
+
+        if [ -n "${{ inputs.pg-client-major }}" ]; then
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq "postgresql-client-${{ inputs.pg-client-major }}"
+          # pg_wrapper otherwise defaults to the runner's preinstalled (older) client, which refuses to
+          # dump/restore a newer server ("server version mismatch"). Put the requested binaries first.
+          echo "/usr/lib/postgresql/${{ inputs.pg-client-major }}/bin" >> "$GITHUB_PATH"
+        fi
+
+        # Pin a current rclone — Ubuntu's apt rclone (1.60.x) logs a spurious "NotImplemented" on each
+        # R2 upload and rejects streaming (rcat) uploads outright.
+        RCLONE_VERSION="${{ inputs.rclone-version }}"
+        curl -fsSL -o /tmp/rclone.zip "https://downloads.rclone.org/${RCLONE_VERSION}/rclone-${RCLONE_VERSION}-linux-amd64.zip"
+        unzip -q -j /tmp/rclone.zip "*/rclone" -d /tmp/rclone-bin
+        sudo install -m 755 /tmp/rclone-bin/rclone /usr/local/bin/rclone
+        rclone version | head -1
