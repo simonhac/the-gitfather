@@ -17,16 +17,12 @@ on:
         type: string
         required: false
         default: main
-    secrets:
-      # Forwarded by the caller via `secrets: inherit`. Repo *variables* (R2_BUCKET, SLACK_CHANNEL)
-      # are inherited automatically and read via `vars.*` below.
-      PG_BACKUP_DATABASE_URL: { required: true }
-      R2_ACCOUNT_ID: { required: true }
-      R2_ACCESS_KEY_ID: { required: true }
-      R2_SECRET_ACCESS_KEY: { required: true }
-      SLACK_BOT_TOKEN: { required: false }
-      HEARTBEAT_URL: { required: false }
-      AGE_RECIPIENT: { required: false }
+    # Secrets are forwarded by the caller via `secrets: inherit` and read below via the `secrets`
+    # context — they are intentionally NOT declared here: declaring required secrets trips a
+    # "required, but not provided" validation error under cross-repo `secrets: inherit`.
+    # Expected (caller-provided): PG_BACKUP_DATABASE_URL, R2_ACCOUNT_ID, R2_ACCESS_KEY_ID,
+    # R2_SECRET_ACCESS_KEY (required); SLACK_BOT_TOKEN, HEARTBEAT_URL, AGE_RECIPIENT (optional).
+    # Repo *variables* (R2_BUCKET, SLACK_CHANNEL) are inherited automatically and read via `vars.*`.
 
 jobs:
   backup:

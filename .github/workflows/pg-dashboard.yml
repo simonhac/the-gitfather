@@ -15,12 +15,9 @@ on:
         type: string
         required: false
         default: main
-    secrets:
-      R2_ACCOUNT_ID: { required: true }
-      R2_ACCESS_KEY_ID: { required: true }            # private dump bucket (read the logs)
-      R2_SECRET_ACCESS_KEY: { required: true }
-      DASHBOARD_R2_ACCESS_KEY_ID: { required: true }  # public dashboard bucket (write index.html)
-      DASHBOARD_R2_SECRET_ACCESS_KEY: { required: true }
+    # Forwarded via the caller's `secrets: inherit` (not declared — see note in pg-backup.yml).
+    # Expected: R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY (private dump bucket — read the
+    # logs); DASHBOARD_R2_ACCESS_KEY_ID, DASHBOARD_R2_SECRET_ACCESS_KEY (public dashboard bucket — write).
 
 jobs:
   publish:

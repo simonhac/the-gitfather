@@ -15,13 +15,10 @@ on:
         type: string
         required: false
         default: main
-    secrets:
-      PG_BACKUP_DATABASE_URL: { required: true }   # used read-only as the live row-count reference
-      R2_ACCOUNT_ID: { required: true }
-      R2_ACCESS_KEY_ID: { required: true }
-      R2_SECRET_ACCESS_KEY: { required: true }
-      SLACK_BOT_TOKEN: { required: false }
-      AGE_IDENTITY: { required: false }            # required only if backups are .age-encrypted
+    # Forwarded via the caller's `secrets: inherit` (not declared — see note in pg-backup.yml).
+    # Expected: PG_BACKUP_DATABASE_URL (read-only live row-count reference), R2_ACCOUNT_ID,
+    # R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY (required); SLACK_BOT_TOKEN, AGE_IDENTITY (optional;
+    # AGE_IDENTITY only if backups are .age-encrypted).
 
 jobs:
   drill:
