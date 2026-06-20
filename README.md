@@ -377,3 +377,40 @@ warn in a vanilla Postgres — restore into a fresh instance of the same platfor
 See [`profiles/example.env`](profiles/example.env): `BACKUP_PREFIX`, `FILE_BASENAME`, `PG_DUMP_FLAGS`,
 `ENCRYPTION`, `PG_CLIENT_MAJOR`, `ANCHOR_HOUR_UTC`, `DRILL_SENTINEL_TABLE`, `DRILL_EXTRA_TABLES`,
 `MIN_RATIO`, `MIN_BYTES`, `STALE_HOURS`, `DISPLAY_TZ`, `SLACK_ALERT_MENTION`, `DASHBOARD_LABEL`.
+
+---
+
+## Troubleshooting
+
+### Every run fails instantly with `<VAR>: set <VAR>` (e.g. `PG_BACKUP_DATABASE_URL: set PG_BACKUP_DATABASE_URL`)
+
+The secrets are arriving **empty** — the script aborts at its pre-flight env check. The usual cause is
+using **`secrets: inherit`** in a caller that lives in a **different org/account** from this repo.
+
+> `secrets: inherit` only passes secrets to a reusable workflow **in the same organization or
+> enterprise**. This repo is public and owned by `simonhac`, so a consumer in any other org/account
+> gets *nothing* from `inherit`, and every secret reads as empty.
+
+**Fix:** pass each secret **explicitly** and thread non-secret config as inputs — see
+[Wiring a consuming repo](#2-add-the-caller-workflows-githubworkflows-in-your-repo). Only use
+`secrets: inherit` if your caller is in the **same org** as this repo.
+
+A useful sanity check: if `vars.R2_BUCKET` etc. also read empty, the `vars` context isn't crossing the
+owner boundary either — which is why the callers pass bucket/channel names as inputs rather than reading
+`vars.*` inside the reusable workflow.
+
+### Backups are failing but Slack shows nothing (only the dead-man's-switch paged)
+
+This is expected, not a second bug. The Slack daily row is **in-band** — it's written *by the backup
+script*, so it can only report failures the script reaches far enough to handle (a failed `pg_dump`,
+a bad upload, a too-small dump). Failures *before* that point — empty secrets, a workflow that won't
+start, a runner that dies, the cron not firing — never reach the Slack code, and the staleness check
+(also in-band) can be knocked out by the same root cause. The **out-of-band dead-man's-switch**
+(`HEARTBEAT_URL` → healthchecks.io etc.) is the catch-all for exactly these cases: it pages on the
+*absence* of a success ping, independent of GitHub. Treat a healthchecks alarm with a quiet Slack row
+as "the wiring/secrets/runner is broken," and check the Actions run logs.
+
+### `Unrecognized named-value: 'vars'` when validating a workflow
+
+You have a `${{ … }}` expression inside a `workflow_call` input `description:` — GitHub evaluates
+expressions there, where `vars`/`secrets` aren't valid contexts. Use plain text in descriptions.
