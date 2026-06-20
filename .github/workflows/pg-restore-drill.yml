@@ -79,7 +79,18 @@ jobs:
         with:
           pg-client-major: ${{ env.PG_CLIENT_MAJOR }}
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: engine/package-lock.json
+
+      - name: Install engine deps
+        run: npm ci
+        working-directory: engine
+
       - name: Restore drill
+        working-directory: engine
         env:
           PROFILE: ${{ github.workspace }}/caller/${{ inputs.profile }}
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
@@ -92,4 +103,4 @@ jobs:
           SLACK_CHANNEL: ${{ inputs.slack_channel }}
           AGE_IDENTITY: ${{ secrets.AGE_IDENTITY }}
           ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
-        run: bash engine/scripts/restore-drill-pg.sh
+        run: npx tsx scripts/restore-drill-pg.ts

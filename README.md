@@ -13,21 +13,22 @@ environment (GitHub secrets), never from the repo. See [Where this fits: 3-2-1-1
 ```
 the-gitfather/
   scripts/
-    backup-pg-to-r2.sh    # dump → (encrypt) → upload 2hourly/ → promote to daily/weekly/monthly
-    restore-drill-pg.sh   # pull newest → restore into a throwaway → assert row counts
-    check-staleness.sh    # alert if no fresh backup landed recently; self-heal a missed tick
+    backup-pg-to-r2.ts    # dump → (encrypt) → upload 2hourly/ → promote to daily/weekly/monthly
+    restore-drill-pg.ts   # pull newest → restore into a throwaway → assert row counts
+    check-staleness.ts    # alert if no fresh backup landed recently; self-heal a missed tick
     build-dashboard.ts    # render the static backup-history dashboard from the R2 run-logs
     runlog.ts             # append-only run/verification log in R2 (the dashboard's source of truth)
-    lib/{slack.sh, backupTypes.ts, backupHistory.ts}
+    lib/                  # slack, proc (subprocess helpers), profile, schedule, backupTypes, backupHistory (all .ts)
+    __tests__/            # unit + bash-parity tests (node:test via tsx)
   dashboard/              # single-file static dashboard (template + SVG heatmap renderer)
   profiles/example.env    # copy this into YOUR repo and edit
   .github/
     workflows/            # REUSABLE (on: workflow_call): pg-backup, pg-restore-drill,
                           #   pg-staleness-check, pg-dashboard
-    actions/setup-tools   # composite: pinned rclone + jq (+ optional pg client)
+    actions/setup-tools   # composite: pinned rclone (+ optional pg client)
 ```
 
-Built as a GitHub-Actions toolkit, but every script is runnable locally for testing.
+Built as a GitHub-Actions toolkit (TypeScript run via `tsx`), but every script is runnable locally for testing.
 
 ---
 
@@ -52,7 +53,7 @@ the honest mapping of what the-gitfather delivers:
 | **2** media | ❌ not provided | Every copy the tool writes lives on one medium / provider / failure domain (R2). "2 media" only exists incidentally because your prod DB lives elsewhere. |
 | **1** off-site | ✅ delivered | Dumps go to Cloudflare R2 — a different provider and location from your Postgres host. |
 | **1** immutable | ✅ delivered* | R2 bucket locks (WORM) + a no-delete CI token make the durable tiers immutable for 14 days against the primary threat (a leaked CI key). *It's immutable, not air-gapped — a full account takeover can strip the locks. See [Threat model](#threat-model). |
-| **0** errors | ✅ delivered | `restore-drill-pg.sh` restores the newest dump into a throwaway DB and asserts row counts, backed by the staleness check, Slack status, and an external dead-man's switch. |
+| **0** errors | ✅ delivered | `restore-drill-pg.ts` restores the newest dump into a throwaway DB and asserts row counts, backed by the staleness check, Slack status, and an external dead-man's switch. |
 
 **Net:** the tool nails the back half (**1-1-0**) and supplies **one off-site copy** toward the front
 half — it does not by itself give you 3 independent copies on 2 distinct media. To earn the full
@@ -324,6 +325,11 @@ a single `index.html`, and uploads it to the **separate public** dashboard bucke
 > links). The rich raw logs never leave the private bucket. To make the page itself private, front the
 > public bucket with a custom domain + Cloudflare Access — no code change.
 
+Set **`DASHBOARD_URL`** in the profile to hyperlink the daily Slack header's "`<basename> DB backup`"
+to the published page. The public hostname isn't derivable from the bucket name — fetch it once with
+`npx wrangler r2 bucket dev-url get <DASHBOARD_R2_BUCKET>` (managed `r2.dev` URL) or
+`npx wrangler r2 bucket domain list <DASHBOARD_R2_BUCKET>` (custom domain).
+
 **Build locally:**
 
 ```bash
@@ -337,15 +343,49 @@ npx tsx scripts/build-dashboard.ts --sample --out /tmp/dash/index.html   # sampl
 ## Running locally (before relying on CI)
 
 ```bash
+npm ci                                                   # one-time: installs tsx
 export PG_BACKUP_DATABASE_URL='postgresql://…:5432/…?sslmode=require'
 export R2_ACCOUNT_ID=… R2_BUCKET=<your-bucket> R2_ACCESS_KEY_ID=… R2_SECRET_ACCESS_KEY=…
 export SLACK_BOT_TOKEN=xoxb-… SLACK_CHANNEL=C0…          # optional
 # Run twice: the first posts the day's Slack message, the second UPDATES it with a 2nd tick.
-FORCE_TIERS="2hourly daily" PROFILE=profiles/example.env bash scripts/backup-pg-to-r2.sh
+FORCE_TIERS="2hourly daily" PROFILE=profiles/example.env npx tsx scripts/backup-pg-to-r2.ts
 ```
 
 Any local dump file lives under a tmp dir and is removed on exit — never commit a dump (it may contain
 PII).
+
+---
+
+## Config validation & `doctor`
+
+Every task validates its config (zod) at startup and **fails fast** with one aggregated report if any
+required variable is missing or malformed — before any dump, upload, or trigger. The grammars are
+strict where a typo is genuinely catchable and lenient where they can't prove validity:
+
+| Strict (catches typos) | Lenient (presence + light shape) |
+|---|---|
+| `ENCRYPTION` ∈ {`none`,`age`,`aes-gcm`} · `ANCHOR_HOUR_UTC` 0–23 · `MIN_RATIO` 0–1 · `STALE_HOURS` > 0 · `DISPLAY_TZ` (real IANA zone) · `FORCE_TIERS` ⊆ {2hourly,daily,weekly,monthly} · `SELF_HEAL`/`DRY_RUN` (1/0/true/false/yes/no/on/off) · `*_DATABASE_URL` scheme = `postgres(ql)://` | R2 account id / keys / secrets · bucket names (whitespace-free) · `AGE_RECIPIENT`/`AGE_IDENTITY` · Slack token/channel |
+
+Conditional rules are enforced too: `ENCRYPTION=age` ⇒ `AGE_RECIPIENT` (backup) / `AGE_IDENTITY`
+(drill); `SLACK_BOT_TOKEN` set ⇒ `SLACK_CHANNEL`. The report prints variable **names** only — never a
+value — so nothing secret reaches a log. Real credential/endpoint validity isn't guessed from a regex;
+it's proven by `doctor`'s live probes.
+
+`doctor` is a **read-only** preflight — *"is this consumer actually wired up?"* — for verifying a
+freshly-configured repo before go-live. It runs the **same** config schema, then probes the external
+clients (binaries on PATH, `pg_dump`/`pg_restore` version, R2 bucket reachable via `rclone lsf`,
+Postgres via `select 1`, Slack `auth.test`, `gh auth status`). It performs **no writes** — no dump, no
+upload, no `gh workflow run`, no Slack post — so it's safe against production creds.
+
+```bash
+npm run doctor -- backup           # one task: backup | drill | staleness | dashboard
+npm run doctor -- all              # every task's config + probes
+PROFILE=profiles/example.env npm run doctor -- backup   # ✓/⚠/✗ checklist; exit 0 iff all required pass
+```
+
+Optionally add a `doctor all` step to CI before the real task. It complements (doesn't replace)
+`build-dashboard`'s `--sample` and check-staleness's `DRY_RUN` — those exercise one task's dry path;
+`doctor` is the broader client preflight.
 
 ---
 
@@ -386,16 +426,17 @@ warn in a vanilla Postgres — restore into a fresh instance of the same platfor
 
 See [`profiles/example.env`](profiles/example.env): `BACKUP_PREFIX`, `FILE_BASENAME`, `PG_DUMP_FLAGS`,
 `ENCRYPTION`, `PG_CLIENT_MAJOR`, `ANCHOR_HOUR_UTC`, `DRILL_SENTINEL_TABLE`, `DRILL_EXTRA_TABLES`,
-`MIN_RATIO`, `MIN_BYTES`, `STALE_HOURS`, `DISPLAY_TZ`, `SLACK_ALERT_MENTION`, `DASHBOARD_LABEL`.
+`MIN_RATIO`, `MIN_BYTES`, `STALE_HOURS`, `DISPLAY_TZ`, `SLACK_ALERT_MENTION`, `DASHBOARD_LABEL`, `DASHBOARD_URL`.
 
 ---
 
 ## Troubleshooting
 
-### Every run fails instantly with `<VAR>: set <VAR>` (e.g. `PG_BACKUP_DATABASE_URL: set PG_BACKUP_DATABASE_URL`)
+### Every run fails instantly with `✗ config validation failed` (e.g. `expected string, received undefined → at PG_BACKUP_DATABASE_URL`)
 
-The secrets are arriving **empty** — the script aborts at its pre-flight env check. The usual cause is
-using **`secrets: inherit`** in a caller that lives in a **different org/account** from this repo.
+The secrets are arriving **empty** — the task aborts at its zod config pre-flight (see
+[Config validation & `doctor`](#config-validation--doctor)). The usual cause is using
+**`secrets: inherit`** in a caller that lives in a **different org/account** from this repo.
 
 > `secrets: inherit` only passes secrets to a reusable workflow **in the same organization or
 > enterprise**. This repo is public and owned by `simonhac`, so a consumer in any other org/account

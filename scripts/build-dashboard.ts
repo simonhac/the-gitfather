@@ -1,3 +1,4 @@
+import "./lib/bootEnv.js"; // first — loads $PROFILE (no-op if unset) before DISPLAY_TZ is read/baked
 // ─────────────────────────────────────────────────────────────────────────────
 // Build the static backup-history dashboard (a single self-contained index.html).
 //
@@ -19,6 +20,7 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { loadDashboardConfig } from "./lib/config.js";
 import type { LogRun, LogVerification, PublicPayload, BackupTier } from "./lib/backupTypes.js";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
@@ -33,8 +35,11 @@ const outPath = outIdx >= 0 ? argv[outIdx + 1] : join(SCRIPT_DIR, "../dashboard/
 const logdirIdx = argv.indexOf("--logdir");
 const logdir = logdirIdx >= 0 ? argv[logdirIdx + 1] : null; // read logs from a local dir instead of R2
 
-const label = process.env.DASHBOARD_LABEL || process.env.FILE_BASENAME || "database";
-const hideLinks = process.env.DASHBOARD_HIDE_RUN_LINKS === "1";
+// Validate + type config (zod). R2_BUCKET/FILE_BASENAME are required only when reading logs from R2
+// (i.e. not --sample/--logdir); DASHBOARD_R2_BUCKET only with --upload — the schema enforces both.
+const cfg = loadDashboardConfig({ fromR2: !useSample && !logdir, upload });
+const label = cfg.DASHBOARD_LABEL ?? cfg.FILE_BASENAME ?? "database";
+const hideLinks = cfg.DASHBOARD_HIDE_RUN_LINKS;
 
 function readLogDir(dir: string): { runs: LogRun[]; verifications: LogVerification[] } {
   const runs: LogRun[] = [];
@@ -62,8 +67,8 @@ function readLogDir(dir: string): { runs: LogRun[]; verifications: LogVerificati
 }
 
 function downloadLogsFromR2(): { runs: LogRun[]; verifications: LogVerification[] } {
-  const bucket = process.env.R2_BUCKET;
-  const basename = process.env.FILE_BASENAME;
+  const bucket = cfg.R2_BUCKET; // schema-required when fromR2 (this path); guard kept for the type
+  const basename = cfg.FILE_BASENAME;
   if (!bucket || !basename) throw new Error("R2_BUCKET / FILE_BASENAME must be set to read logs from R2");
   const dest = mkdtempSync(join(tmpdir(), "pg-log-"));
   execFileSync(
@@ -123,7 +128,7 @@ async function main(): Promise<void> {
   console.log(`dashboard: wrote ${outPath} (${(html.length / 1024).toFixed(0)} KB)`);
 
   if (upload) {
-    const dbucket = process.env.DASHBOARD_R2_BUCKET;
+    const dbucket = cfg.DASHBOARD_R2_BUCKET; // schema-required with --upload; guard kept for the type
     if (!dbucket) throw new Error("DASHBOARD_R2_BUCKET must be set to --upload");
     execFileSync(
       "rclone",

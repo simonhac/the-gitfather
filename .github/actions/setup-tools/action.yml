@@ -1,5 +1,5 @@
 name: Set up backup tools
-description: Install a pinned rclone + jq, and (optionally) the PostgreSQL client of a given major version.
+description: Install a pinned rclone, and (optionally) the PostgreSQL client of a given major version.
 
 inputs:
   pg-client-major:
@@ -14,12 +14,10 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Install rclone + jq (+ optional pg client)
+    - name: Install rclone (+ optional pg client)
       shell: bash
       run: |
         set -euo pipefail
-        sudo apt-get update -qq
-        sudo apt-get install -y -qq jq
 
         if [ -n "${{ inputs.pg-client-major }}" ]; then
           sudo install -d /usr/share/postgresql-common/pgdg
