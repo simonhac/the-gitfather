@@ -6,7 +6,12 @@
   "description": "Off-site, GFS-retained, monitored, restore-verified Postgres backups → Cloudflare R2 (profile-driven, project-agnostic).",
   "scripts": {
     "dashboard": "tsx scripts/build-dashboard.ts",
-    "typecheck": "tsc --noEmit"
+    "doctor": "tsx scripts/doctor.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test scripts/__tests__/*.test.ts"
+  },
+  "dependencies": {
+    "zod": "^4.0.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

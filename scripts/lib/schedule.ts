@@ -1,0 +1,41 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Pure GFS scheduling helpers — extracted so the UTC tier math (the easiest thing to
+// get subtly wrong) is unit-testable. All computed in UTC, matching the bash scripts.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * 🖐️ manual-run predicate: a GitHub "workflow_dispatch" OR a local run (no GH event at all).
+ * A scheduled cron run (GITHUB_EVENT_NAME=schedule) is NOT manual. Mirrors the bash case glob
+ * `""|workflow_dispatch`. The self-heal catch-up arrives as workflow_dispatch → correctly manual.
+ */
+export function isManualRun(eventName: string | undefined): boolean {
+  return eventName === undefined || eventName === "" || eventName === "workflow_dispatch";
+}
+
+/**
+ * Tiers this run belongs to. Always 2hourly; the anchor-hour run is also daily, +weekly on Sunday,
+ * +monthly on the 1st — all in UTC. A non-empty `forced` (FORCE_TIERS) overrides the computation.
+ * NB: bash `%u` makes Sunday=7; JS getUTCDay() makes Sunday=0 — hence the `=== 0` check.
+ */
+export function computeTiers(now: Date, anchorHour: number, forced: string[] = []): string[] {
+  if (forced.length) return forced;
+  const tiers = ["2hourly"];
+  if (now.getUTCHours() === anchorHour) {
+    tiers.push("daily");
+    if (now.getUTCDay() === 0) tiers.push("weekly");
+    if (now.getUTCDate() === 1) tiers.push("monthly");
+  }
+  return tiers;
+}
+
+/** Epoch ms for a `YYYYMMDDTHHMMSSZ` stamp, parsed strictly as UTC (NaN if malformed). */
+export function stampToEpochMs(stamp: string): number {
+  return Date.UTC(
+    Number(stamp.slice(0, 4)),
+    Number(stamp.slice(4, 6)) - 1,
+    Number(stamp.slice(6, 8)),
+    Number(stamp.slice(9, 11)),
+    Number(stamp.slice(11, 13)),
+    Number(stamp.slice(13, 15)),
+  );
+}

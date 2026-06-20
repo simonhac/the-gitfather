@@ -65,7 +65,18 @@ jobs:
 
       - uses: ./engine/.github/actions/setup-tools
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: engine/package-lock.json
+
+      - name: Install engine deps
+        run: npm ci
+        working-directory: engine
+
       - name: Staleness check
+        working-directory: engine
         env:
           PROFILE: ${{ github.workspace }}/caller/${{ inputs.profile }}
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
@@ -76,4 +87,4 @@ jobs:
           SLACK_CHANNEL: ${{ inputs.slack_channel }}
           BACKUP_WORKFLOW: ${{ inputs.backup_workflow }}
           GH_TOKEN: ${{ github.token }}   # self-heal: `gh workflow run <backup_workflow>` on a missed tick
-        run: bash engine/scripts/check-staleness.sh
+        run: npx tsx scripts/check-staleness.ts
