@@ -3,13 +3,17 @@
 // get subtly wrong) is unit-testable. All computed in UTC, matching the bash scripts.
 // ─────────────────────────────────────────────────────────────────────────────
 
+import type { RunOrigin } from "./backupTypes.js";
+
 /**
- * 🖐️ manual-run predicate: a GitHub "workflow_dispatch" OR a local run (no GH event at all).
- * A scheduled cron run (GITHUB_EVENT_NAME=schedule) is NOT manual. Mirrors the bash case glob
- * `""|workflow_dispatch`. The self-heal catch-up arrives as workflow_dispatch → correctly manual.
+ * Classify a run's origin for the Slack-row marker. `eventName` = GITHUB_EVENT_NAME; `reason` =
+ * BACKUP_TRIGGER (threaded from the caller's workflow_dispatch `reason` input). A scheduled cron run →
+ * "schedule" (no marker). Anything else (workflow_dispatch / local) → "manual", unless the self-heal
+ * tagged it `reason=self-heal` → "self-heal". Supersedes the old isManualRun boolean.
  */
-export function isManualRun(eventName: string | undefined): boolean {
-  return eventName === undefined || eventName === "" || eventName === "workflow_dispatch";
+export function runOrigin(eventName: string | undefined, reason: string | undefined): RunOrigin {
+  if (eventName === "schedule") return "schedule";
+  return reason === "self-heal" ? "self-heal" : "manual";
 }
 
 /**

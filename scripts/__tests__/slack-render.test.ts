@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { renderDailyText, dailyLabel, dashboardLink, type DailyState } from "../lib/slack.js";
+import type { RunOrigin } from "../lib/backupTypes.js";
 
 // Parity fixtures captured from the original bash _slack_daily_text (lib/slack.sh) — see
 // fixtures/render-cases.json. States are PAST-dated so every 2-hourly bucket is "due"
@@ -60,4 +61,27 @@ test("renderDailyText today: a filled bucket suppresses its ⬜", () => {
   };
   // bucket 1 (02:00) is filled → only 00:00 and 04:00 remain as due-empty placeholders.
   assert.equal(renderDailyText(state, now), "*H*\n⬜ 00:00  ·  ✅ 02:00  ·  ⬜ 04:00");
+});
+
+test("renderDailyText: origin drives the marker", () => {
+  const base = { channel: "", ts: "T", date: "2026-06-19", header: "*H*" };
+  const at = (o: RunOrigin): string =>
+    renderDailyText(
+      { ...base, entries: [{ label: "02:00", ok: true, marker: "", origin: o }] },
+      new Date(Date.UTC(2026, 5, 19, 5, 30, 0)),
+    );
+  assert.match(at("schedule"), /· {2}✅ 02:00/);
+  assert.match(at("manual"), /· {2}🖐️ ✅ 02:00/);
+  assert.match(at("self-heal"), /· {2}🩹 ✅ 02:00/);
+});
+
+test("renderDailyText: legacy manual:true (no origin) still renders 🖐️", () => {
+  const s: DailyState = {
+    channel: "",
+    ts: "T",
+    date: "2026-06-19",
+    header: "*H*",
+    entries: [{ label: "02:00", ok: true, marker: "", manual: true }],
+  };
+  assert.match(renderDailyText(s, new Date(Date.UTC(2026, 5, 19, 5, 30, 0))), /🖐️ ✅ 02:00/);
 });

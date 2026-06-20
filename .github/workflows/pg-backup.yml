@@ -26,6 +26,11 @@ on:
         type: string
         required: false
         default: ""
+      trigger:
+        description: "Run-origin tag for the Slack row: schedule | manual | self-heal (the caller derives it)."
+        type: string
+        required: false
+        default: ""
     # Secrets are passed EXPLICITLY by the caller (not `secrets: inherit`): inherit only works when the
     # called workflow is in the same org/enterprise, and this repo is owned by a different account than
     # its consumers. Non-secret config (bucket, channel) is threaded via inputs above for the same
@@ -99,6 +104,7 @@ jobs:
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL: ${{ inputs.slack_channel }}
+          BACKUP_TRIGGER: ${{ inputs.trigger }}
           HEARTBEAT_URL: ${{ secrets.HEARTBEAT_URL }}
           AGE_RECIPIENT: ${{ secrets.AGE_RECIPIENT }}
           ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}

@@ -8,15 +8,20 @@
     "dashboard": "tsx scripts/build-dashboard.ts",
     "doctor": "tsx scripts/doctor.ts",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test scripts/__tests__/*.test.ts"
+    "lint": "eslint .",
+    "test": "tsx --test scripts/__tests__/*.test.ts",
+    "prepare": "git config core.hooksPath .githooks || true"
   },
   "dependencies": {
     "zod": "^4.0.0"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/node": "^22.10.2",
     "esbuild": "^0.24.2",
+    "eslint": "^10.5.0",
     "tsx": "^4.19.2",
-    "typescript": "^5.7.2"
+    "typescript": "^5.7.2",
+    "typescript-eslint": "^8.61.1"
   }
 }

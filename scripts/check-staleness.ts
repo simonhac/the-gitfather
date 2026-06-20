@@ -103,7 +103,19 @@ async function main(): Promise<void> {
       process.exit(0);
     }
 
-    const code = await run("gh", ["workflow", "run", backupWorkflow], { stdio: "ignore" });
+    // Tag the catch-up as a self-heal so the Slack row shows 🩹 (not 🖐️). Tolerant of a caller that
+    // hasn't yet declared the `reason` workflow_dispatch input (cross-repo rollout): on a non-zero exit
+    // (e.g. HTTP 422 "Unexpected inputs"), retry once without -f — self-heal still fires, marked 🖐️.
+    let code = await run("gh", ["workflow", "run", backupWorkflow, "-f", "reason=self-heal"], { stdio: "ignore" });
+    if (code !== 0) {
+      // stdio:"ignore" swallowed gh's own error; surface a hint so a half-rolled-out caller (one missing
+      // the `reason` input) is diagnosable rather than silently degrading to a 🖐️ catch-up indefinitely.
+      process.stderr.write(
+        `note: \`gh workflow run ${backupWorkflow} -f reason=self-heal\` failed; retrying without -f ` +
+          `(caller may not yet declare the \`reason\` workflow_dispatch input — catch-up will show 🖐️, not 🩹).\n`,
+      );
+      code = await run("gh", ["workflow", "run", backupWorkflow], { stdio: "ignore" });
+    }
     if (code === 0) {
       await note(
         `🟡 PG backup STALE (${fileBasename}): ${msg} — triggered a catch-up backup (last run \`${last || "none"}\`). Will page if it doesn't recover.`,

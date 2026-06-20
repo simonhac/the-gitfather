@@ -113,7 +113,12 @@ name: My DB backup → R2          # keep this name — pg-dashboard's workflow_
 on:
   schedule:
     - cron: "0 */2 * * *"        # every 2 hours (UTC); the ANCHOR_HOUR_UTC run also promotes
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why this run fired; the self-heal passes 'self-heal' (drives the Slack-row marker)."
+        type: string
+        default: manual
 concurrency: { group: pg-backup, cancel-in-progress: false }
 jobs:
   backup:
@@ -122,6 +127,7 @@ jobs:
       profile: pg-backup/myproject.env
       r2_bucket: ${{ vars.R2_BUCKET }}
       slack_channel: ${{ vars.SLACK_CHANNEL }}
+      trigger: ${{ github.event_name == 'schedule' && 'schedule' || github.event.inputs.reason }}
     secrets:
       PG_BACKUP_DATABASE_URL: ${{ secrets.PG_BACKUP_DATABASE_URL }}
       R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
@@ -163,7 +169,8 @@ jobs:
 name: My DB staleness check
 on:
   schedule:
-    - cron: "20 * * * *"         # hourly, off the top of the hour
+    - cron: "20 * * * *"         # twice hourly, off the top of the hour, so one dropped
+    - cron: "50 * * * *"         # scheduler tick doesn't blind the watchdog for an hour+
   workflow_dispatch: {}
 concurrency: { group: pg-staleness-check, cancel-in-progress: false }
 jobs:
@@ -304,9 +311,11 @@ Setup: create a Slack app → **Bot Token Scopes**: `chat:write` → install →
 ### Dead-man's-switch (optional, recommended)
 
 The only watchdog that runs *outside* GitHub, so it catches the scheduled workflow **not firing at all**
-(Actions cron is best-effort). Create a check (e.g. [healthchecks.io](https://healthchecks.io)) with a
-period of ~2 h + grace ~3 h, wire its Slack/email, and put its ping URL in `HEARTBEAT_URL`. The backup
-pings it on success; its absence pages independently of GitHub.
+(Actions cron is best-effort — it delays and occasionally drops ticks entirely). Create a check (e.g.
+[healthchecks.io](https://healthchecks.io)) with a period of ~2 h + grace ~3 h, and wire it to a **loud**
+channel you actually watch (Slack with a mention, SMS/PagerDuty — not just an email that buries) — this is
+the alert that fires when GitHub is the thing that's broken. Put its ping URL in `HEARTBEAT_URL`; the
+backup pings it on success, so its absence pages independently of GitHub.
 
 ---
 
