@@ -18,11 +18,11 @@ on:
         required: false
         default: main
       r2_bucket:
-        description: "Private R2 dump bucket name (caller passes ${{ vars.R2_BUCKET }})."
+        description: "Private R2 dump bucket name (caller passes vars.R2_BUCKET)."
         type: string
         required: true
       slack_channel:
-        description: "Slack channel id for the status row (caller passes ${{ vars.SLACK_CHANNEL }}); empty disables Slack."
+        description: "Slack channel id for the status row (caller passes vars.SLACK_CHANNEL); empty disables Slack."
         type: string
         required: false
         default: ""

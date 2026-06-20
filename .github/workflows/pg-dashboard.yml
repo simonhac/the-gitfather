@@ -16,11 +16,11 @@ on:
         required: false
         default: main
       r2_bucket:
-        description: "Private R2 dump bucket name to read logs from (caller passes ${{ vars.R2_BUCKET }})."
+        description: "Private R2 dump bucket name to read logs from (caller passes vars.R2_BUCKET)."
         type: string
         required: true
       dashboard_r2_bucket:
-        description: "Public R2 dashboard bucket name to write index.html to (caller passes ${{ vars.DASHBOARD_R2_BUCKET }})."
+        description: "Public R2 dashboard bucket name to write index.html to (caller passes vars.DASHBOARD_R2_BUCKET)."
         type: string
         required: true
     # Secrets passed EXPLICITLY by the caller (inherit only works same-org/enterprise; this repo is
