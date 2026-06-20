@@ -14,6 +14,7 @@
 #   DISPLAY_TZ           IANA tz for the daily row's date + HH:MM labels (default UTC)
 #   FILE_BASENAME        names the per-day state object and the message header
 #   R2_BUCKET + the RCLONE_CONFIG_R2_* exports set by the caller (for the daily-row state in R2)
+#   ALERT_WEBHOOK_URL    optional generic failure webhook (Slack-compatible POST); see alert_webhook()
 # ─────────────────────────────────────────────────────────────────────────────
 
 slack_enabled() {
@@ -59,6 +60,24 @@ slack_oneoff() {
   local text="$1"
   [ "${2:-}" = "mention" ] && text="${SLACK_ALERT_MENTION:-<!here>} ${text}"
   slack_post "$text" >/dev/null
+}
+
+# alert_webhook <text> — optional generic failure webhook, INDEPENDENT of the bot. Posts a
+# Slack-compatible {"text":…} to $ALERT_WEBHOOK_URL: a no-bot fallback, or a redundant failure channel
+# into a host app's existing incoming webhook when the bot is also configured. Best-effort (never aborts
+# the caller). Unlike the daily row it can't update in place, so callers fire it on FAILURE only — a
+# per-run success post would be spam. No-op when ALERT_WEBHOOK_URL is unset.
+alert_webhook() {
+  [ -n "${ALERT_WEBHOOK_URL:-}" ] || return 0
+  local payload
+  if command -v jq >/dev/null 2>&1; then
+    payload="$(jq -nc --arg t "$1" '{text:$t}')"
+  else
+    local safe="${1//\"/\'}"; safe="${safe//$'\n'/ }"   # keep the JSON valid without jq
+    payload="{\"text\":\"${safe}\"}"
+  fi
+  curl -fsS -m 10 -X POST -H 'Content-Type: application/json' --data "$payload" \
+    "$ALERT_WEBHOOK_URL" >/dev/null 2>&1 || true
 }
 
 # _rclone_try <rclone argv…> → echoes stdout and returns 0 on the first success; retries with backoff;

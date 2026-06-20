@@ -39,6 +39,8 @@ on:
         required: false
       AGE_IDENTITY:             # only if backups are .age-encrypted
         required: false
+      ALERT_WEBHOOK_URL:        # optional generic failure webhook (Slack-compatible); redundant to the bot
+        required: false
 
 jobs:
   drill:
@@ -89,4 +91,5 @@ jobs:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL: ${{ inputs.slack_channel }}
           AGE_IDENTITY: ${{ secrets.AGE_IDENTITY }}
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
         run: bash engine/scripts/restore-drill-pg.sh

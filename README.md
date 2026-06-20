@@ -122,6 +122,7 @@ jobs:
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}   # optional
       HEARTBEAT_URL: ${{ secrets.HEARTBEAT_URL }}       # optional
+      ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}   # optional failure webhook (no-bot fallback / redundant channel)
 ```
 
 `pg-restore-drill.yml`:
@@ -146,6 +147,7 @@ jobs:
       R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}   # optional
+      ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}   # optional failure webhook
 ```
 
 `pg-staleness-check.yml` — note the `permissions` block (the self-heal re-triggers your backup workflow):
@@ -173,6 +175,7 @@ jobs:
       R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}   # optional
+      ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}   # optional failure webhook
 ```
 
 `pg-dashboard.yml` — runs after each backup, isolated so a dashboard failure never affects backups:
@@ -216,6 +219,7 @@ The caller reads these and passes them in (explicit `secrets:` + `with:` inputs,
 | secret | `SLACK_BOT_TOKEN` | (optional) `xoxb-…`, scope `chat:write` |
 | **variable** | `SLACK_CHANNEL` | (optional) channel id `C…` |
 | secret | `HEARTBEAT_URL` | (optional) dead-man's-switch ping URL |
+| secret | `ALERT_WEBHOOK_URL` | (optional) generic **failure** webhook (Slack-compatible `{"text":…}` POST) — a no-bot alert fallback, or a redundant failure channel into a host app's existing incoming webhook when the bot is also set |
 | secret | `AGE_RECIPIENT` / `AGE_IDENTITY` | (optional) only when `ENCRYPTION=age` |
 | **variable** | `DASHBOARD_R2_BUCKET` | (dashboard) public bucket name |
 | secret | `DASHBOARD_R2_ACCESS_KEY_ID` / `DASHBOARD_R2_SECRET_ACCESS_KEY` | (dashboard) write-only token for the public bucket |
@@ -280,6 +284,12 @@ posts a loud, `@here`-mentioning threaded alert. Any **elapsed-but-empty** 2-hou
 just-missed slot surfaces within the hour. This needs a **bot token** (`chat.update`; incoming webhooks
 can't update). "Today's message" is persisted as a tiny JSON object at `_status/<basename>/<date>.json`
 in R2. If `SLACK_BOT_TOKEN`/`SLACK_CHANNEL` are unset, all Slack output is silently skipped.
+
+**Failure webhook (no-bot fallback).** Separately from the bot, set `ALERT_WEBHOOK_URL` to get a
+Slack-compatible `{"text":…}` POST on **failure only** (backup / restore-drill / staleness) — the simple
+alerting path when you don't run a bot, or a redundant failure channel into a host app's existing
+incoming webhook when you do. It can't update in place, so it fires on failures only (no per-run success
+spam). Unset → no-op.
 
 Setup: create a Slack app → **Bot Token Scopes**: `chat:write` → install → copy the `xoxb-…` token →
 **invite the bot to the channel** (`/invite @your-app`) → set `SLACK_BOT_TOKEN` + `SLACK_CHANNEL`.
