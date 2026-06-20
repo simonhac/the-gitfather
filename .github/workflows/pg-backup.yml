@@ -17,12 +17,34 @@ on:
         type: string
         required: false
         default: main
-    # Secrets are forwarded by the caller via `secrets: inherit` and read below via the `secrets`
-    # context — they are intentionally NOT declared here: declaring required secrets trips a
-    # "required, but not provided" validation error under cross-repo `secrets: inherit`.
-    # Expected (caller-provided): PG_BACKUP_DATABASE_URL, R2_ACCOUNT_ID, R2_ACCESS_KEY_ID,
-    # R2_SECRET_ACCESS_KEY (required); SLACK_BOT_TOKEN, HEARTBEAT_URL, AGE_RECIPIENT (optional).
-    # Repo *variables* (R2_BUCKET, SLACK_CHANNEL) are inherited automatically and read via `vars.*`.
+      r2_bucket:
+        description: "Private R2 dump bucket name (caller passes ${{ vars.R2_BUCKET }})."
+        type: string
+        required: true
+      slack_channel:
+        description: "Slack channel id for the status row (caller passes ${{ vars.SLACK_CHANNEL }}); empty disables Slack."
+        type: string
+        required: false
+        default: ""
+    # Secrets are passed EXPLICITLY by the caller (not `secrets: inherit`): inherit only works when the
+    # called workflow is in the same org/enterprise, and this repo is owned by a different account than
+    # its consumers. Non-secret config (bucket, channel) is threaded via inputs above for the same
+    # owner-independence reason (the `vars` context is not guaranteed across owners).
+    secrets:
+      PG_BACKUP_DATABASE_URL:
+        required: true
+      R2_ACCOUNT_ID:
+        required: true
+      R2_ACCESS_KEY_ID:
+        required: true
+      R2_SECRET_ACCESS_KEY:
+        required: true
+      SLACK_BOT_TOKEN:
+        required: false
+      HEARTBEAT_URL:
+        required: false
+      AGE_RECIPIENT:
+        required: false
 
 jobs:
   backup:
@@ -59,11 +81,11 @@ jobs:
           PROFILE: ${{ github.workspace }}/caller/${{ inputs.profile }}
           PG_BACKUP_DATABASE_URL: ${{ secrets.PG_BACKUP_DATABASE_URL }}
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-          R2_BUCKET: ${{ vars.R2_BUCKET }}
+          R2_BUCKET: ${{ inputs.r2_bucket }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-          SLACK_CHANNEL: ${{ vars.SLACK_CHANNEL }}
+          SLACK_CHANNEL: ${{ inputs.slack_channel }}
           HEARTBEAT_URL: ${{ secrets.HEARTBEAT_URL }}
           AGE_RECIPIENT: ${{ secrets.AGE_RECIPIENT }}
         run: bash engine/scripts/backup-pg-to-r2.sh

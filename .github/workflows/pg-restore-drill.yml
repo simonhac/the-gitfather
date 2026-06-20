@@ -15,10 +15,30 @@ on:
         type: string
         required: false
         default: main
-    # Forwarded via the caller's `secrets: inherit` (not declared — see note in pg-backup.yml).
-    # Expected: PG_BACKUP_DATABASE_URL (read-only live row-count reference), R2_ACCOUNT_ID,
-    # R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY (required); SLACK_BOT_TOKEN, AGE_IDENTITY (optional;
-    # AGE_IDENTITY only if backups are .age-encrypted).
+      r2_bucket:
+        description: "Private R2 dump bucket name (caller passes ${{ vars.R2_BUCKET }})."
+        type: string
+        required: true
+      slack_channel:
+        description: "Slack channel id (caller passes ${{ vars.SLACK_CHANNEL }}); empty disables Slack."
+        type: string
+        required: false
+        default: ""
+    # Secrets passed EXPLICITLY by the caller (inherit only works same-org/enterprise; this repo is
+    # owned by a different account than its consumers). Non-secret config is threaded via inputs.
+    secrets:
+      PG_BACKUP_DATABASE_URL:   # read-only, used only as the live row-count reference
+        required: true
+      R2_ACCOUNT_ID:
+        required: true
+      R2_ACCESS_KEY_ID:
+        required: true
+      R2_SECRET_ACCESS_KEY:
+        required: true
+      SLACK_BOT_TOKEN:
+        required: false
+      AGE_IDENTITY:             # only if backups are .age-encrypted
+        required: false
 
 jobs:
   drill:
@@ -61,12 +81,12 @@ jobs:
         env:
           PROFILE: ${{ github.workspace }}/caller/${{ inputs.profile }}
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-          R2_BUCKET: ${{ vars.R2_BUCKET }}
+          R2_BUCKET: ${{ inputs.r2_bucket }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           DRILL_DATABASE_URL: postgres://postgres:drill@localhost:5432/postgres?sslmode=disable
           PG_LIVE_DATABASE_URL: ${{ secrets.PG_BACKUP_DATABASE_URL }}
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-          SLACK_CHANNEL: ${{ vars.SLACK_CHANNEL }}
+          SLACK_CHANNEL: ${{ inputs.slack_channel }}
           AGE_IDENTITY: ${{ secrets.AGE_IDENTITY }}
         run: bash engine/scripts/restore-drill-pg.sh

@@ -15,9 +15,27 @@ on:
         type: string
         required: false
         default: main
-    # Forwarded via the caller's `secrets: inherit` (not declared — see note in pg-backup.yml).
-    # Expected: R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY (private dump bucket — read the
-    # logs); DASHBOARD_R2_ACCESS_KEY_ID, DASHBOARD_R2_SECRET_ACCESS_KEY (public dashboard bucket — write).
+      r2_bucket:
+        description: "Private R2 dump bucket name to read logs from (caller passes ${{ vars.R2_BUCKET }})."
+        type: string
+        required: true
+      dashboard_r2_bucket:
+        description: "Public R2 dashboard bucket name to write index.html to (caller passes ${{ vars.DASHBOARD_R2_BUCKET }})."
+        type: string
+        required: true
+    # Secrets passed EXPLICITLY by the caller (inherit only works same-org/enterprise; this repo is
+    # owned by a different account than its consumers). Non-secret config is threaded via inputs.
+    secrets:
+      R2_ACCOUNT_ID:
+        required: true
+      R2_ACCESS_KEY_ID:                 # private dump bucket — read the logs
+        required: true
+      R2_SECRET_ACCESS_KEY:
+        required: true
+      DASHBOARD_R2_ACCESS_KEY_ID:       # public dashboard bucket — write index.html
+        required: true
+      DASHBOARD_R2_SECRET_ACCESS_KEY:
+        required: true
 
 jobs:
   publish:
@@ -49,10 +67,10 @@ jobs:
       - name: Build + publish dashboard
         env:
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-          R2_BUCKET: ${{ vars.R2_BUCKET }}
+          R2_BUCKET: ${{ inputs.r2_bucket }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          DASHBOARD_R2_BUCKET: ${{ vars.DASHBOARD_R2_BUCKET }}
+          DASHBOARD_R2_BUCKET: ${{ inputs.dashboard_r2_bucket }}
           DASHBOARD_R2_ACCESS_KEY_ID: ${{ secrets.DASHBOARD_R2_ACCESS_KEY_ID }}
           DASHBOARD_R2_SECRET_ACCESS_KEY: ${{ secrets.DASHBOARD_R2_SECRET_ACCESS_KEY }}
           PROFILE: ${{ github.workspace }}/caller/${{ inputs.profile }}
