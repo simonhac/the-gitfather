@@ -5,7 +5,7 @@
 // inline <script> by build-dashboard.ts (esbuild) — no runtime deps, no network.
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { buildBackupGrid, summarize, formatInTz, slotApproxDate, WEEKDAY_LABELS } from "../scripts/lib/backupHistory.js";
+import { buildBackupGrid, summarize, formatInTz, slotApproxDate, storedBytes, r2MonthlyCostUsd, WEEKDAY_LABELS } from "../scripts/lib/backupHistory.js";
 import {
   SLOTS_PER_DAY,
   DAYS_PER_WEEK,
@@ -14,6 +14,7 @@ import {
   type PublicPayload,
   type BackupCellState,
   type BackupCell,
+  type SlotRun,
 } from "../scripts/lib/backupTypes.js";
 
 const SVGNS = "http://www.w3.org/2000/svg";
@@ -24,18 +25,20 @@ const LEFT_AXIS = 62; // fits "DD MMM YY" in monospace
 const TOP_AXIS = 20;
 const WEEKS = 58;
 const NOTCH = 3.5; // top-right corner bite that marks a multi-run slot
-const CELL_STROKE = "rgba(0,0,0,0.08)";
 const MONO = "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+
+const DARK = typeof matchMedia === "function" && matchMedia("(prefers-color-scheme: dark)").matches;
 
 const FILL: Record<Exclude<BackupCellState, "empty">, string> = {
   failed: "#e5484d",
-  expired: "#b8bfc9",
-  ok: "#1f8a54", // darker green — succeeded, still retained
-  verified: "#34c878", // brighter green — restore-verified
+  expired: DARK ? "#3a414e" : "#cdd3dc", // aged-out slot — recedes into the grid
+  ok: DARK ? "#2a9d63" : "#1f8a54", // succeeded, still retained
+  verified: DARK ? "#41d586" : "#2fb872", // brighter green — restore-verified
 };
-const EMPTY_FILL = "#f1f3f5";
-const GRID_BORDER = "#e4e7ec";
-const MUTED = "#6b7280";
+const EMPTY_FILL = DARK ? "#20242d" : "#eef0f4";
+const GRID_BORDER = DARK ? "#2a2f3a" : "#e3e6ec";
+const MUTED = DARK ? "#949cad" : "#677085";
+const CELL_STROKE = DARK ? "rgba(255,255,255,0.06)" : "rgba(16,24,40,0.08)";
 
 const TIER_LABEL: Record<string, string> = {
   "2hourly": "2-hourly", daily: "daily", weekly: "weekly", monthly: "monthly",
@@ -88,28 +91,43 @@ header.appendChild(
 app.appendChild(header);
 
 // ── Summary stats ────────────────────────────────────────────────────────────
+const stored = storedBytes(payload, now.getTime());
+const costMo = r2MonthlyCostUsd(stored);
+// R2 bills in decimal GB, so show stored in decimal GB too (keeps it consistent with Est. cost).
+const storedGb = stored / 1_000_000_000;
+const storedLabel = `${storedGb >= 100 ? storedGb.toFixed(0) : storedGb >= 10 ? storedGb.toFixed(1) : storedGb.toFixed(2)} GB`;
 const statsRow = elem("div", "stats");
-const statDefs: [string, string | number][] = [
-  ["Latest run", stats.latestLabel ?? "—"],
-  ["Verified", stats.verified],
-  ["Retained", stats.ok + stats.verified],
-  ["Expired", stats.expired],
-  ["Failed", stats.failed],
-  ["Total runs", stats.total],
+// Two tidy rows of four: top = recency + scale, bottom = the outcome breakdown.
+const statDefs: { label: string; value: string | number; hint?: string; cls?: string }[] = [
+  { label: "Latest run", value: stats.latestLabel ?? "—", cls: "text" },
+  { label: "Stored", value: storedLabel, hint: "Live data in R2 (decimal GB) across all GFS tier copies — each tier is a separate object." },
+  { label: "Est. cost", value: `$${costMo.toFixed(2)}/mo`, hint: "R2 Standard storage at $0.015/GB-month after the 10 GB-month free allowance; egress is free." },
+  { label: "Total runs", value: stats.total },
+  { label: "Verified", value: stats.verified, cls: stats.verified ? "pos" : undefined },
+  { label: "Retained", value: stats.ok + stats.verified },
+  { label: "Expired", value: stats.expired },
+  { label: "Failed", value: stats.failed, cls: stats.failed ? "bad" : undefined },
 ];
-for (const [label, value] of statDefs) {
+for (const { label, value, hint, cls } of statDefs) {
   const card = elem("div", "stat");
+  if (hint) card.title = hint;
   card.appendChild(elem("div", "stat-label", label));
-  card.appendChild(elem("div", "stat-value", String(value)));
+  card.appendChild(elem("div", `stat-value${cls ? ` ${cls}` : ""}`, String(value)));
   statsRow.appendChild(card);
 }
 app.appendChild(statsRow);
 
+// ── Heatmap card (legend + grid share one surface) ───────────────────────────
+const card = elem("div", "card");
+app.appendChild(card);
+
 // ── Legend ───────────────────────────────────────────────────────────────────
 const legend = elem("div", "legend");
+const MIXED_SWATCH = `linear-gradient(to top right, ${FILL.failed} 0 50%, ${FILL.ok} 50% 100%)`;
 const legendItems: [string, string, boolean][] = [
   ["Verified", FILL.verified, false],
   ["Backup OK", FILL.ok, false],
+  ["Mixed (ok + failed)", MIXED_SWATCH, false],
   ["Expired", FILL.expired, false],
   ["Failed", FILL.failed, false],
   ["No backup", EMPTY_FILL, true],
@@ -123,7 +141,7 @@ for (const [label, color, outline] of legendItems) {
   item.appendChild(document.createTextNode(label));
   legend.appendChild(item);
 }
-app.appendChild(legend);
+card.appendChild(legend);
 
 // ── Heatmap SVG ──────────────────────────────────────────────────────────────
 const gridWidth = COLS_PER_WEEK * PITCH;
@@ -132,7 +150,13 @@ const totalWidth = LEFT_AXIS + gridWidth + 2;
 const totalHeight = TOP_AXIS + gridHeight + 2;
 
 const scroll = elem("div", "scroll");
-const root = svg("svg", { width: totalWidth, height: totalHeight, class: "heatmap" }) as SVGSVGElement;
+// Scale-to-fit: a viewBox lets the grid shrink to the container width (never upscaling past
+// its natural size), so all 7 days are visible without horizontal scrolling.
+const root = svg("svg", {
+  viewBox: `0 0 ${totalWidth} ${totalHeight}`, width: "100%", preserveAspectRatio: "xMinYMin meet", class: "heatmap",
+}) as SVGSVGElement;
+root.style.maxWidth = `${totalWidth}px`;
+root.style.height = "auto";
 
 // Weekday headers
 WEEKDAY_LABELS.forEach((label, day) => {
@@ -203,19 +227,29 @@ grid.rows.forEach((row, r) => {
 });
 
 scroll.appendChild(root);
-app.appendChild(scroll);
+card.appendChild(scroll);
 
-// ── Tooltip (single cursor-following element) ────────────────────────────────
+// ── Hover tooltip + click-to-choose popover ──────────────────────────────────
+// Hover shows a cursor-following read-only tip. Clicking a slot opens its GitHub run;
+// when a slot holds several runs, clicking instead pins an interactive chooser so the
+// user can pick which run to open (each run is its own link).
 const tip = elem("div", "tip");
 tip.style.display = "none";
+const popover = elem("div", "tip pinned");
+popover.style.display = "none";
 document.body.appendChild(tip);
+document.body.appendChild(popover);
 
 let hoverCell: BackupCell | null = null;
+let pinned = false;
 
 root.addEventListener("mousemove", (e) => {
+  if (pinned) return; // chooser is open — leave it be
   const rect = root.getBoundingClientRect();
-  const col = Math.floor((e.clientX - rect.left - LEFT_AXIS) / PITCH);
-  const r = Math.floor((e.clientY - rect.top - TOP_AXIS) / PITCH);
+  // The SVG may be scaled to fit; map cursor px back into viewBox user units.
+  const scale = rect.width / totalWidth || 1;
+  const col = Math.floor(((e.clientX - rect.left) / scale - LEFT_AXIS) / PITCH);
+  const r = Math.floor(((e.clientY - rect.top) / scale - TOP_AXIS) / PITCH);
   if (col < 0 || col >= COLS_PER_WEEK || r < 0 || r >= grid.weeks) {
     hide();
     return;
@@ -223,21 +257,60 @@ root.addEventListener("mousemove", (e) => {
   const cell = grid.rows[r]?.cells.get(col) ?? null;
   hoverCell = cell;
   tip.innerHTML = cell ? cellHtml(cell) : emptyHtml(r, col);
-  root.style.cursor = latestUrl(cell) ? "pointer" : "default";
+  root.style.cursor = clickable(cell) ? "pointer" : "default";
   const left = Math.min(e.clientX + 14, window.innerWidth - 260);
   tip.style.left = `${left}px`;
   tip.style.top = `${e.clientY + 14}px`;
   tip.style.display = "block";
 });
 root.addEventListener("mouseleave", hide);
-root.addEventListener("click", () => {
-  const url = latestUrl(hoverCell);
+
+root.addEventListener("click", (e) => {
+  if (pinned) { closeChooser(); e.stopPropagation(); return; }
+  const cell = hoverCell;
+  if (!cell) return;
+  const linked = cell.runs.filter((sr) => sr.run.runUrl);
+  if (cell.runs.length > 1 && linked.length > 0) {
+    // Several runs in this slot — let the user choose which one to open.
+    openChooser(cell, e.clientX, e.clientY);
+    e.stopPropagation();
+    return;
+  }
+  const url = latestUrl(cell);
   if (url) window.open(url, "_blank", "noopener");
 });
 
-/** Run link of the latest run in a cell (cells are time-sorted), for click + cursor. */
+// Dismiss the chooser on link-click, outside-click, or Escape.
+popover.addEventListener("click", (e) => {
+  if ((e.target as HTMLElement).closest("a.tip-link")) closeChooser();
+});
+document.addEventListener("click", (e) => {
+  if (pinned && !popover.contains(e.target as Node)) closeChooser();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && pinned) closeChooser();
+});
+
+function openChooser(cell: BackupCell, x: number, y: number) {
+  hide();
+  popover.innerHTML = chooserHtml(cell);
+  popover.style.display = "block";
+  popover.style.left = `${Math.min(x + 14, window.innerWidth - 280)}px`;
+  popover.style.top = `${Math.min(y + 14, window.innerHeight - popover.offsetHeight - 12)}px`;
+  pinned = true;
+}
+function closeChooser() {
+  popover.style.display = "none";
+  pinned = false;
+}
+
+/** Run link of the latest run in a cell (cells are time-sorted), for the single-run click. */
 function latestUrl(cell: BackupCell | null): string | null {
   return cell ? cell.runs[cell.runs.length - 1].run.runUrl : null;
+}
+/** A cell is clickable if any of its runs has a GitHub run link. */
+function clickable(cell: BackupCell | null): boolean {
+  return !!cell && cell.runs.some((sr) => sr.run.runUrl != null);
 }
 
 function hide() {
@@ -272,7 +345,9 @@ function cellHtml(cell: BackupCell): string {
     if (sr.verification?.ok) lines.push(`<div class="tip-muted">Drill restored &amp; verified${sr.verification.ratio != null ? ` (${(sr.verification.ratio * 100).toFixed(0)}% of live rows)` : ""}.</div>`);
     if (!sr.run.ok) lines.push(`<div class="tip-fail">Backup failed.</div>`);
   }
-  if (latestUrl(cell)) lines.push(`<div class="tip-hint">Click to open the GitHub run ↗</div>`);
+  if (clickable(cell)) {
+    lines.push(`<div class="tip-hint">${cell.multiple ? "Click to choose a run to open ↗" : "Click to open the GitHub run ↗"}</div>`);
+  }
   return lines.join("");
 }
 function emptyHtml(r: number, col: number): string {
@@ -280,6 +355,25 @@ function emptyHtml(r: number, col: number): string {
   const slot = col % SLOTS_PER_DAY;
   const label = formatInTz(slotApproxDate(grid.rows[r].weekStartOrdinal, weekday, slot));
   return `<div class="tip-when">${esc(label)}</div><div class="tip-muted">No backup at this slot</div>`;
+}
+
+// Pinned chooser shown when a slot holds several runs: one clickable row per run.
+function runLink(sr: SlotRun): string {
+  const size = sr.run.bytes != null ? ` · ${formatBytes(sr.run.bytes)}` : "";
+  const label = `${dot(sr.state)}<span class="tip-run-label">${esc(sr.whenLabel)} · ${STATE_LABEL[sr.state]}${size}</span>`;
+  return sr.run.runUrl
+    ? `<a class="tip-link" href="${esc(sr.run.runUrl)}" target="_blank" rel="noopener">${label}<span class="tip-go">↗</span></a>`
+    : `<div class="tip-row">${label}<span class="tip-go tip-nolink">no run link</span></div>`;
+}
+function chooserHtml(cell: BackupCell): string {
+  const mixed = cell.hasFailure && cell.successState;
+  const lines = [
+    `<div class="tip-when">${cell.runs.length} runs this slot${mixed ? " — mixed" : ""}</div>`,
+    `<div class="tip-muted">Open a run on GitHub:</div>`,
+    ...cell.runs.map(runLink),
+    `<div class="tip-hint">Esc or click away to dismiss</div>`,
+  ];
+  return lines.join("");
 }
 
 // Footer: generated-at

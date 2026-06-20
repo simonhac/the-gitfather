@@ -127,6 +127,35 @@ export function deriveState(
   return verification?.ok ? "verified" : "ok";
 }
 
+/**
+ * Bytes currently sitting in R2. Each tier a run was promoted to is a separate object
+ * (the backup is server-side copied into 2hourly/daily/weekly/monthly), and each copy
+ * expires independently by its own lifecycle rule — so a run still contributes one
+ * copy's worth of bytes per tier whose retention window hasn't elapsed.
+ */
+export function storedBytes(payload: PublicPayload, now: number): number {
+  let total = 0;
+  for (const run of payload.runs) {
+    if (!run.ok || run.bytes == null) continue;
+    const start = Date.parse(run.t);
+    for (const tier of run.tiers) {
+      if (now < start + (TIER_RETENTION_DAYS[tier] ?? 0) * 86_400_000) total += run.bytes;
+    }
+  }
+  return total;
+}
+
+/** Cloudflare R2 Standard storage, USD per GB-month (https://developers.cloudflare.com/r2/pricing/). */
+export const R2_STORAGE_USD_PER_GB_MONTH = 0.015;
+/** R2 Standard free allowance, GB-month per month. */
+export const R2_FREE_GB_MONTH = 10;
+
+/** Estimated R2 storage cost per month for `bytes` at rest, after the free allowance. */
+export function r2MonthlyCostUsd(bytes: number): number {
+  const gb = bytes / 1_000_000_000; // R2 bills in decimal GB
+  return Math.max(0, gb - R2_FREE_GB_MONTH) * R2_STORAGE_USD_PER_GB_MONTH;
+}
+
 // ── Grid assembly ────────────────────────────────────────────────────────────
 
 export function buildBackupGrid(payload: PublicPayload, now: Date, weeks = 58): BackupGrid {

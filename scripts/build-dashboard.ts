@@ -135,6 +135,10 @@ async function main(): Promise<void> {
 }
 
 // ── Sample data (local preview only) ─────────────────────────────────────────
+// A deterministic 400-day history that exercises the full GFS picture: a 2-hourly
+// grandson run on every slot, promoted to daily/weekly/monthly on the 16:00-UTC
+// anchors (so the heatmap shows the green lifespan "staircase"), an organically
+// growing dump size, a sprinkle of isolated failures, and one believable outage.
 function makeSample(now: Date): { runs: LogRun[]; verifications: LogVerification[] } {
   let seed = 20260619;
   const rand = () => {
@@ -148,29 +152,72 @@ function makeSample(now: Date): { runs: LogRun[]; verifications: LogVerification
   const end = now.getTime();
   const start = end - 400 * 86_400_000;
   const first = Math.ceil(start / (2 * 3_600_000)) * 2 * 3_600_000;
+
+  // Dump size grows toward the present: a mid-size production DB ~2.2 GB at the window
+  // start, compounding ~0.2%/day to ~4.9 GB now, with a steady per-day wobble and a
+  // little intraday jitter (so the GB-stored / R2-cost figures are representative).
+  const BASE_BYTES = 2_200_000_000;
+  const DAILY_GROWTH = 0.002;
+  // Each run links to its own GitHub Actions run (distinct per run, like the real logs).
+  const ghRun = (ms: number) => `https://github.com/owner/repo/actions/runs/${16_000_000_000 + Math.floor(ms / 60_000)}`;
+
+  // One contiguous outage: a ~10-hour DB-connectivity failure centred ~5 days ago.
+  const outageStart = end - 5.4 * 86_400_000;
+  const outageEnd = end - 5.0 * 86_400_000;
+
   for (let t = first; t <= end; t += 2 * 3_600_000) {
     const d = new Date(t);
-    const ageDays = (end - t) / 86_400_000;
-    const incident = ageDays > 4.6 && ageDays < 5.0;
-    const failed = incident ? rand() < 0.5 : rand() < 0.015;
     const ts = d.toISOString().replace(".000", "");
+    const daysSinceStart = (t - start) / 86_400_000;
+
+    const inOutage = t >= outageStart && t <= outageEnd;
+    // ~0.6% isolated failures the rest of the time (transient hiccups, locks, …).
+    const failed = inOutage || rand() < 0.006;
     if (failed) {
-      runs.push({ ts, ok: false, tiers: [], bytes: null, key: null, runId: null, runUrl: null, error: "pg_dump: server closed the connection unexpectedly" });
+      const error = inOutage
+        ? "pg_dump: could not connect to server: Connection refused"
+        : "pg_dump: server closed the connection unexpectedly";
+      runs.push({ ts, ok: false, tiers: [], bytes: null, key: null, runId: null, runUrl: ghRun(t), error });
       continue;
     }
+
     const tiers: BackupTier[] = ["2hourly"];
     if (d.getUTCHours() === 16) {
       tiers.push("daily");
       if (d.getUTCDay() === 0) tiers.push("weekly");
       if (d.getUTCDate() === 1) tiers.push("monthly");
     }
-    runs.push({ ts, ok: true, tiers, bytes: 9_200_000 + Math.floor(ageDays * 1500), key: null, runId: null, runUrl: "https://github.com/owner/repo/actions", error: null });
+
+    const trend = BASE_BYTES * Math.pow(1 + DAILY_GROWTH, daysSinceStart);
+    const dayWobble = 1 + 0.025 * Math.sin(daysSinceStart / 6); // slow ±2.5% drift
+    const jitter = 1 + (rand() - 0.5) * 0.02; // ±1% intraday
+    const bytes = Math.round(trend * dayWobble * jitter);
+
+    runs.push({ ts, ok: true, tiers, bytes, key: null, runId: null, runUrl: ghRun(t), error: null });
   }
-  const daily = runs.filter((r) => r.ok && r.tiers.includes("daily")).map((r) => r.ts);
-  for (let i = 0; i < daily.length; i += 7) {
-    const drillRan = new Date(Date.parse(daily[i]) + 30 * 3_600_000);
+
+  // A couple of slots with more than one run, to exercise the multi-run rendering: when two
+  // runs land in the same 2-hour display bucket (a manual rerun, or a failure that's retried),
+  // the cell gets a corner notch — and a mix of success + failure splits it diagonally. Placed
+  // in the last ~2 days so the 2hourly copies are still retained (green), not aged-out grey.
+  const iso = (ms: number) => new Date(ms).toISOString().replace(".000", "");
+  const bucket = (hoursAgo: number) => Math.floor((end - hoursAgo * 3_600_000) / (2 * 3_600_000)) * 2 * 3_600_000;
+
+  // (a) Mixed slot: the scheduled run (already added by the loop, OK) plus a manual rerun ~40 min
+  //     later that failed → diagonal split (green/red) + notch.
+  const mixed = bucket(20) + 40 * 60_000;
+  runs.push({ ts: iso(mixed), ok: false, tiers: [], bytes: null, key: null, runId: null, runUrl: ghRun(mixed), error: "pg_dump: canceled statement due to lock_timeout" });
+
+  // (b) Multi-success slot: the scheduled run plus a successful manual rerun ~50 min later → notch.
+  const rerun = bucket(40) + 50 * 60_000;
+  runs.push({ ts: iso(rerun), ok: true, tiers: ["2hourly"], bytes: 4_840_000_000, key: null, runId: null, runUrl: ghRun(rerun), error: null });
+
+  // One restore drill per weekly anchor (Sunday daily backup), run ~30 h later. ~97% pass.
+  const weekly = runs.filter((r) => r.ok && r.tiers.includes("weekly")).map((r) => r.ts);
+  for (const verifiedTs of weekly) {
+    const drillRan = new Date(Date.parse(verifiedTs) + 30 * 3_600_000);
     if (drillRan.getTime() > end) continue;
-    verifications.push({ ts: drillRan.toISOString().replace(".000", ""), verifiedTs: daily[i], ok: rand() < 0.97, ratio: 0.97 + rand() * 0.03, runId: null, runUrl: null });
+    verifications.push({ ts: drillRan.toISOString().replace(".000", ""), verifiedTs, ok: rand() < 0.97, ratio: 0.97 + rand() * 0.03, runId: null, runUrl: null });
   }
   return { runs, verifications };
 }

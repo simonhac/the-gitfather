@@ -3,6 +3,12 @@
 > Off-site, **G**randfather-**F**ather-**S**on retained, monitored, restore-verified Postgres backups —
 > driven by GitHub Actions, stored on Cloudflare R2.
 
+<p align="center">
+  <img src="docs/dashboard.png" alt="the-gitfather backup-history dashboard — GFS heatmap with per-tier retention, storage and R2 cost" width="900">
+</p>
+
+<p align="center"><sub>The static <a href="#backup-history-dashboard">backup-history dashboard</a> — every 2-hourly backup over a 400-day GFS window, with restore-verified drills, storage and estimated R2 cost.</sub></p>
+
 A small, **profile-driven** tool any project can adopt: point it at a Postgres connection string and an
 R2 bucket and you get the **off-site, immutable, restore-verified** pillars of the **3-2-1-1-0** backup
 pattern (the *1-1-0*) — plus one independent off-site copy toward the *3-2* — with a daily Slack status
