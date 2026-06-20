@@ -137,6 +137,7 @@ export const backupSchema = z
     SLACK_BOT_TOKEN: opt(nonEmpty()),
     SLACK_CHANNEL: opt(nonEmpty()),
     DASHBOARD_URL: opt(z.url()),
+    ALERT_WEBHOOK_URL: opt(z.url()),
     DISPLAY_TZ: displayTz,
   })
   .superRefine(requireSlackChannel)
@@ -168,6 +169,7 @@ export const drillSchema = z
     PG_CLIENT_MAJOR: optInt(1, 99),
     SLACK_BOT_TOKEN: opt(nonEmpty()),
     SLACK_CHANNEL: opt(nonEmpty()),
+    ALERT_WEBHOOK_URL: opt(z.url()),
     DISPLAY_TZ: displayTz,
   })
   .superRefine(requireSlackChannel)
@@ -196,6 +198,7 @@ export const stalenessSchema = z
     DRY_RUN: boolIn(false),
     SLACK_BOT_TOKEN: opt(nonEmpty()),
     SLACK_CHANNEL: opt(nonEmpty()),
+    ALERT_WEBHOOK_URL: opt(z.url()),
     DISPLAY_TZ: displayTz,
   })
   .superRefine(requireSlackChannel);

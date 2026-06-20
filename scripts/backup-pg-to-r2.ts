@@ -29,7 +29,7 @@ import { loadBackupConfig } from "./lib/config.js";
 import { run, runToFile, pipeToFile, commandExists, bestEffort } from "./lib/proc.js";
 import { computeTiers, isManualRun } from "./lib/schedule.js";
 import { appendRun } from "./runlog.js";
-import { slackEnabled, slackPost, slackDailyRecord, dailyLabel } from "./lib/slack.js";
+import { slackEnabled, slackPost, slackDailyRecord, dailyLabel, alertWebhook } from "./lib/slack.js";
 import type { BackupTier } from "./lib/backupTypes.js";
 
 function pad2(n: number): string {
@@ -141,6 +141,7 @@ async function main(): Promise<void> {
         ),
       );
     }
+    await bestEffort("alert webhook", () => alertWebhook(`🔴 ${fileBasename} backup FAILED at ${label} — ${msg}`));
     await bestEffort("runlog fail", () => appendRun({ ts: runTsIso, ok: false, tiers: [], error: msg }));
     cleanup();
     process.exit(1);

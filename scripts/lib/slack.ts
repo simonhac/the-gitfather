@@ -22,6 +22,7 @@
 //   DISPLAY_TZ           IANA tz for the daily row's date + HH:MM labels (default UTC)
 //   FILE_BASENAME        names the per-day state object and the message header
 //   DASHBOARD_URL        if set, hyperlinks the daily header's "<basename> DB backup" to the dashboard
+//   ALERT_WEBHOOK_URL    optional generic failure webhook (Slack-compatible POST); see alertWebhook()
 //   R2_BUCKET + the RCLONE_CONFIG_R2_* exports set by the caller (for the daily-row state in R2)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -118,6 +119,32 @@ export async function slackOneoff(text: string, mention = false): Promise<void> 
   if (!slackEnabled()) return;
   const body = mention ? `${env("SLACK_ALERT_MENTION") || "<!here>"} ${text}` : text;
   await slackPost(body);
+}
+
+/**
+ * Optional generic failure webhook, INDEPENDENT of the bot. POSTs a Slack-compatible {"text":…} to
+ * ALERT_WEBHOOK_URL: a no-bot alert fallback, or a redundant failure channel into a host app's existing
+ * incoming webhook when the bot is also configured. Best-effort (never throws). Callers fire it on
+ * FAILURE only — it can't update in place, so a per-run success post would be spam. No-op when unset.
+ * Mirrors alert_webhook() in slack.sh (JSON.stringify replaces the jq / hand-escaped payload).
+ */
+export async function alertWebhook(text: string): Promise<void> {
+  const url = env("ALERT_WEBHOOK_URL");
+  if (!url) return;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10_000); // mirrors curl -m 10
+  try {
+    await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+      signal: controller.signal,
+    });
+  } catch {
+    /* best-effort — a failed alert must never mask the real failure */
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // ── R2 helpers for the daily-row state ───────────────────────────────────────

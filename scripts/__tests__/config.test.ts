@@ -143,6 +143,15 @@ test("DASHBOARD_URL: optional, but must be a URL when set", () => {
   assert.ok(!backupSchema.safeParse({ ...backupBase, DASHBOARD_URL: "not a url" }).success);
 });
 
+test("ALERT_WEBHOOK_URL: optional URL across backup/drill/staleness", () => {
+  const hook = "https://hooks.slack.com/services/T/B/x";
+  assert.ok(backupSchema.safeParse({ ...backupBase, ALERT_WEBHOOK_URL: hook }).success);
+  assert.ok(drillSchema.safeParse({ ...drillBase, ALERT_WEBHOOK_URL: hook }).success);
+  assert.ok(stalenessSchema.safeParse({ ...stalenessBase, ALERT_WEBHOOK_URL: hook }).success);
+  assert.ok(stalenessSchema.safeParse(stalenessBase).success); // unset is fine
+  assert.ok(!backupSchema.safeParse({ ...backupBase, ALERT_WEBHOOK_URL: "nope" }).success);
+});
+
 test("dashboard: --upload requires DASHBOARD_R2_BUCKET; reading R2 requires R2_BUCKET", () => {
   assert.ok(!dashboardSchema({ fromR2: true }).safeParse({}).success);
   assert.ok(dashboardSchema({ fromR2: true }).safeParse({ R2_BUCKET: "b", FILE_BASENAME: "e" }).success);

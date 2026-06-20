@@ -45,6 +45,8 @@ on:
         required: false
       AGE_RECIPIENT:
         required: false
+      ALERT_WEBHOOK_URL:   # optional generic failure webhook (Slack-compatible); redundant to the bot
+        required: false
 
 jobs:
   backup:
@@ -99,4 +101,5 @@ jobs:
           SLACK_CHANNEL: ${{ inputs.slack_channel }}
           HEARTBEAT_URL: ${{ secrets.HEARTBEAT_URL }}
           AGE_RECIPIENT: ${{ secrets.AGE_RECIPIENT }}
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
         run: npx tsx scripts/backup-pg-to-r2.ts

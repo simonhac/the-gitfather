@@ -24,7 +24,7 @@ import { basename, join } from "node:path";
 import { loadDrillConfig } from "./lib/config.js";
 import { run, runToFile, capture, commandExists } from "./lib/proc.js";
 import { appendVerify } from "./runlog.js";
-import { slackOneoff } from "./lib/slack.js";
+import { slackOneoff, alertWebhook } from "./lib/slack.js";
 
 /** ISO-8601 UTC to seconds precision (matches bash `date -u +%Y-%m-%dT%H:%M:%SZ`). */
 function isoSeconds(d: Date): string {
@@ -67,6 +67,7 @@ async function main(): Promise<void> {
   const fail = async (msg: string): Promise<never> => {
     process.stderr.write(`ERROR: ${msg}\n`);
     await slackOneoff(`🔴 PG restore-drill FAILED (${fileBasename}): ${msg}`, true).catch(() => {});
+    await alertWebhook(`🔴 PG restore-drill FAILED (${fileBasename}): ${msg}`).catch(() => {});
     cleanup();
     process.exit(1);
   };
@@ -87,16 +88,27 @@ async function main(): Promise<void> {
   // verifies the latest dump — not an older durable copy. (This deliberately changes the original
   // bash behavior of `lsf -R | sort | tail -1`, which sorted by the tier prefix first and so picked
   // the newest of the lexically-last tier — usually a weekly copy up to ~7 days old.)
-  console.log(`Finding newest object under r2:${r2Bucket}/${backupPrefix}/2hourly/ ...`);
+  // Expected object extension for this project's ENCRYPTION (mirrors backup-pg-to-r2.ts upload).
+  // Filtering the listing to it means a foreign/legacy object (e.g. a .dump.gz from a previous tool,
+  // or a half-written temp key) can never be selected and mask a real backup — the catch-all decrypt
+  // path below would just choke on it. ENCRYPTION is zod-validated to one of these three.
+  const ext = cfg.ENCRYPTION === "age" ? "dump.age" : cfg.ENCRYPTION === "aes-gcm" ? "dump.enc" : "dump";
+
+  console.log(`Finding newest .${ext} object under r2:${r2Bucket}/${backupPrefix}/2hourly/ ...`);
   const ls = capture("rclone", [
     "lsf",
     "--files-only",
     `r2:${r2Bucket}/${backupPrefix}/2hourly/`,
     "--s3-no-check-bucket",
   ]);
-  const objs = ls.out.split("\n").map((s) => s.trim()).filter(Boolean).sort();
+  const objs = ls.out
+    .split("\n")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .filter((o) => o.endsWith(`.${ext}`))
+    .sort();
   const newest = objs.length ? objs[objs.length - 1] : "";
-  if (!newest) await fail(`no objects under ${backupPrefix}/2hourly/`);
+  if (!newest) await fail(`no .${ext} objects under ${backupPrefix}/2hourly/`);
   const key = `2hourly/${newest}`;
   console.log(`Latest: ${backupPrefix}/${key}`);
 

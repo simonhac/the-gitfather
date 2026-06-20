@@ -40,6 +40,8 @@ on:
         required: true
       SLACK_BOT_TOKEN:
         required: false
+      ALERT_WEBHOOK_URL:   # optional generic failure webhook (Slack-compatible); redundant to the bot
+        required: false
 
 jobs:
   check:
@@ -86,5 +88,6 @@ jobs:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL: ${{ inputs.slack_channel }}
           BACKUP_WORKFLOW: ${{ inputs.backup_workflow }}
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
           GH_TOKEN: ${{ github.token }}   # self-heal: `gh workflow run <backup_workflow>` on a missed tick
         run: npx tsx scripts/check-staleness.ts

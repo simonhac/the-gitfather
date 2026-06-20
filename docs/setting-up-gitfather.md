@@ -118,6 +118,7 @@ Everything here has a safe default or is feature-gated. Ask, but offer the defau
 | `SLACK_ALERT_MENTION` | `<!here>` | prepended to failure alerts (`<!here>` / `<!channel>`) |
 | `DISPLAY_TZ` | `UTC` | IANA tz for the daily row's date + HH:MM labels (e.g. `Australia/Perth`) |
 | `DASHBOARD_URL` | (unset) | if set, hyperlinks the Slack header's "`<basename> DB backup`" text to the dashboard. See note below on how to obtain it. |
+| `ALERT_WEBHOOK_URL` | (unset) | optional **failure** webhook (secret), independent of the bot — a Slack-compatible `{"text":…}` POST on backup/drill/staleness failure. A no-bot alert fallback, or a redundant failure channel into a host app's existing incoming webhook. Fires on failure only (no success spam). |
 
 ### 3d. Public dashboard (→ profile + secrets)
 
@@ -188,6 +189,8 @@ PG_LIVE_DATABASE_URL="postgres://…"
 # slack (optional):
 SLACK_BOT_TOKEN="xoxb-…"
 SLACK_CHANNEL="C…"
+# failure webhook (optional, independent of the bot):
+ALERT_WEBHOOK_URL="https://hooks.slack.com/services/…"
 # dashboard upload (optional):
 DASHBOARD_R2_BUCKET="…"
 DASHBOARD_R2_ACCESS_KEY_ID="…"
@@ -271,6 +274,10 @@ mid-2026; if a UI label has moved, search the provider's docs rather than guessi
 - **`SLACK_CHANNEL`** — open the channel in Slack → click the channel name to open details → scroll
   to the bottom for the **Channel ID** (`C…`). (Or right-click the channel → **Copy link**; the ID
   is the last path segment.)
+- **`ALERT_WEBHOOK_URL`** (optional, independent of the bot) — an **incoming webhook** URL. In Slack:
+  `api.slack.com/apps` → your app → **Incoming Webhooks** → enable → **Add New Webhook to Workspace**
+  → pick a channel → copy the `https://hooks.slack.com/services/…` URL. Any service that accepts a
+  `{"text":…}` POST works too — e.g. a host app's existing incoming-webhook endpoint.
 
 ### Postgres (connection URLs)
 
