@@ -56,6 +56,11 @@ RUN_TS_ISO="${STAMP:0:4}-${STAMP:4:2}-${STAMP:6:2}T${STAMP:9:2}:${STAMP:11:2}:${
 ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
 LABEL="$(TZ="${DISPLAY_TZ:-UTC}" date +%H:%M)"   # tick label in the Slack daily row
 
+# 🖐️ marker for hand-kicked runs: a GitHub "workflow_dispatch", or a local run (no GH event at all).
+# A scheduled cron run (GITHUB_EVENT_NAME=schedule) is NOT manual.
+MANUAL=""
+case "${GITHUB_EVENT_NAME:-}" in ""|workflow_dispatch) MANUAL=1 ;; esac
+
 # rclone S3 remote configured purely from env (no rclone.conf on disk). Set early so fail() and the
 # Slack daily-row state can reach R2 even if a failure happens before the upload.
 export RCLONE_CONFIG_R2_TYPE=s3
@@ -91,7 +96,7 @@ fail() {
   echo "ERROR: $1" >&2
   if slack_enabled; then
     local dayts
-    dayts="$(slack_daily_record fail "$LABEL" 2>/dev/null || true)"
+    dayts="$(slack_daily_record fail "$LABEL" "" "$MANUAL" 2>/dev/null || true)"
     slack_post "${SLACK_ALERT_MENTION:-<!here>} 🔴 *${FILE_BASENAME}* backup FAILED at ${LABEL} — $1" \
       "$dayts" true >/dev/null 2>&1 || true
   fi
@@ -166,7 +171,7 @@ MARKER=""; [ -n "$PROMOTED" ] && MARKER="📅($PROMOTED)"
 
 MB=$(( SIZE / 1024 / 1024 ))
 echo "✓ Backup complete: ${FILENAME} (${MB} MB) → tiers: ${TIERS[*]}"
-slack_daily_record ok "$LABEL" "$MARKER" >/dev/null || true
+slack_daily_record ok "$LABEL" "$MARKER" "$MANUAL" >/dev/null || true
 runlog run --ts "$RUN_TS_ISO" --ok true --tiers "${TIERS[*]}" --bytes "$SIZE" --key "$FIRST_KEY" || true
 
 # Dead-man's-switch ping (success only) — its absence is the staleness signal.

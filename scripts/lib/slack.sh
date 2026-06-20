@@ -143,7 +143,7 @@ _slack_daily_text() {
 
   printf '%s' "$state" | jq -r --argjson missing "$missing" '
     .header + "\n" + (
-      ([ .entries[] | { label, sym: ((if .ok then "✅ " else "❌ " end) + .label + (if (.marker // "") != "" then " " + .marker else "" end)) } ]
+      ([ .entries[] | { label, sym: ((if (.manual // false) then "🖐️ " else "" end) + (if .ok then "✅ " else "❌ " end) + .label + (if (.marker // "") != "" then " " + .marker else "" end)) } ]
        + [ $missing[] | { label: ., sym: ("⬜ " + .) } ])
       | sort_by(.label) | map(.sym) | join("  ·  "))'
 }
@@ -173,16 +173,18 @@ _slack_daily_persist() {
   printf '%s' "$ts"
 }
 
-# slack_daily_record <ok|fail> <HH:MM label> [marker] → records a tick on today's message
-# (posting it if absent) and prints the day's message ts (for threading).
+# slack_daily_record <ok|fail> <HH:MM label> [marker] [manual] → records a tick on today's message
+# (posting it if absent) and prints the day's message ts (for threading). A non-empty <manual> tags
+# the tick with a 🖐️ (rendered before the ✅/❌) to flag a hand-kicked, off-cadence run.
 slack_daily_record() {
   slack_enabled || return 0
-  local ok="$1" label="$2" marker="${3:-}" state okj
+  local ok="$1" label="$2" marker="${3:-}" manual="${4:-}" state okj manj
   _slack_daily_keys
   state="$(_slack_daily_load)" || return 0
   okj=false; [ "$ok" = "ok" ] && okj=true
-  state="$(printf '%s' "$state" | jq -c --arg l "$label" --argjson okj "$okj" --arg m "$marker" \
-    '.entries = ((.entries | map(select(.label != $l))) + [{label:$l, ok:$okj, marker:$m}])')" || return 1
+  manj=false; [ -n "$manual" ] && manj=true
+  state="$(printf '%s' "$state" | jq -c --arg l "$label" --argjson okj "$okj" --arg m "$marker" --argjson man "$manj" \
+    '.entries = ((.entries | map(select(.label != $l))) + [{label:$l, ok:$okj, marker:$m, manual:$man}])')" || return 1
   _slack_daily_persist "$state" create
 }
 
