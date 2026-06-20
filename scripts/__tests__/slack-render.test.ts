@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { renderDailyText, dailyLabel, type DailyState } from "../lib/slack.js";
+import { renderDailyText, dailyLabel, dashboardLink, type DailyState } from "../lib/slack.js";
 
 // Parity fixtures captured from the original bash _slack_daily_text (lib/slack.sh) — see
 // fixtures/render-cases.json. States are PAST-dated so every 2-hourly bucket is "due"
@@ -34,6 +34,19 @@ test("renderDailyText today: +1h grace gates which empty buckets show ⬜", () =
   const now = new Date(Date.UTC(2026, 5, 19, 5, 30, 0));
   const state: DailyState = { channel: "", ts: "T", date: "2026-06-19", header: "*H*", entries: [] };
   assert.equal(renderDailyText(state, now), "*H*\n⬜ 00:00  ·  ⬜ 02:00  ·  ⬜ 04:00");
+});
+
+test("dashboardLink wraps text in a Slack link only when DASHBOARD_URL is set", () => {
+  const saved = process.env.DASHBOARD_URL;
+  try {
+    delete process.env.DASHBOARD_URL;
+    assert.equal(dashboardLink("boost DB backup"), "boost DB backup");
+    process.env.DASHBOARD_URL = "https://dash.example.com/";
+    assert.equal(dashboardLink("boost DB backup"), "<https://dash.example.com/|boost DB backup>");
+  } finally {
+    if (saved === undefined) delete process.env.DASHBOARD_URL;
+    else process.env.DASHBOARD_URL = saved;
+  }
 });
 
 test("renderDailyText today: a filled bucket suppresses its ⬜", () => {

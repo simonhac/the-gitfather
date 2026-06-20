@@ -136,6 +136,7 @@ export const backupSchema = z
     HEARTBEAT_URL: opt(z.url()),
     SLACK_BOT_TOKEN: opt(nonEmpty()),
     SLACK_CHANNEL: opt(nonEmpty()),
+    DASHBOARD_URL: opt(z.url()),
     DISPLAY_TZ: displayTz,
   })
   .superRefine(requireSlackChannel)

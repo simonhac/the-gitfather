@@ -315,6 +315,11 @@ a single `index.html`, and uploads it to the **separate public** dashboard bucke
 > links). The rich raw logs never leave the private bucket. To make the page itself private, front the
 > public bucket with a custom domain + Cloudflare Access — no code change.
 
+Set **`DASHBOARD_URL`** in the profile to hyperlink the daily Slack header's "`<basename> DB backup`"
+to the published page. The public hostname isn't derivable from the bucket name — fetch it once with
+`npx wrangler r2 bucket dev-url get <DASHBOARD_R2_BUCKET>` (managed `r2.dev` URL) or
+`npx wrangler r2 bucket domain list <DASHBOARD_R2_BUCKET>` (custom domain).
+
 **Build locally:**
 
 ```bash
@@ -411,7 +416,7 @@ warn in a vanilla Postgres — restore into a fresh instance of the same platfor
 
 See [`profiles/example.env`](profiles/example.env): `BACKUP_PREFIX`, `FILE_BASENAME`, `PG_DUMP_FLAGS`,
 `ENCRYPTION`, `PG_CLIENT_MAJOR`, `ANCHOR_HOUR_UTC`, `DRILL_SENTINEL_TABLE`, `DRILL_EXTRA_TABLES`,
-`MIN_RATIO`, `MIN_BYTES`, `STALE_HOURS`, `DISPLAY_TZ`, `SLACK_ALERT_MENTION`, `DASHBOARD_LABEL`.
+`MIN_RATIO`, `MIN_BYTES`, `STALE_HOURS`, `DISPLAY_TZ`, `SLACK_ALERT_MENTION`, `DASHBOARD_LABEL`, `DASHBOARD_URL`.
 
 ---
 

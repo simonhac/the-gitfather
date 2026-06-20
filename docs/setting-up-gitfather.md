@@ -128,13 +128,22 @@ Everything here has a safe default or is feature-gated. Ask, but offer the defau
 | `DASHBOARD_R2_BUCKET` | — | the **separate public** bucket the built page is uploaded to (variable) |
 | `DASHBOARD_R2_ACCESS_KEY_ID` / `DASHBOARD_R2_SECRET_ACCESS_KEY` | — | write-only S3 token for the public bucket (secrets) |
 
-> **Getting `DASHBOARD_URL`:** the public hostname is an opaque `pub-<hash>.r2.dev` (or a custom
-> domain) that is **not derivable** from the account id or bucket name. Retrieve it once, with the
-> account-level Cloudflare creds the user already used to create the bucket:
+> **Getting `DASHBOARD_URL` — fetch it yourself, with permission.** The public hostname is an opaque
+> `pub-<hash>.r2.dev` (or a custom domain) that is **not derivable** from the account id or bucket
+> name, so don't make the user hunt for it — *you* retrieve it by running `wrangler` against the
+> public bucket. That command uses the user's **account-level Cloudflare login** (a privileged
+> credential), so **ask permission before running it**, e.g.:
+>
+> *"I can fetch the dashboard's public URL by running `npx wrangler r2 bucket dev-url get <bucket>` —
+> this uses your Cloudflare login. OK to run it?"*
+>
+> On approval, run (fall back to the second form if they use a custom domain):
 > - r2.dev managed URL: `npx wrangler r2 bucket dev-url get <DASHBOARD_R2_BUCKET>`
 > - custom domain: `npx wrangler r2 bucket domain list <DASHBOARD_R2_BUCKET>`
 >
-> The hostname is static for the life of the bucket, so capture it once and set it in the profile.
+> Parse the hostname from the output, confirm it back to the user, and write it to the profile. It's
+> static for the life of the bucket, so this is a one-time fetch. If the user declines, leave
+> `DASHBOARD_URL` unset (the header just renders unlinked) or let them paste it manually.
 
 ### 3e. Staleness behaviour (→ profile, defaults fine)
 
@@ -246,10 +255,11 @@ mid-2026; if a UI label has moved, search the provider's docs rather than guessi
 - **`DASHBOARD_R2_BUCKET` / `DASHBOARD_R2_ACCESS_KEY_ID` / `DASHBOARD_R2_SECRET_ACCESS_KEY`** — same
   token flow, but on the **separate public** dashboard bucket (write is all that's needed).
 - **`DASHBOARD_URL`** — the public hostname (`pub-<hash>.r2.dev` or a custom domain) is **not**
-  derivable from the bucket name. Get it once with account-level Cloudflare creds:
-  `npx wrangler r2 bucket dev-url get <DASHBOARD_R2_BUCKET>` (managed URL) or
-  `npx wrangler r2 bucket domain list <DASHBOARD_R2_BUCKET>` (custom domain). It's also visible in the
-  bucket's **Settings → Public Access** (R2.dev subdomain / Custom Domains).
+  derivable from the bucket name. **Fetch it yourself after asking permission** (the command uses the
+  user's account-level Cloudflare login): `npx wrangler r2 bucket dev-url get <DASHBOARD_R2_BUCKET>`
+  (managed URL) or `npx wrangler r2 bucket domain list <DASHBOARD_R2_BUCKET>` (custom domain). See the
+  "Getting `DASHBOARD_URL`" note in §3d for the permission prompt. It's also visible in the bucket's
+  **Settings → Public Access** (R2.dev subdomain / Custom Domains) if the user prefers to read it off.
 
 ### Slack (bot token, channel id)
 

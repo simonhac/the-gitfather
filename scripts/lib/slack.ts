@@ -21,6 +21,7 @@
 //   SLACK_ALERT_MENTION  mention prepended to loud alerts (default "<!here>")
 //   DISPLAY_TZ           IANA tz for the daily row's date + HH:MM labels (default UTC)
 //   FILE_BASENAME        names the per-day state object and the message header
+//   DASHBOARD_URL        if set, hyperlinks the daily header's "<basename> DB backup" to the dashboard
 //   R2_BUCKET + the RCLONE_CONFIG_R2_* exports set by the caller (for the daily-row state in R2)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -180,6 +181,12 @@ export function dailyLabel(now: Date = new Date()): string {
   return `${hh}:${get("minute")}`;
 }
 
+/** Wrap `text` in a Slack mrkdwn link to DASHBOARD_URL when set; otherwise return it unchanged. */
+export function dashboardLink(text: string): string {
+  const url = env("DASHBOARD_URL");
+  return url ? `<${url}|${text}>` : text;
+}
+
 /** Per-day keys for the current DISPLAY_TZ day. */
 function dailyKeys(now: Date = new Date()): { dateKey: string; header: string; objKey: string } {
   const { y, mo, day } = tzParts(now);
@@ -187,7 +194,10 @@ function dailyKeys(now: Date = new Date()): { dateKey: string; header: string; o
   const dp = headerDateFmt.formatToParts(now);
   const get = (t: string) => dp.find((p) => p.type === t)?.value ?? "";
   const tz = tzAbbrFmt.formatToParts(now).find((p) => p.type === "timeZoneName")?.value ?? "";
-  const header = `*${env("FILE_BASENAME")} DB backup — ${get("weekday")} ${get("day")} ${get("month")} ${get("year")} (${tz})*`;
+  // Only the "<basename> DB backup" name is linked; the whole header stays bold (Slack renders a
+  // link inside *…*). With unfurl_links:false on every post, the link never expands to a preview.
+  const name = dashboardLink(`${env("FILE_BASENAME")} DB backup`);
+  const header = `*${name} — ${get("weekday")} ${get("day")} ${get("month")} ${get("year")} (${tz})*`;
   const objKey = `_status/${env("FILE_BASENAME")}/${dateKey}.json`;
   return { dateKey, header, objKey };
 }

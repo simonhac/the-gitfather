@@ -136,6 +136,13 @@ test("SLACK_BOT_TOKEN set requires SLACK_CHANNEL", () => {
   assert.ok(backupSchema.safeParse({ ...backupBase, SLACK_BOT_TOKEN: "xoxb-1", SLACK_CHANNEL: "C123" }).success);
 });
 
+test("DASHBOARD_URL: optional, but must be a URL when set", () => {
+  assert.ok(backupSchema.safeParse(backupBase).success); // unset is fine
+  assert.ok(backupSchema.safeParse({ ...backupBase, DASHBOARD_URL: "" }).success); // blank treated as unset
+  assert.ok(backupSchema.safeParse({ ...backupBase, DASHBOARD_URL: "https://dash.example.com/" }).success);
+  assert.ok(!backupSchema.safeParse({ ...backupBase, DASHBOARD_URL: "not a url" }).success);
+});
+
 test("dashboard: --upload requires DASHBOARD_R2_BUCKET; reading R2 requires R2_BUCKET", () => {
   assert.ok(!dashboardSchema({ fromR2: true }).safeParse({}).success);
   assert.ok(dashboardSchema({ fromR2: true }).safeParse({ R2_BUCKET: "b", FILE_BASENAME: "e" }).success);
