@@ -100,6 +100,7 @@ fail() {
     slack_post "${SLACK_ALERT_MENTION:-<!here>} 🔴 *${FILE_BASENAME}* backup FAILED at ${LABEL} — $1" \
       "$dayts" true >/dev/null 2>&1 || true
   fi
+  alert_webhook "🔴 ${FILE_BASENAME} backup FAILED at ${LABEL} — $1"
   runlog run --ts "$RUN_TS_ISO" --ok false --error "$1" || true
   exit 1
 }

@@ -41,7 +41,7 @@ STALE_HOURS="${STALE_HOURS:-3}"
 ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
 BACKUP_WORKFLOW="${BACKUP_WORKFLOW:-pg-backup.yml}"   # workflow to re-trigger on a missed run
 
-fail() { echo "ERROR: $1" >&2; slack_oneoff "🔴 PG backup STALE (${FILE_BASENAME}): $1" mention; exit 1; }
+fail() { echo "ERROR: $1" >&2; slack_oneoff "🔴 PG backup STALE (${FILE_BASENAME}): $1" mention; alert_webhook "🔴 PG backup STALE (${FILE_BASENAME}): $1"; exit 1; }
 note() { echo "$1" >&2; slack_oneoff "$1"; }   # quiet (no mention) — for self-heal progress
 
 # on_stale <msg> — handle a stale newest backup. GitHub Actions cron is best-effort and routinely

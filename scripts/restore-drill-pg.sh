@@ -43,7 +43,7 @@ ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
 
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 
-fail() { echo "ERROR: $1" >&2; slack_oneoff "🔴 PG restore-drill FAILED (${FILE_BASENAME:-pg}): $1" mention; exit 1; }
+fail() { echo "ERROR: $1" >&2; slack_oneoff "🔴 PG restore-drill FAILED (${FILE_BASENAME:-pg}): $1" mention; alert_webhook "🔴 PG restore-drill FAILED (${FILE_BASENAME:-pg}): $1"; exit 1; }
 
 command -v rclone     >/dev/null || fail "rclone not found"
 command -v pg_restore >/dev/null || fail "pg_restore not found"
@@ -63,10 +63,26 @@ runlog() {
   return 0
 }
 
-# Newest object across all tiers under the prefix. Keys are timestamped, so lexical sort = chronological.
-echo "Finding newest object under r2:${R2_BUCKET}/${BACKUP_PREFIX}/ ..."
-KEY="$(rclone lsf --files-only -R "r2:${R2_BUCKET}/${BACKUP_PREFIX}/" --s3-no-check-bucket 2>/dev/null | sort | tail -1 || true)"
-[ -n "$KEY" ] || fail "no objects under ${BACKUP_PREFIX}/"
+# Expected object extension for this project's ENCRYPTION (mirrors backup-pg-to-r2.sh). Filtering the
+# listing to it means a foreign/legacy object (e.g. a .dump.gz from a previous tool, or a half-written
+# temp key) can never be selected and mask a real backup — the catch-all restore path below would just
+# choke on it.
+case "${ENCRYPTION:-none}" in
+  none)    EXT="dump" ;;
+  age)     EXT="dump.age" ;;
+  aes-gcm) EXT="dump.enc" ;;
+  *)       fail "unknown ENCRYPTION='${ENCRYPTION}'" ;;
+esac
+
+# Newest matching object across all tiers under the prefix. Keys are <tier>/<basename>-<stamp>.<ext>;
+# sort by the FILENAME (the field after '/'), NOT the whole path — otherwise the leading tier dir
+# dominates the sort (2hourly < daily < monthly < weekly) and we'd always pick the newest *weekly*
+# rather than the newest overall. basename + ext are constant across candidates, so filename order ==
+# stamp order == chronological.
+echo "Finding newest .${EXT} object under r2:${R2_BUCKET}/${BACKUP_PREFIX}/ ..."
+KEY="$(rclone lsf --files-only -R "r2:${R2_BUCKET}/${BACKUP_PREFIX}/" --s3-no-check-bucket 2>/dev/null \
+  | grep -E "\.${EXT}$" | sort -t/ -k2 | tail -1 || true)"
+[ -n "$KEY" ] || fail "no .${EXT} objects under ${BACKUP_PREFIX}/"
 echo "Latest: ${BACKUP_PREFIX}/${KEY}"
 rclone copyto "r2:${R2_BUCKET}/${BACKUP_PREFIX}/${KEY}" "$TMP/obj" --s3-no-check-bucket || fail "download failed"
 
