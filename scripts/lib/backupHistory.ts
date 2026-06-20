@@ -89,7 +89,7 @@ const tzFmt = new Intl.DateTimeFormat("en-GB", { timeZone: DISPLAY_TZ, timeZoneN
 
 /** "Wed 19 Jun 2026, 2:00 am UTC" (narrow no-break spaces normalised). */
 export function formatInTz(d: Date): string {
-  const base = whenFmt.format(d).replace(/ /g, " ");
+  const base = whenFmt.format(d).replace(/\u202f/g, " ");
   const tz = tzFmt.formatToParts(d).find((p) => p.type === "timeZoneName")?.value ?? "";
   return tz ? `${base} ${tz}` : base;
 }

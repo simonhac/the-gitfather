@@ -89,6 +89,9 @@ export interface PublicPayload {
 
 export type BackupCellState = "empty" | "failed" | "ok" | "verified" | "expired";
 
+/** Origin of a run, driving the Slack-row marker: "schedule" (none), "manual" (🖐️), "self-heal" (🩹). */
+export type RunOrigin = "schedule" | "manual" | "self-heal";
+
 /** One run within a slot (a cell can hold several — manual reruns, DST fall-back, …). */
 export interface SlotRun {
   run: PublicRun;

@@ -1,0 +1,9 @@
+#!/usr/bin/env sh
+# Pre-commit: run ESLint on the staged JS/TS files; a lint error blocks the commit.
+# Activated via core.hooksPath=.githooks, set by the package.json "prepare" script on `npm install`
+# (or wire it up once by hand: `git config core.hooksPath .githooks`).
+
+files=$(git diff --cached --name-only --diff-filter=ACMR -- '*.ts' '*.tsx' '*.js' '*.mjs' '*.cjs')
+[ -z "$files" ] && exit 0
+
+echo "$files" | xargs npx eslint

@@ -44,7 +44,7 @@ const hideLinks = cfg.DASHBOARD_HIDE_RUN_LINKS;
 function readLogDir(dir: string): { runs: LogRun[]; verifications: LogVerification[] } {
   const runs: LogRun[] = [];
   const verifications: LogVerification[] = [];
-  let files: string[] = [];
+  let files: string[];
   try {
     files = readdirSync(dir);
   } catch {

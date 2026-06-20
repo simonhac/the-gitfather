@@ -81,11 +81,6 @@ function isValidTz(tz: string): boolean {
 }
 const displayTz = z.string().default("UTC").refine(isValidTz, "must be a valid IANA timezone (e.g. UTC, Australia/Perth)");
 
-/** Whitespace-split a string into words; unset → []. */
-const words = z
-  .preprocess((v) => (typeof v === "string" ? v.split(/\s+/).filter(Boolean) : v), z.array(z.string()))
-  .default([]);
-
 /** Whitespace-split → list of table names (DRILL_EXTRA_TABLES); unset → []. */
 const tableList = z
   .preprocess((v) => (typeof v === "string" ? v.split(/\s+/).filter(Boolean) : v), z.array(tableName))
@@ -245,6 +240,17 @@ export type DashboardConfig = z.infer<ReturnType<typeof dashboardSchema>>;
 // ── Loader ───────────────────────────────────────────────────────────────────
 
 /**
+ * Print a config validation failure to stderr — every issue at once, names only (never a value, so it's
+ * secret-safe). Factored out of loadConfig so a task can validate via safeParse, record a failure
+ * (e.g. backup-pg-to-r2's ❌ Slack tick), and then emit the same report before exiting.
+ */
+export function reportConfigError(err: z.ZodError): void {
+  process.stderr.write("✗ config validation failed:\n\n");
+  process.stderr.write(`${z.prettifyError(err)}\n\n`);
+  process.stderr.write("Fix the variable(s) above in your profile or environment, then re-run.\n");
+}
+
+/**
  * Validate process.env against `schema`. On failure, print every issue at once (names
  * only — never a value) and exit 1; on success, return the typed config. Shared by the
  * tasks AND doctor, so the two can never drift.
@@ -252,9 +258,7 @@ export type DashboardConfig = z.infer<ReturnType<typeof dashboardSchema>>;
 export function loadConfig<T extends z.ZodType>(schema: T): z.infer<T> {
   const res = schema.safeParse(process.env);
   if (!res.success) {
-    process.stderr.write("✗ config validation failed:\n\n");
-    process.stderr.write(`${z.prettifyError(res.error)}\n\n`);
-    process.stderr.write("Fix the variable(s) above in your profile or environment, then re-run.\n");
+    reportConfigError(res.error);
     process.exit(1);
   }
   return res.data;

@@ -11,9 +11,10 @@
 // daily-row bucket math now SHARES SLOTS_PER_DAY + the Intl TZ helper (tzParts) with the
 // dashboard (backupTypes.ts / backupHistory.ts) instead of re-deriving slot=floor(hour/2)
 // and `TZ=date` in bash — deleting the duplication the old slack.sh warned had to be kept
-// in sync. The persisted _status/<basename>/<date>.json schema is unchanged
-// ({channel,ts,date,header,entries:[{label,ok,marker,manual}]}) so a same-day cutover
-// reads existing state and updates in place rather than double-posting.
+// in sync. The persisted _status/<basename>/<date>.json schema is
+// ({channel,ts,date,header,entries:[{label,ok,marker,origin,manual}]}) so a same-day cutover
+// reads existing state and updates in place rather than double-posting. (`origin` drives the row
+// marker; `manual` is the legacy field, still written for cross-version safety, read as fallback.)
 //
 // Reads from the environment / profile:
 //   SLACK_BOT_TOKEN      xoxb-… (scope chat:write); unset → Slack disabled
@@ -31,6 +32,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { capture } from "./proc.js";
 import { DISPLAY_TZ, SLOTS_PER_DAY } from "./backupTypes.js";
+import type { RunOrigin } from "./backupTypes.js";
 import { tzParts } from "./backupHistory.js";
 
 function warn(msg: string): void {
@@ -170,7 +172,8 @@ export interface DailyEntry {
   label: string;
   ok: boolean;
   marker: string;
-  manual: boolean;
+  origin?: RunOrigin; // drives the row marker (schedule → none, manual → 🖐️, self-heal → 🩹)
+  manual?: boolean; // @deprecated legacy field; still WRITTEN for cross-version safety, READ as fallback
 }
 
 export interface DailyState {
@@ -256,10 +259,12 @@ export function renderDailyText(state: DailyState, now: Date = new Date()): stri
 
   const syms: { label: string; sym: string }[] = [];
   for (const e of state.entries) {
-    const manual = e.manual ? "🖐️ " : "";
+    // Back-compat: an entry persisted by an older instance has only `manual`, not `origin`.
+    const origin: RunOrigin = e.origin ?? (e.manual ? "manual" : "schedule");
+    const prefix = origin === "self-heal" ? "🩹 " : origin === "manual" ? "🖐️ " : "";
     const status = e.ok ? "✅ " : "❌ ";
     const marker = e.marker ? ` ${e.marker}` : "";
-    syms.push({ label: e.label, sym: `${manual}${status}${e.label}${marker}` });
+    syms.push({ label: e.label, sym: `${prefix}${status}${e.label}${marker}` });
   }
   for (const label of placeholders) {
     syms.push({ label, sym: `⬜ ${label}` });
@@ -351,20 +356,24 @@ async function persistDaily(state: DailyState, mode: "create" | "refresh", now: 
 
 /**
  * Record a ✅/❌ tick on today's message (posting it if absent) and return the day-message ts
- * (for threading a failure alert). A truthy `manual` tags the tick with a 🖐️. Mirrors
- * slack_daily_record.
+ * (for threading a failure alert). `origin` tags the tick: "manual" → 🖐️, "self-heal" → 🩹,
+ * "schedule" → no marker. Mirrors slack_daily_record.
  */
 export async function slackDailyRecord(
   ok: boolean,
   label: string,
   marker = "",
-  manual = false,
+  origin: RunOrigin = "schedule",
   now: Date = new Date(),
 ): Promise<string> {
   if (!slackEnabled()) return "";
   const state = await loadDaily(now);
   if (!state) return "";
-  state.entries = state.entries.filter((e) => e.label !== label).concat([{ label, ok, marker, manual }]);
+  // Write BOTH `origin` (new renderer) and `manual` (legacy renderer) so an old instance running
+  // mid-cutover still renders 🖐️ for a non-scheduled run.
+  state.entries = state.entries
+    .filter((e) => e.label !== label)
+    .concat([{ label, ok, marker, origin, manual: origin !== "schedule" }]);
   return persistDaily(state, "create", now);
 }
 

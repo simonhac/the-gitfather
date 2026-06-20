@@ -1,13 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { computeTiers, isManualRun, stampToEpochMs } from "../lib/schedule.js";
+import { computeTiers, runOrigin, stampToEpochMs } from "../lib/schedule.js";
 
-test("isManualRun: local run + workflow_dispatch are manual; schedule is not", () => {
-  assert.equal(isManualRun(undefined), true); // local run, no GH event
-  assert.equal(isManualRun(""), true);
-  assert.equal(isManualRun("workflow_dispatch"), true); // incl. the self-heal catch-up trigger
-  assert.equal(isManualRun("schedule"), false);
-  assert.equal(isManualRun("push"), false);
+test("runOrigin: schedule → schedule; dispatch/local → manual unless reason=self-heal", () => {
+  assert.equal(runOrigin("schedule", undefined), "schedule");
+  assert.equal(runOrigin("workflow_dispatch", undefined), "manual");
+  assert.equal(runOrigin("workflow_dispatch", "self-heal"), "self-heal");
+  assert.equal(runOrigin(undefined, undefined), "manual"); // local run
+  assert.equal(runOrigin("", "self-heal"), "self-heal");
 });
 
 test("computeTiers: non-anchor hour → 2hourly only", () => {
