@@ -5,18 +5,18 @@ import "./lib/bootEnv.js"; // MUST be first — loads $PROFILE before backupType
 // *object* actually landed; the ping asserts a *run succeeded*. Together they also catch the
 // workflow not firing.
 //
-// Lists the newest object under $BACKUP_PREFIX/2hourly/ and derives its age from the timestamped key.
+// Lists the newest object under $backup-prefix/2hourly/ and derives its age from the timestamped key.
 // Each run it also refreshes today's Slack row (renders ⬜ for elapsed-but-empty 2-hourly buckets).
-// If the newest object is older than STALE_HOURS it calls onStale(): GitHub Actions cron is
+// If the newest object is older than staleness.max-age-hours it calls onStale(): GitHub Actions cron is
 // best-effort, so the default assumption is a *missed* tick and it re-triggers the backup once — but
 // only when the last run succeeded (a *broken* backup is paged, not retried, to avoid a trigger loop).
 //
 // Usage:
-//   PROFILE=profiles/example.env npx tsx scripts/check-staleness.ts
+//   PROFILE=profiles/example.yaml npx tsx scripts/check-staleness.ts
 //
 // Required env: R2_ACCOUNT_ID / R2_BUCKET / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY
-// Optional env: SLACK_BOT_TOKEN / SLACK_CHANNEL ; GH_TOKEN / GITHUB_REPOSITORY (self-heal);
-//               SELF_HEAL=0 (alert only) ; DRY_RUN=1 (log the trigger, don't fire)
+// Optional env: SLACK_BOT_TOKEN / SLACK_CHANNEL ; GH_TOKEN / GITHUB_REPOSITORY (self-heal); other config from $PROFILE;
+//               profile: staleness.self-heal=false (alert only) ; staleness.dry-run=true (log, don't fire)
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { loadStalenessConfig } from "./lib/config.js";
@@ -27,17 +27,16 @@ import { slackOneoff, slackDailyRefresh, alertWebhook } from "./lib/slack.js";
 async function main(): Promise<void> {
   // Validate + type all config up front (zod); fails fast with one aggregated report. See lib/config.ts.
   const cfg = loadStalenessConfig();
-  const {
-    BACKUP_PREFIX: backupPrefix,
-    FILE_BASENAME: fileBasename,
-    R2_ACCOUNT_ID: r2Account,
-    R2_BUCKET: r2Bucket,
-    R2_ACCESS_KEY_ID: r2Key,
-    R2_SECRET_ACCESS_KEY: r2Secret,
-    STALE_HOURS: staleHours,
-    MIN_BYTES: minBytes,
-    BACKUP_WORKFLOW: backupWorkflow,
-  } = cfg;
+  // R2 creds + name/backup-prefix are guaranteed present by stalenessSchema's refinements (non-null below).
+  const backupPrefix = cfg.backupPrefix!;
+  const fileBasename = cfg.name!;
+  const r2Account = cfg.credentials.r2.accountId!;
+  const r2Bucket = cfg.credentials.r2.bucket!;
+  const r2Key = cfg.credentials.r2.accessKeyId!;
+  const r2Secret = cfg.credentials.r2.secretAccessKey!;
+  const staleHours = cfg.staleness.maxAgeHours;
+  const minBytes = cfg.dump.minBytes;
+  const backupWorkflow = cfg.staleness.healWorkflow;
 
   const endpoint = `https://${r2Account}.r2.cloudflarestorage.com`;
 
@@ -55,7 +54,7 @@ async function main(): Promise<void> {
   // onStale — handle a stale newest backup. Default assumption: a tick was MISSED → self-heal by
   // re-triggering the backup. The one thing we must NOT do is hammer a genuinely BROKEN backup — so
   // we only auto-retry when the last run succeeded (or none ran). Loop-safety, in order:
-  //   1. no gh / repo context / SELF_HEAL!=1 → can't self-heal, page loudly.
+  //   1. no gh / repo context / staleness.self-heal off → can't self-heal, page loudly.
   //   2. a backup already queued/running → let it finish, don't pile up.
   //   3. last run failed/cancelled/timed-out → broken, not missed → page loudly, do NOT retry.
   //   4. otherwise (last ok or none) → trigger ONE catch-up backup, post a quiet note.
@@ -64,7 +63,7 @@ async function main(): Promise<void> {
   const onStale = async (msg: string): Promise<never> => {
     process.stderr.write(`STALE: ${msg}\n`);
 
-    if (!cfg.SELF_HEAL || !commandExists("gh") || !process.env.GITHUB_REPOSITORY) {
+    if (!cfg.staleness.selfHeal || !commandExists("gh") || !process.env.GITHUB_REPOSITORY) {
       return fail(msg);
     }
 
@@ -97,7 +96,7 @@ async function main(): Promise<void> {
       return fail(`${msg} — last backup run \`${last}\`; not auto-retrying (backup looks broken, not missed).`);
     }
 
-    if (cfg.DRY_RUN) {
+    if (cfg.staleness.dryRun) {
       await note(
         `🟡 [dry-run] PG backup STALE (${fileBasename}): ${msg} — would trigger a catch-up backup (last run \`${last || "none"}\`).`,
       );
@@ -163,10 +162,10 @@ async function main(): Promise<void> {
   // Size gate (#7): a fresh-but-truncated/empty object is BROKEN, not a missed tick — page directly
   // (never self-heal, which would just re-trigger a backup that may keep producing a bad object).
   if (newestEntry && Number.isFinite(newestEntry.size) && newestEntry.size < minBytes) {
-    await fail(`newest object ${newest} is ${newestEntry.size} bytes (< MIN_BYTES ${minBytes}) — truncated/empty, not just stale`);
+    await fail(`newest object ${newest} is ${newestEntry.size} bytes (< dump.min-bytes ${minBytes}) — truncated/empty, not just stale`);
   }
 
-  // Filename: <FILE_BASENAME>-YYYYMMDDTHHMMSSZ.<ext> → extract the stamp.
+  // Filename: <name>-YYYYMMDDTHHMMSSZ.<ext> → extract the stamp.
   const prefix = `${fileBasename}-`;
   let s = newest.startsWith(prefix) ? newest.slice(prefix.length) : newest;
   s = s.split(".")[0];

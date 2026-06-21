@@ -16,21 +16,22 @@
 // reads existing state and updates in place rather than double-posting. (`origin` drives the row
 // marker; `manual` is the legacy field, still written for cross-version safety, read as fallback.)
 //
-// Reads from the environment / profile:
-//   SLACK_BOT_TOKEN      xoxb-… (scope chat:write); unset → Slack disabled
-//   SLACK_CHANNEL        channel id (C…) to post in
-//   SLACK_ALERT_MENTION  mention prepended to loud alerts (default "<!here>")
-//   DISPLAY_TZ           IANA tz for the daily row's date + HH:MM labels (default UTC)
-//   FILE_BASENAME        names the per-day state object and the message header
-//   DASHBOARD_URL        if set, hyperlinks the daily header's "<basename> DB backup" to the dashboard
-//   ALERT_WEBHOOK_URL    optional generic failure webhook (Slack-compatible POST); see alertWebhook()
-//   R2_BUCKET + the RCLONE_CONFIG_R2_* exports set by the caller (for the daily-row state in R2)
+// Reads (all via the tolerant peekProfile(), so a config-failure path can still post):
+//   credentials.slackToken (SLACK_BOT_TOKEN, env)     unset → Slack disabled
+//   credentials.slackChannel (SLACK_CHANNEL, env)     channel id (C…) to post in
+//   slack.alertMention     mention prepended to loud alerts (profile; default "<!here>")
+//   name                   names the per-day state object and the message header (profile)
+//   dashboard.url          if set, hyperlinks the daily header's "<name> DB backup" to the dashboard
+//   credentials.alertWebhookUrl (ALERT_WEBHOOK_URL, env)   optional generic failure webhook
+//   credentials.r2.bucket (R2_BUCKET, env) + the RCLONE_CONFIG_R2_* exports set by the caller
+//   DISPLAY_TZ             read at module load for the Intl formatters (bridged from the profile timezone)
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { writeFileSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { capture } from "./proc.js";
+import { peekProfile } from "./config.js";
 import { DISPLAY_TZ, SLOTS_PER_DAY } from "./backupTypes.js";
 import type { RunOrigin } from "./backupTypes.js";
 import { tzParts } from "./backupHistory.js";
@@ -41,13 +42,15 @@ function warn(msg: string): void {
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
-function env(name: string): string {
-  return process.env[name] ?? "";
-}
+// All reads go through peekProfile() (tolerant — never exits) so a Slack ❌ can still post even when a
+// task-level config error has been detected. Credentials live under .credentials; config under the groups.
+const slackToken = (): string => peekProfile()?.credentials.slackToken ?? "";
+const slackChannel = (): string => peekProfile()?.credentials.slackChannel ?? "";
+const fileBasename = (): string => peekProfile()?.name ?? "";
 
 /** Slack is enabled iff a bot token and a channel are configured. */
 export function slackEnabled(): boolean {
-  return Boolean(env("SLACK_BOT_TOKEN")) && Boolean(env("SLACK_CHANNEL"));
+  return Boolean(slackToken()) && Boolean(slackChannel());
 }
 
 // ── Slack Web API (fetch, never throws) ──────────────────────────────────────
@@ -64,7 +67,7 @@ async function slackApi(method: string, payload: Record<string, unknown>): Promi
     const res = await fetch(`https://slack.com/api/${method}`, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${env("SLACK_BOT_TOKEN")}`,
+        Authorization: `Bearer ${slackToken()}`,
         "Content-Type": "application/json; charset=utf-8",
       },
       body: JSON.stringify(payload),
@@ -86,7 +89,7 @@ export async function slackPost(
 ): Promise<string> {
   if (!slackEnabled()) return "";
   const payload: Record<string, unknown> = {
-    channel: env("SLACK_CHANNEL"),
+    channel: slackChannel(),
     text,
     unfurl_links: false,
     unfurl_media: false,
@@ -107,7 +110,7 @@ export async function slackPost(
 export async function slackUpdate(ts: string, text: string): Promise<void> {
   if (!slackEnabled()) return;
   const resp = await slackApi("chat.update", {
-    channel: env("SLACK_CHANNEL"),
+    channel: slackChannel(),
     ts,
     text,
     unfurl_links: false,
@@ -119,7 +122,7 @@ export async function slackUpdate(ts: string, text: string): Promise<void> {
 /** One-off post (drill / staleness); `mention` prepends the alert mention. */
 export async function slackOneoff(text: string, mention = false): Promise<void> {
   if (!slackEnabled()) return;
-  const body = mention ? `${env("SLACK_ALERT_MENTION") || "<!here>"} ${text}` : text;
+  const body = mention ? `${peekProfile()?.slack.alertMention || "<!here>"} ${text}` : text;
   await slackPost(body);
 }
 
@@ -131,7 +134,7 @@ export async function slackOneoff(text: string, mention = false): Promise<void> 
  * Mirrors alert_webhook() in slack.sh (JSON.stringify replaces the jq / hand-escaped payload).
  */
 export async function alertWebhook(text: string): Promise<void> {
-  const url = env("ALERT_WEBHOOK_URL");
+  const url = peekProfile()?.credentials.alertWebhookUrl ?? "";
   if (!url) return;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 10_000); // mirrors curl -m 10
@@ -211,9 +214,9 @@ export function dailyLabel(now: Date = new Date()): string {
   return `${hh}:${get("minute")}`;
 }
 
-/** Wrap `text` in a Slack mrkdwn link to DASHBOARD_URL when set; otherwise return it unchanged. */
+/** Wrap `text` in a Slack mrkdwn link to the dashboard URL when set; otherwise return it unchanged. */
 export function dashboardLink(text: string): string {
-  const url = env("DASHBOARD_URL");
+  const url = peekProfile()?.dashboard.url ?? "";
   return url ? `<${url}|${text}>` : text;
 }
 
@@ -226,9 +229,9 @@ function dailyKeys(now: Date = new Date()): { dateKey: string; header: string; o
   const tz = tzAbbrFmt.formatToParts(now).find((p) => p.type === "timeZoneName")?.value ?? "";
   // Only the "<basename> DB backup" name is linked; the whole header stays bold (Slack renders a
   // link inside *…*). With unfurl_links:false on every post, the link never expands to a preview.
-  const name = dashboardLink(`${env("FILE_BASENAME")} DB backup`);
+  const name = dashboardLink(`${fileBasename()} DB backup`);
   const header = `*${name} — ${get("weekday")} ${get("day")} ${get("month")} ${get("year")} (${tz})*`;
-  const objKey = `_status/${env("FILE_BASENAME")}/${dateKey}.json`;
+  const objKey = `_status/${fileBasename()}/${dateKey}.json`;
   return { dateKey, header, objKey };
 }
 
@@ -280,8 +283,8 @@ export function renderDailyText(state: DailyState, now: Date = new Date()): stri
  * missing tick is benign. Mirrors _slack_daily_load.
  */
 async function loadDaily(now: Date = new Date()): Promise<DailyState | null> {
-  const bucket = env("R2_BUCKET");
-  const basename = env("FILE_BASENAME");
+  const bucket = peekProfile()?.credentials.r2.bucket ?? "";
+  const basename = fileBasename();
   const { dateKey, header, objKey } = dailyKeys(now);
 
   const listing = await rcloneTry([
@@ -336,7 +339,7 @@ async function persistDaily(state: DailyState, mode: "create" | "refresh", now: 
       return "";
     }
     state.ts = ts;
-    state.channel = env("SLACK_CHANNEL");
+    state.channel = slackChannel();
   } else {
     await slackUpdate(state.ts, text);
   }
@@ -344,7 +347,8 @@ async function persistDaily(state: DailyState, mode: "create" | "refresh", now: 
   const { objKey } = dailyKeys(now);
   const stateFile = join(tmpdir(), `slack-state-${process.pid}-${state.date}.json`);
   writeFileSync(stateFile, JSON.stringify(state));
-  const put = capture("rclone", ["copyto", stateFile, `r2:${env("R2_BUCKET")}/${objKey}`, "--s3-no-check-bucket"]);
+  const bucket = peekProfile()?.credentials.r2.bucket ?? "";
+  const put = capture("rclone", ["copyto", stateFile, `r2:${bucket}/${objKey}`, "--s3-no-check-bucket"]);
   if (!put.ok) warn("could not save slack daily state to R2");
   try {
     unlinkSync(stateFile);

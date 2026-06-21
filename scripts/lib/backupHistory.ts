@@ -5,10 +5,11 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import {
-  TIER_RETENTION_DAYS,
+  DEFAULT_RETENTION,
   DISPLAY_TZ,
   SLOTS_PER_DAY,
   DAYS_PER_WEEK,
+  type RetentionMap,
   type PublicRun,
   type PublicVerification,
   type PublicPayload,
@@ -110,9 +111,9 @@ export function slotApproxDate(weekStartOrdinal: number, weekday: number, slot: 
 
 // ── Retention / state derivation ─────────────────────────────────────────────
 
-export function retainedUntil(run: PublicRun): number {
+export function retainedUntil(run: PublicRun, retention: RetentionMap = DEFAULT_RETENTION): number {
   const start = Date.parse(run.t);
-  const maxDays = run.tiers.reduce((m, t) => Math.max(m, TIER_RETENTION_DAYS[t] ?? 0), 0);
+  const maxDays = run.tiers.reduce((m, t) => Math.max(m, retention[t]?.days ?? 0), 0);
   return start + maxDays * 86_400_000;
 }
 
@@ -120,10 +121,11 @@ export function deriveState(
   run: PublicRun | null,
   verification: PublicVerification | null,
   now: number,
+  retention: RetentionMap = DEFAULT_RETENTION,
 ): BackupCellState {
   if (!run) return "empty";
   if (!run.ok) return "failed";
-  if (now >= retainedUntil(run)) return "expired";
+  if (now >= retainedUntil(run, retention)) return "expired";
   // A matching verification that FAILED → "unverified" (amber): the backup exists but a restore/hash
   // drill failed. run.ok short-circuited above, so this can never be confused with a failed BACKUP.
   return verification ? (verification.ok ? "verified" : "unverified") : "ok";
@@ -136,12 +138,13 @@ export function deriveState(
  * copy's worth of bytes per tier whose retention window hasn't elapsed.
  */
 export function storedBytes(payload: PublicPayload, now: number): number {
+  const retention = payload.retention ?? DEFAULT_RETENTION;
   let total = 0;
   for (const run of payload.runs) {
     if (!run.ok || run.bytes == null) continue;
     const start = Date.parse(run.t);
     for (const tier of run.tiers) {
-      if (now < start + (TIER_RETENTION_DAYS[tier] ?? 0) * 86_400_000) total += run.bytes;
+      if (now < start + (retention[tier]?.days ?? 0) * 86_400_000) total += run.bytes;
     }
   }
   return total;
@@ -160,8 +163,9 @@ export function r2MonthlyCostUsd(bytes: number): number {
 
 // ── Grid assembly ────────────────────────────────────────────────────────────
 
-export function buildBackupGrid(payload: PublicPayload, now: Date, weeks = 58): BackupGrid {
+export function buildBackupGrid(payload: PublicPayload, now: Date, weeks = 52): BackupGrid {
   const nowMs = now.getTime();
+  const retention = payload.retention ?? DEFAULT_RETENTION;
 
   const verByTs = new Map<string, PublicVerification>();
   for (const v of payload.verifications) {
@@ -207,7 +211,7 @@ export function buildBackupGrid(payload: PublicPayload, now: Date, weeks = 58): 
       arr = [];
       byCol.set(col, arr);
     }
-    arr.push({ run, verification, state: deriveState(run, verification, nowMs), whenLabel: formatInTz(d) });
+    arr.push({ run, verification, state: deriveState(run, verification, nowMs, retention), whenLabel: formatInTz(d) });
   }
 
   // Reduce each slot to one cell. Headline colour = best success (verified > ok > expired); a slot

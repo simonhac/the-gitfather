@@ -8,7 +8,7 @@ import "./lib/bootEnv.js"; // first — loads $PROFILE (no-op if unset) before D
 //   --out      output path (default: ../dashboard/dist/index.html)
 //   --upload   rclone-upload the result to the public dashboard bucket (r2dash remote)
 //
-// Reads the PRIVATE rich logs from R2 (_log/<FILE_BASENAME>/*.jsonl via the `r2`
+// Reads the PRIVATE rich logs from R2 (_log/<name>/*.jsonl via the `r2`
 // remote), maps them to the SCRUBBED PublicPayload (drops raw error text; keeps the
 // project label + sizes per the privacy decision), esbuild-bundles dashboard/heatmap.ts,
 // and inlines bundle + data into dashboard/template.html.
@@ -19,7 +19,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadDashboardConfig } from "./lib/config.js";
+import { loadDashboardConfig, retentionFromConfig } from "./lib/config.js";
 import { readLogDir, downloadLogsFromR2 } from "./lib/logStore.js";
 import type { LogRun, LogVerification, PublicPayload, BackupTier } from "./lib/backupTypes.js";
 
@@ -35,16 +35,18 @@ const outPath = outIdx >= 0 ? argv[outIdx + 1] : join(SCRIPT_DIR, "../dashboard/
 const logdirIdx = argv.indexOf("--logdir");
 const logdir = logdirIdx >= 0 ? argv[logdirIdx + 1] : null; // read logs from a local dir instead of R2
 
-// Validate + type config (zod). R2_BUCKET/FILE_BASENAME are required only when reading logs from R2
+// Validate + type config (zod). R2_BUCKET/name are required only when reading logs from R2
 // (i.e. not --sample/--logdir); DASHBOARD_R2_BUCKET only with --upload — the schema enforces both.
 const cfg = loadDashboardConfig({ fromR2: !useSample && !logdir, upload });
-const label = cfg.DASHBOARD_LABEL ?? cfg.FILE_BASENAME ?? "database";
-const hideLinks = cfg.DASHBOARD_HIDE_RUN_LINKS;
+const label = cfg.dashboard.label ?? cfg.name ?? "database";
+const hideLinks = cfg.dashboard.hideRunLinks;
+const retention = retentionFromConfig(cfg.retention);
 
 function scrub(runs: LogRun[], verifications: LogVerification[]): PublicPayload {
   return {
     label,
     generatedAt: process.env.DASHBOARD_NOW || new Date().toISOString(),
+    retention, // per-tier windows in effect (from the profile; defaults otherwise) — drives expiry + subtitle
     // Privacy: drop key + raw error text; keep label, sizes, tiers, run links (toggleable).
     runs: runs.map((r) => ({ t: r.ts, ok: r.ok, tiers: r.tiers, bytes: r.bytes, runUrl: hideLinks ? null : r.runUrl })),
     // kind drives the tooltip wording (restore vs byte-check); counts/reason/key/tier stay private.
@@ -64,8 +66,8 @@ async function main(): Promise<void> {
   } else if (logdir) {
     ({ runs, verifications } = readLogDir(logdir));
   } else {
-    if (!cfg.R2_BUCKET || !cfg.FILE_BASENAME) throw new Error("R2_BUCKET / FILE_BASENAME must be set to read logs from R2");
-    ({ runs, verifications } = downloadLogsFromR2(cfg.R2_BUCKET, cfg.FILE_BASENAME));
+    if (!cfg.credentials.r2.bucket || !cfg.name) throw new Error("R2_BUCKET / profile name must be set to read logs from R2");
+    ({ runs, verifications } = downloadLogsFromR2(cfg.credentials.r2.bucket, cfg.name));
   }
   const payload = scrub(runs, verifications);
   console.log(`dashboard: ${payload.runs.length} runs, ${payload.verifications.length} verifications (label="${label}")`);
@@ -96,7 +98,7 @@ async function main(): Promise<void> {
   console.log(`dashboard: wrote ${outPath} (${(html.length / 1024).toFixed(0)} KB)`);
 
   if (upload) {
-    const dbucket = cfg.DASHBOARD_R2_BUCKET; // schema-required with --upload; guard kept for the type
+    const dbucket = cfg.credentials.dashboardR2.bucket; // schema-required with --upload; guard kept for the type
     if (!dbucket) throw new Error("DASHBOARD_R2_BUCKET must be set to --upload");
     execFileSync(
       "rclone",
@@ -108,10 +110,12 @@ async function main(): Promise<void> {
 }
 
 // ── Sample data (local preview only) ─────────────────────────────────────────
-// A deterministic 400-day history that exercises the full GFS picture: a 2-hourly
-// grandson run on every slot, promoted to daily/weekly/monthly on the 16:00-UTC
-// anchors (so the heatmap shows the green lifespan "staircase"), an organically
-// growing dump size, a sprinkle of isolated failures, and one believable outage.
+// A deterministic history that exercises the full GFS picture: a 2-hourly grandson run on
+// every slot, promoted to daily/weekly/monthly on the 16:00-UTC anchors (so the heatmap shows
+// the green lifespan "staircase"), an organically growing dump size, a sprinkle of isolated
+// failures, and one believable outage. Spans a bit more than the 52-week grid so daily/weekly
+// anchors visibly age to grey within the visible window.
+const SAMPLE_DAYS = 380;
 function makeSample(now: Date): { runs: LogRun[]; verifications: LogVerification[] } {
   let seed = 20260619;
   const rand = () => {
@@ -123,7 +127,7 @@ function makeSample(now: Date): { runs: LogRun[]; verifications: LogVerification
   const runs: LogRun[] = [];
   const verifications: LogVerification[] = [];
   const end = now.getTime();
-  const start = end - 400 * 86_400_000;
+  const start = end - SAMPLE_DAYS * 86_400_000;
   const first = Math.ceil(start / (2 * 3_600_000)) * 2 * 3_600_000;
 
   // Dump size grows toward the present: a mid-size production DB ~2.2 GB at the window

@@ -87,7 +87,7 @@ export function runToFile(cmd: string, args: string[], outPath: string, env: Env
  * a.stdout → b.stdin and b.stdout → the file fd, awaits BOTH, and resolves the FIRST non-zero
  * exit code (0 only if both succeed). This is the safety-critical piece: `age` exits 0 on a
  * truncated stream, so checking only the right-hand process would mask a pg_dump failure (the
- * MIN_BYTES floor in the caller is the second line of defence). A spawn-time error on either
+ * dump.min-bytes floor in the caller is the second line of defence). A spawn-time error on either
  * child kills the other and resolves 127 — never rejects, so fail() still runs.
  */
 export function pipeToFile(

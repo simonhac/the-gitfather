@@ -1,44 +1,46 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { parseEnvFile } from "../lib/profile.js";
+import { deepCamel, buildRawProfile } from "../lib/profile.js";
+import { profileSchema } from "../lib/config.js";
 
-test("parseEnvFile: quotes, comments, export, inline comments, whitespace", () => {
-  const env = parseEnvFile(
-    [
-      "# a comment",
-      "",
-      'BACKUP_PREFIX="pg/example"',
-      "FILE_BASENAME=example",
-      'PG_DUMP_FLAGS="-Fc --no-owner --no-privileges"',
-      "  ENCRYPTION='age'  ",
-      "STALE_HOURS=5   # inline comment",
-      "export GH_THING=bar",
-      "EMPTY=",
-    ].join("\n"),
+test("deepCamel: kebab/snake keys → camelCase, recursively (arrays + scalars untouched)", () => {
+  assert.deepEqual(
+    deepCamel({ "max-age-hours": 5, dump: { "client-major": 17 }, list: [{ "a-b": 1 }], plain: "x" }),
+    { maxAgeHours: 5, dump: { clientMajor: 17 }, list: [{ aB: 1 }], plain: "x" },
   );
-  assert.equal(env.BACKUP_PREFIX, "pg/example");
-  assert.equal(env.FILE_BASENAME, "example");
-  assert.equal(env.PG_DUMP_FLAGS, "-Fc --no-owner --no-privileges"); // spaces preserved inside quotes
-  assert.equal(env.ENCRYPTION, "age");
-  assert.equal(env.STALE_HOURS, "5"); // inline ` # comment` stripped from a bare value
-  assert.equal(env.GH_THING, "bar"); // `export ` prefix stripped
-  assert.equal(env.EMPTY, "");
-  assert.ok(!("# a comment" in env));
 });
 
-test("parseEnvFile: the committed example profile parses to the documented keys", () => {
+test("buildRawProfile: merges YAML config + credentials from env (env owns the credentials namespace)", () => {
   const here = dirname(fileURLToPath(import.meta.url));
-  const text = readFileSync(join(here, "../../profiles/example.env"), "utf8");
-  const env = parseEnvFile(text);
-  assert.equal(env.BACKUP_PREFIX, "pg/example");
-  assert.equal(env.FILE_BASENAME, "example");
-  assert.equal(env.PG_DUMP_FLAGS, "-Fc --no-owner --no-privileges");
-  assert.equal(env.ENCRYPTION, "none");
-  assert.equal(env.ANCHOR_HOUR_UTC, "16");
-  assert.equal(env.MIN_RATIO, "0.95");
-  assert.equal(env.DISPLAY_TZ, "UTC");
-  assert.equal(env.DRILL_EXTRA_TABLES, "another_table a_third_table"); // word-split downstream
+  const prev = { PROFILE: process.env.PROFILE, R2_BUCKET: process.env.R2_BUCKET };
+  process.env.PROFILE = join(here, "../../profiles/example.yaml");
+  process.env.R2_BUCKET = "secret-bucket";
+  try {
+    const raw = buildRawProfile() as { name?: string; credentials?: { r2?: { bucket?: string } } };
+    assert.equal(raw.name, "example"); // from YAML
+    assert.equal(raw.credentials?.r2?.bucket, "secret-bucket"); // from env
+  } finally {
+    process.env.PROFILE = prev.PROFILE;
+    process.env.R2_BUCKET = prev.R2_BUCKET;
+  }
+});
+
+test("the committed example.yaml validates and applies retention + defaults", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const prev = process.env.PROFILE;
+  process.env.PROFILE = join(here, "../../profiles/example.yaml");
+  try {
+    const r = profileSchema.safeParse(buildRawProfile()); // loose creds → file-only validation passes
+    assert.ok(r.success, JSON.stringify(r.error?.issues));
+    assert.equal(r.data.name, "example");
+    assert.equal(r.data.backupPrefix, "pg/example");
+    assert.equal(r.data.anchorHourUtc, 16);
+    assert.equal(r.data.dump.minBytes, 1_048_576);
+    assert.deepEqual(r.data.retention.father, { days: 91, label: "13 weeks" });
+    assert.deepEqual(r.data.retention.grandfather, { days: 730, label: "2 years" });
+  } finally {
+    process.env.PROFILE = prev;
+  }
 });

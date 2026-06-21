@@ -1,59 +1,63 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// Central, zod-validated, typed config for each task. Replaces the presence-only
-// requireEnv/numEnv/wordsEnv reads: every task now fails fast at startup with ONE
-// aggregated, human-readable report if any required variable is missing or malformed.
+// Central, zod-validated, typed config. The profile is a single nested YAML file
+// (profiles/*.yaml, kebab-case keys); the loader (lib/profile.ts) parses it, maps
+// kebab → camelCase, and merges credentials from the environment (GitHub secrets,
+// never the file). This module validates that combined object and exposes one typed
+// `Profile` per task — so config validation and doctor's preflight can never drift.
 //
-// Grammar philosophy (the plan's "lenient where it can't prove validity"):
-//   • STRICT semantic checks where a typo is genuinely catchable — enums (ENCRYPTION),
-//     numeric ranges (ANCHOR_HOUR_UTC 0..23, MIN_RATIO 0..1, STALE_HOURS > 0), a real
-//     IANA-tz probe (DISPLAY_TZ), env-boolean coercion (SELF_HEAL/DRY_RUN/…), and the
-//     {2hourly,daily,weekly,monthly} tier vocabulary (FORCE_TIERS).
-//   • LENIENT presence + light shape for credentials / identifiers / URLs — a 32-hex
-//     R2 account id, an `age1…` vs ssh recipient, an sslmode-less PG URL are all valid
-//     edge configs. Real credential/endpoint validity is proven by doctor's live probes
-//     (lib/preflight.ts), never by a regex here.
+// Grammar philosophy ("lenient where it can't prove validity"):
+//   • STRICT semantic checks where a typo is genuinely catchable — enums (encryption),
+//     numeric ranges (anchor-hour-utc 0..23, min-row-ratio 0..1, …), a real IANA-tz probe
+//     (timezone), env-boolean coercion, and natural-language durations (retention).
+//   • LENIENT presence + light shape for credentials / identifiers / URLs — real
+//     credential/endpoint validity is proven by doctor's live probes (lib/preflight.ts).
 //
-// loadConfig() prints var NAMES only (z.prettifyError) — it never echoes a value, so a
-// secret can't leak into a log — and exits 1. Config errors are pre-flight: no Slack.
+// reportConfigError prints field NAMES only (never a value, so a secret can't leak) — YAML
+// fields as their kebab key, credentials as their ENV var name (that's where users set them).
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { z } from "zod";
+import { parseDuration, type Duration } from "./duration.js";
+import { DEFAULT_RETENTION, type RetentionMap } from "./backupTypes.js";
+import { buildRawProfile } from "./profile.js";
 
 // ── Reusable grammars ────────────────────────────────────────────────────────
 
-const TIERS = ["2hourly", "daily", "weekly", "monthly"] as const;
 const ENCRYPTIONS = ["none", "age", "aes-gcm"] as const;
 
-/** Non-empty string — the lenient "presence" check for credentials/identifiers. */
 const nonEmpty = (msg = "must be set") => z.string().min(1, msg);
 
-/** Treat "" (a blank profile assignment) as unset, then make the schema optional. */
+/** Treat "" (a blank assignment) as unset, then make the schema optional. */
 const opt = <T extends z.ZodType>(schema: T) =>
   z.preprocess((v) => (v === "" ? undefined : v), schema.optional());
 
-/** Required string with a fallback; unset OR blank → `def`. */
 const strDefault = (def: string) =>
   z.preprocess((v) => (v === undefined || v === "" ? def : v), z.string());
 
 const isBlank = (v: unknown): boolean => v === undefined || (typeof v === "string" && v.trim() === "");
 
-/** Coerced integer in [min,max] with a default; unset/blank → def, garbage/out-of-range → error. */
 const intIn = (def: number, min: number, max: number) =>
   z.preprocess((v) => (isBlank(v) ? def : v), z.coerce.number().int().min(min).max(max));
 
-/** Coerced number in [min,max] with a default. */
 const numIn = (def: number, min: number, max: number) =>
   z.preprocess((v) => (isBlank(v) ? def : v), z.coerce.number().min(min).max(max));
 
-/** Optional coerced integer (no default) — unset/blank → undefined. */
 const optInt = (min: number, max: number) =>
   z.preprocess((v) => (isBlank(v) ? undefined : v), z.coerce.number().int().min(min).max(max).optional());
 
-/** Env-boolean: 1/0 · true/false · yes/no · on/off (lenient), but garbage → error. Unset/blank → def. */
+// Accepts a real YAML boolean OR an env-style string (1/0 · true/false · yes/no · on/off); unset/blank → def.
 const boolIn = (def: boolean) =>
-  z.preprocess((v) => (v === undefined || v === "" ? (def ? "true" : "false") : v), z.stringbool());
+  z.preprocess((v) => {
+    if (v === undefined || v === "") return def;
+    if (typeof v === "boolean") return v;
+    if (typeof v === "string") {
+      const s = v.trim().toLowerCase();
+      if (["1", "true", "yes", "on"].includes(s)) return true;
+      if (["0", "false", "no", "off"].includes(s)) return false;
+    }
+    return v; // anything else → let z.boolean() reject it
+  }, z.boolean());
 
-/** Postgres connection URL — parses + scheme ∈ {postgres,postgresql}. Lenient on host/port/sslmode. */
 function isPgUrl(s: string): boolean {
   try {
     const u = new URL(s);
@@ -64,13 +68,10 @@ function isPgUrl(s: string): boolean {
 }
 const pgUrl = nonEmpty().refine(isPgUrl, "must be a postgres:// or postgresql:// URL");
 
-/** R2 bucket / dashboard bucket — light shape catches whitespace/typos, not validity. */
 const bucket = nonEmpty().regex(/^[A-Za-z0-9._-]+$/, "may only contain letters, digits, . _ -");
 
-/** A (optionally schema-qualified) Postgres table name. */
 const tableName = z.string().regex(/^[\w.]+$/, "must be a table name (letters, digits, _ and .)");
 
-/** IANA timezone, probed via Intl (default UTC). */
 function isValidTz(tz: string): boolean {
   try {
     new Intl.DateTimeFormat("en-US", { timeZone: tz });
@@ -79,19 +80,17 @@ function isValidTz(tz: string): boolean {
     return false;
   }
 }
-const displayTz = z.string().default("UTC").refine(isValidTz, "must be a valid IANA timezone (e.g. UTC, Australia/Perth)");
+const timezone = z.string().default("UTC").refine(isValidTz, "must be a valid IANA timezone (e.g. UTC, Australia/Perth)");
 
-/** Whitespace-split → list of table names (DRILL_EXTRA_TABLES); unset → []. */
+/** YAML list (or whitespace string) → table names; unset → []. */
 const tableList = z
-  .preprocess((v) => (typeof v === "string" ? v.split(/\s+/).filter(Boolean) : v), z.array(tableName))
+  .preprocess(
+    (v) => (typeof v === "string" ? v.split(/\s+/).filter(Boolean) : v),
+    z.array(tableName),
+  )
   .default([]);
 
-/** Whitespace-split → list of tiers (FORCE_TIERS); unset → []. Unknown tier name → error. */
-const tierList = z
-  .preprocess((v) => (typeof v === "string" ? v.split(/\s+/).filter(Boolean) : v), z.array(z.enum(TIERS)))
-  .default([]);
-
-/** PG_DUMP_FLAGS → argv array; unset/blank → the standard custom-format flags. */
+/** dump.flags → argv array; unset/blank → the standard custom-format flags. */
 const dumpFlags = z
   .preprocess(
     (v) => (typeof v === "string" && v.trim() !== "" ? v : "-Fc --no-owner --no-privileges"),
@@ -99,199 +98,276 @@ const dumpFlags = z
   )
   .transform((s) => s.split(/\s+/).filter(Boolean));
 
-/** SLACK_BOT_TOKEN set ⇒ SLACK_CHANNEL must be set too (else the row silently never posts). */
-function requireSlackChannel(
-  v: { SLACK_BOT_TOKEN?: string; SLACK_CHANNEL?: string },
-  ctx: z.core.$RefinementCtx,
-): void {
-  if (v.SLACK_BOT_TOKEN && !v.SLACK_CHANNEL) {
-    ctx.addIssue({ code: "custom", path: ["SLACK_CHANNEL"], message: "required when SLACK_BOT_TOKEN is set" });
+/** Natural-language duration ("13 weeks") → { days, label }; unset/blank → the tier default. */
+const durationField = (def: Duration) =>
+  z.preprocess(
+    (v) => (isBlank(v) ? def.label : v),
+    z.string().transform((s, ctx): Duration => {
+      try {
+        return parseDuration(s);
+      } catch (e) {
+        ctx.addIssue({ code: "custom", message: (e as Error).message });
+        return z.NEVER;
+      }
+    }),
+  );
+
+// ── Config groups (camelCase, from the YAML profile) ─────────────────────────
+
+const dumpGroup = z
+  .object({
+    flags: dumpFlags,
+    clientMajor: optInt(1, 99),
+    minBytes: intIn(1_048_576, 0, Number.MAX_SAFE_INTEGER),
+  })
+  .prefault({} as never);
+
+const integrityGroup = z
+  .object({
+    checksum: boolIn(true), // record a SHA-256 of the uploaded object (durable hash baseline)
+    checkStructure: boolIn(true), // pg_restore -l TOC check before declaring success (none-mode)
+    verifyAfterUpload: boolIn(false), // re-download + (decrypt) + pg_restore -l (only age-mode structural check)
+  })
+  .prefault({} as never);
+
+const retentionGroup = z
+  .object({
+    grandson: durationField(DEFAULT_RETENTION["2hourly"]),
+    son: durationField(DEFAULT_RETENTION.daily),
+    father: durationField(DEFAULT_RETENTION.weekly),
+    grandfather: durationField(DEFAULT_RETENTION.monthly),
+  })
+  .prefault({} as never);
+
+const drillGroup = z
+  .object({
+    // required by the drill/verify-durable tasks (see requireDrillCreds), optional at the profile level so
+    // a backup-only profile without a drill: block still validates.
+    rowCountTable: opt(nonEmpty().regex(/^[\w.]+$/, "must be a table name (letters, digits, _ and .)")),
+    presentTables: tableList, // must EXIST in the restore (rows optional)
+    nonemptyTables: tableList, // must exist AND have ≥1 row
+    minRowRatio: numIn(0.95, 0, 1), // restored/live floor for the row-count table
+    maxRowRatio: numIn(2, 1, 1_000_000), // restored/live ceiling — catches duplicated/double-restored rows
+    maxRowDrop: numIn(0, 0, 1), // 0 = off; else fail if a table dropped > this fraction vs the prior passing drill
+  })
+  .prefault({} as never);
+
+const verifyDurableGroup = z
+  .object({
+    fresh: boolIn(true), // hash-check new durable objects + restore the freshest daily
+    aged: boolIn(true), // re-restore the newest weekly/monthly ≥ retest-days old
+    retestDays: intIn(14, 1, 365), // 13 to re-validate while still inside the 14-day WORM lock
+    maxRestores: intIn(2, 0, 100), // cap full restores per run (hash-checks uncapped)
+  })
+  .prefault({} as never);
+
+const stalenessGroup = z
+  .object({
+    maxAgeHours: intIn(3, 1, Number.MAX_SAFE_INTEGER), // alert if newest 2hourly object is older than this
+    healWorkflow: strDefault("pg-backup.yml"), // workflow self-heal re-triggers
+    selfHeal: boolIn(true),
+    dryRun: boolIn(false),
+  })
+  .prefault({} as never);
+
+const slackGroup = z
+  .object({
+    // the channel id is a deployment identifier paired with the bot token, so it lives in the env
+    // credentials group (SLACK_CHANNEL), like r2.bucket pairs with the R2 keys — not here.
+    alertMention: strDefault("<!here>"),
+  })
+  .prefault({} as never);
+
+const dashboardGroup = z
+  .object({
+    label: opt(nonEmpty()),
+    hideRunLinks: boolIn(false),
+    url: opt(z.url()),
+  })
+  .prefault({} as never);
+
+// ── Credentials (from env/secrets; all optional here — per-task refinements require them) ──
+
+const r2Creds = z
+  .object({
+    accountId: opt(nonEmpty()),
+    bucket: opt(bucket),
+    accessKeyId: opt(nonEmpty()),
+    secretAccessKey: opt(nonEmpty()),
+  })
+  .prefault({} as never);
+
+const credentialsGroup = z
+  .object({
+    databaseUrl: opt(pgUrl), // PG_BACKUP_DATABASE_URL
+    drillDatabaseUrl: opt(pgUrl), // DRILL_DATABASE_URL
+    liveDatabaseUrl: opt(pgUrl), // PG_LIVE_DATABASE_URL
+    r2: r2Creds,
+    dashboardR2: r2Creds,
+    age: z.object({ recipient: opt(nonEmpty()), identity: opt(nonEmpty()) }).prefault({} as never),
+    slackToken: opt(nonEmpty()), // SLACK_BOT_TOKEN (secret)
+    slackChannel: opt(nonEmpty()), // SLACK_CHANNEL (non-secret id, paired with the token; a GitHub Variable)
+    heartbeatUrl: opt(z.url()), // HEARTBEAT_URL
+    alertWebhookUrl: opt(z.url()), // ALERT_WEBHOOK_URL
+  })
+  .prefault({} as never);
+
+// ── Full profile schema (loose creds) — drives getProfile()'s typed singleton ────────────
+
+export const profileSchema = z.object({
+  // required by every real task (see requireNameAndPrefix), optional at the profile level so the
+  // dashboard --sample path (which needs neither) still validates with an empty profile.
+  name: opt(nonEmpty()),
+  backupPrefix: opt(nonEmpty()),
+  timezone,
+  encryption: z.enum(ENCRYPTIONS).default("none"),
+  anchorHourUtc: intIn(16, 0, 23),
+  dump: dumpGroup,
+  integrity: integrityGroup,
+  retention: retentionGroup,
+  drill: drillGroup,
+  verifyDurable: verifyDurableGroup,
+  staleness: stalenessGroup,
+  slack: slackGroup,
+  dashboard: dashboardGroup,
+  credentials: credentialsGroup,
+});
+
+export type Profile = z.infer<typeof profileSchema>;
+
+// ── Per-task required-credential refinements ─────────────────────────────────
+
+type Ctx = z.core.$RefinementCtx;
+const miss = (ctx: Ctx, path: (string | number)[], message: string) =>
+  ctx.addIssue({ code: "custom", path, message });
+
+function requireNameAndPrefix(v: Profile, ctx: Ctx): void {
+  if (!v.name) miss(ctx, ["name"], "must be set");
+  if (!v.backupPrefix) miss(ctx, ["backupPrefix"], "must be set");
+}
+function requireR2(v: Profile, ctx: Ctx): void {
+  const r = v.credentials.r2;
+  if (!r.accountId) miss(ctx, ["credentials", "r2", "accountId"], "must be set");
+  if (!r.bucket) miss(ctx, ["credentials", "r2", "bucket"], "must be set");
+  if (!r.accessKeyId) miss(ctx, ["credentials", "r2", "accessKeyId"], "must be set");
+  if (!r.secretAccessKey) miss(ctx, ["credentials", "r2", "secretAccessKey"], "must be set");
+}
+function requireSlackChannel(v: Profile, ctx: Ctx): void {
+  if (v.credentials.slackToken && !v.credentials.slackChannel) {
+    miss(ctx, ["credentials", "slackChannel"], "required when the Slack bot token (SLACK_BOT_TOKEN) is set");
   }
 }
 
-// ── Per-task schemas ─────────────────────────────────────────────────────────
-
-export const backupSchema = z
-  .object({
-    PROFILE: nonEmpty("set PROFILE to a profiles/*.env file"),
-    BACKUP_PREFIX: nonEmpty("profile must set BACKUP_PREFIX"),
-    FILE_BASENAME: nonEmpty("profile must set FILE_BASENAME"),
-    PG_BACKUP_DATABASE_URL: pgUrl,
-    R2_ACCOUNT_ID: nonEmpty(),
-    R2_BUCKET: bucket,
-    R2_ACCESS_KEY_ID: nonEmpty(),
-    R2_SECRET_ACCESS_KEY: nonEmpty(),
-    ENCRYPTION: z.enum(ENCRYPTIONS).default("none"),
-    AGE_RECIPIENT: opt(nonEmpty()),
-    AGE_IDENTITY: opt(nonEmpty()),
-    // ── Backup-time integrity ──
-    BACKUP_SHA256: boolIn(true), // record a SHA-256 of the uploaded object (durable hash-verify baseline)
-    BACKUP_VALIDATE_STRUCTURE: boolIn(true), // pg_restore -l TOC check before declaring success (none-mode)
-    BACKUP_VERIFY: boolIn(false), // opt-in post-upload re-download + decrypt + pg_restore -l (only age-mode structural check)
-    MIN_BYTES: intIn(1_048_576, 0, Number.MAX_SAFE_INTEGER),
-    ANCHOR_HOUR_UTC: intIn(16, 0, 23),
-    PG_DUMP_FLAGS: dumpFlags,
-    PG_CLIENT_MAJOR: optInt(1, 99),
-    FORCE_TIERS: tierList,
-    HEARTBEAT_URL: opt(z.url()),
-    SLACK_BOT_TOKEN: opt(nonEmpty()),
-    SLACK_CHANNEL: opt(nonEmpty()),
-    DASHBOARD_URL: opt(z.url()),
-    ALERT_WEBHOOK_URL: opt(z.url()),
-    DISPLAY_TZ: displayTz,
-  })
+export const backupSchema = profileSchema
+  .superRefine(requireNameAndPrefix)
+  .superRefine(requireR2)
   .superRefine(requireSlackChannel)
   .superRefine((v, ctx) => {
-    if (v.ENCRYPTION === "age" && !v.AGE_RECIPIENT) {
-      ctx.addIssue({ code: "custom", path: ["AGE_RECIPIENT"], message: "required when ENCRYPTION=age" });
+    if (!v.credentials.databaseUrl) miss(ctx, ["credentials", "databaseUrl"], "must be set");
+    if (v.encryption === "age" && !v.credentials.age.recipient) {
+      miss(ctx, ["credentials", "age", "recipient"], "required when encryption=age");
     }
-  })
-  .superRefine((v, ctx) => {
-    if (v.BACKUP_VERIFY && v.ENCRYPTION === "age" && !v.AGE_IDENTITY) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["AGE_IDENTITY"],
-        message: "required when BACKUP_VERIFY=1 and ENCRYPTION=age (to decrypt for the post-upload check)",
-      });
+    if (v.integrity.verifyAfterUpload && v.encryption === "age" && !v.credentials.age.identity) {
+      miss(ctx, ["credentials", "age", "identity"], "required when integrity.verify-after-upload is on and encryption=age");
     }
   });
 
-// Shared drill field grammar — drillSchema (the weekly newest-2hourly drill) and verifyDurableSchema
-// (the daily durable primary/secondary job) both build on it, so the two can never drift.
-const drillFields = {
-  PROFILE: nonEmpty("set PROFILE to a profiles/*.env file"),
-  BACKUP_PREFIX: nonEmpty("profile must set BACKUP_PREFIX"),
-  FILE_BASENAME: strDefault("pg"),
-  DRILL_SENTINEL_TABLE: nonEmpty("profile must set DRILL_SENTINEL_TABLE").regex(
-    /^[\w.]+$/,
-    "must be a table name (letters, digits, _ and .)",
-  ),
-  DRILL_EXTRA_TABLES: tableList,
-  DRILL_EXPECTED_TABLES: tableList, // must exist AND be non-empty in the restore (default [])
-  R2_ACCOUNT_ID: nonEmpty(),
-  R2_BUCKET: bucket,
-  R2_ACCESS_KEY_ID: nonEmpty(),
-  R2_SECRET_ACCESS_KEY: nonEmpty(),
-  DRILL_DATABASE_URL: pgUrl,
-  PG_LIVE_DATABASE_URL: pgUrl,
-  MIN_RATIO: numIn(0.95, 0, 1), // restored/live floor for the sentinel
-  MAX_RATIO: numIn(2, 1, 1_000_000), // restored/live ceiling — catches duplicated/double-restored rows
-  DRILL_DRIFT_MAX_DROP: numIn(0, 0, 1), // 0 = disabled; else fail if a table dropped > this vs the prior passing drill
-  ENCRYPTION: z.enum(ENCRYPTIONS).default("none"),
-  AGE_IDENTITY: opt(nonEmpty()),
-  PG_CLIENT_MAJOR: optInt(1, 99),
-  SLACK_BOT_TOKEN: opt(nonEmpty()),
-  SLACK_CHANNEL: opt(nonEmpty()),
-  ALERT_WEBHOOK_URL: opt(z.url()),
-  DISPLAY_TZ: displayTz,
-};
-
-function requireAgeIdentity(v: { ENCRYPTION?: string; AGE_IDENTITY?: string }, ctx: z.core.$RefinementCtx): void {
-  if (v.ENCRYPTION === "age" && !v.AGE_IDENTITY) {
-    ctx.addIssue({
-      code: "custom",
-      path: ["AGE_IDENTITY"],
-      message: "required when ENCRYPTION=age (needed to decrypt .age objects)",
-    });
+function requireDrillCreds(v: Profile, ctx: Ctx): void {
+  requireNameAndPrefix(v, ctx);
+  requireR2(v, ctx);
+  requireSlackChannel(v, ctx);
+  if (!v.drill.rowCountTable) miss(ctx, ["drill", "rowCountTable"], "must be set");
+  if (!v.credentials.drillDatabaseUrl) miss(ctx, ["credentials", "drillDatabaseUrl"], "must be set");
+  if (!v.credentials.liveDatabaseUrl) miss(ctx, ["credentials", "liveDatabaseUrl"], "must be set");
+  if (v.encryption === "age" && !v.credentials.age.identity) {
+    miss(ctx, ["credentials", "age", "identity"], "required when encryption=age (needed to decrypt .age objects)");
   }
 }
 
-export const drillSchema = z.object(drillFields).superRefine(requireSlackChannel).superRefine(requireAgeIdentity);
+export const drillSchema = profileSchema.superRefine(requireDrillCreds);
+export const verifyDurableSchema = profileSchema.superRefine(requireDrillCreds);
 
-export const verifyDurableSchema = z
-  .object({
-    ...drillFields,
-    // Daily durable-verify cadence. Primary = restore freshest daily + hash-check same-day copies;
-    // secondary = restore the newest weekly/monthly ≥ RETEST_DAYS old not yet secondarily validated.
-    DURABLE_PRIMARY: boolIn(true),
-    DURABLE_SECONDARY: boolIn(true),
-    RETEST_DAYS: intIn(14, 1, 365), // set 13 to re-validate while still inside the 14-day WORM lock
-    DURABLE_VERIFY_MAX_RESTORES: intIn(2, 0, 100), // cap full restores per run (hash-checks uncapped)
-  })
-  .superRefine(requireSlackChannel)
-  .superRefine(requireAgeIdentity);
-
-export const stalenessSchema = z
-  .object({
-    PROFILE: nonEmpty("set PROFILE to a profiles/*.env file"),
-    BACKUP_PREFIX: nonEmpty("profile must set BACKUP_PREFIX"),
-    FILE_BASENAME: nonEmpty("profile must set FILE_BASENAME"),
-    R2_ACCOUNT_ID: nonEmpty(),
-    R2_BUCKET: bucket,
-    R2_ACCESS_KEY_ID: nonEmpty(),
-    R2_SECRET_ACCESS_KEY: nonEmpty(),
-    STALE_HOURS: intIn(3, 1, Number.MAX_SAFE_INTEGER),
-    MIN_BYTES: intIn(1_048_576, 0, Number.MAX_SAFE_INTEGER), // a fresh object smaller than this is broken, not just stale
-    BACKUP_WORKFLOW: strDefault("pg-backup.yml"),
-    SELF_HEAL: boolIn(true),
-    DRY_RUN: boolIn(false),
-    SLACK_BOT_TOKEN: opt(nonEmpty()),
-    SLACK_CHANNEL: opt(nonEmpty()),
-    ALERT_WEBHOOK_URL: opt(z.url()),
-    DISPLAY_TZ: displayTz,
-  })
+export const stalenessSchema = profileSchema
+  .superRefine(requireNameAndPrefix)
+  .superRefine(requireR2)
   .superRefine(requireSlackChannel);
 
 /**
- * Dashboard config. The DASHBOARD_R2_* / R2_BUCKET requirements depend on RUNTIME flags
- * (reading logs from R2 vs --sample/--logdir; --upload), so the schema is parameterised:
- * build-dashboard.ts passes the flags it parsed; doctor validates with fromR2:true.
+ * Dashboard config. R2_BUCKET / name requirements depend on RUNTIME flags (reading logs from R2 vs
+ * --sample/--logdir; --upload), so the schema is parameterised: build-dashboard.ts passes the flags it
+ * parsed; doctor validates with fromR2:true.
  */
 export function dashboardSchema(opts: { fromR2?: boolean; upload?: boolean } = {}) {
-  return z
-    .object({
-      DASHBOARD_LABEL: opt(nonEmpty()),
-      FILE_BASENAME: opt(nonEmpty()),
-      DASHBOARD_HIDE_RUN_LINKS: boolIn(false),
-      R2_BUCKET: opt(bucket),
-      DASHBOARD_R2_BUCKET: opt(bucket),
-      DISPLAY_TZ: displayTz,
-    })
-    .superRefine((v, ctx) => {
-      if (opts.fromR2 && !v.R2_BUCKET) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["R2_BUCKET"],
-          message: "required to read logs from R2 (or pass --sample / --logdir)",
-        });
-      }
-      if (opts.fromR2 && !v.FILE_BASENAME) {
-        ctx.addIssue({ code: "custom", path: ["FILE_BASENAME"], message: "required to read logs from R2" });
-      }
-      if (opts.upload && !v.DASHBOARD_R2_BUCKET) {
-        ctx.addIssue({ code: "custom", path: ["DASHBOARD_R2_BUCKET"], message: "required with --upload" });
-      }
-    });
+  return profileSchema.superRefine((v, ctx) => {
+    if (opts.fromR2 && !v.name) miss(ctx, ["name"], "required to read logs from R2");
+    if (opts.fromR2 && !v.credentials.r2.bucket) {
+      miss(ctx, ["credentials", "r2", "bucket"], "required to read logs from R2 (or pass --sample / --logdir)");
+    }
+    if (opts.upload && !v.credentials.dashboardR2.bucket) {
+      miss(ctx, ["credentials", "dashboardR2", "bucket"], "required with --upload");
+    }
+  });
 }
 
 // ── Typed outputs ────────────────────────────────────────────────────────────
 
-export type BackupConfig = z.infer<typeof backupSchema>;
-export type DrillConfig = z.infer<typeof drillSchema>;
-export type VerifyDurableConfig = z.infer<typeof verifyDurableSchema>;
-export type StalenessConfig = z.infer<typeof stalenessSchema>;
-export type DashboardConfig = z.infer<ReturnType<typeof dashboardSchema>>;
+export type BackupConfig = Profile;
+export type DrillConfig = Profile;
+export type VerifyDurableConfig = Profile;
+export type StalenessConfig = Profile;
+export type DashboardConfig = Profile;
 
-// ── Loader ───────────────────────────────────────────────────────────────────
+// ── retention → dashboard RetentionMap ───────────────────────────────────────
 
-/**
- * Print a config validation failure to stderr — every issue at once, names only (never a value, so it's
- * secret-safe). Factored out of loadConfig so a task can validate via safeParse, record a failure
- * (e.g. backup-pg-to-r2's ❌ Slack tick), and then emit the same report before exiting.
- */
+export function retentionFromConfig(r: Profile["retention"]): RetentionMap {
+  return { "2hourly": r.grandson, daily: r.son, weekly: r.father, monthly: r.grandfather };
+}
+
+// ── Error reporting (secret-safe; YAML fields as kebab, credentials as their ENV name) ───
+
+const camelToKebab = (s: string): string => s.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`);
+
+/** Credential object-path → the ENV var users actually set (so the report points at the right place). */
+const CRED_ENV: Record<string, string> = {
+  "credentials.databaseUrl": "PG_BACKUP_DATABASE_URL",
+  "credentials.drillDatabaseUrl": "DRILL_DATABASE_URL",
+  "credentials.liveDatabaseUrl": "PG_LIVE_DATABASE_URL",
+  "credentials.r2.accountId": "R2_ACCOUNT_ID",
+  "credentials.r2.bucket": "R2_BUCKET",
+  "credentials.r2.accessKeyId": "R2_ACCESS_KEY_ID",
+  "credentials.r2.secretAccessKey": "R2_SECRET_ACCESS_KEY",
+  "credentials.dashboardR2.bucket": "DASHBOARD_R2_BUCKET",
+  "credentials.dashboardR2.accessKeyId": "DASHBOARD_R2_ACCESS_KEY_ID",
+  "credentials.dashboardR2.secretAccessKey": "DASHBOARD_R2_SECRET_ACCESS_KEY",
+  "credentials.age.recipient": "AGE_RECIPIENT",
+  "credentials.age.identity": "AGE_IDENTITY",
+  "credentials.slackToken": "SLACK_BOT_TOKEN",
+  "credentials.slackChannel": "SLACK_CHANNEL",
+  "credentials.heartbeatUrl": "HEARTBEAT_URL",
+  "credentials.alertWebhookUrl": "ALERT_WEBHOOK_URL",
+};
+
+function displayPath(path: readonly (string | number | symbol)[]): string {
+  const dotted = path.map(String).join(".");
+  if (dotted.startsWith("credentials.")) return CRED_ENV[dotted] ?? dotted.split(".").map(camelToKebab).join(".");
+  return path.map((s) => (typeof s === "number" ? `[${s}]` : camelToKebab(String(s)))).join(".");
+}
+
 export function reportConfigError(err: z.ZodError): void {
   process.stderr.write("✗ config validation failed:\n\n");
-  process.stderr.write(`${z.prettifyError(err)}\n\n`);
-  process.stderr.write("Fix the variable(s) above in your profile or environment, then re-run.\n");
+  for (const issue of err.issues) {
+    process.stderr.write(`  ✗ ${displayPath(issue.path) || "(profile root)"} — ${issue.message}\n`);
+  }
+  process.stderr.write("\nFix the field(s) above in your profile (YAML) or environment, then re-run.\n");
 }
 
 /**
- * Validate process.env against `schema`. On failure, print every issue at once (names
- * only — never a value) and exit 1; on success, return the typed config. Shared by the
- * tasks AND doctor, so the two can never drift.
+ * Validate the merged profile object (YAML config + env credentials) against `schema`. On failure,
+ * print every issue at once (names only — secret-safe) and exit 1; on success, return the typed config.
+ * Shared by the tasks AND doctor, so the two can never drift.
  */
 export function loadConfig<T extends z.ZodType>(schema: T): z.infer<T> {
-  const res = schema.safeParse(process.env);
+  const res = schema.safeParse(buildRawProfile());
   if (!res.success) {
     reportConfigError(res.error);
     process.exit(1);
@@ -305,3 +381,34 @@ export const loadVerifyDurableConfig = (): VerifyDurableConfig => loadConfig(ver
 export const loadStalenessConfig = (): StalenessConfig => loadConfig(stalenessSchema);
 export const loadDashboardConfig = (opts?: { fromR2?: boolean; upload?: boolean }): DashboardConfig =>
   loadConfig(dashboardSchema(opts));
+
+// ── Validated singleton (for the libs that read config globally: slack.ts / runlog.ts / logStore.ts) ──
+// Validated with the loose-cred profileSchema (creds optional — those libs null-guard, and a task's
+// load*Config already enforced the creds it needs by the time these run).
+
+let cached: Profile | null = null;
+
+/** The cached, validated profile; lazily validates + caches on first read. Exits 1 on a bad profile. */
+export function getProfile(): Profile {
+  if (cached) return cached;
+  cached = loadConfig(profileSchema);
+  return cached;
+}
+
+/**
+ * Tolerant peer of getProfile() for BEST-EFFORT readers (slack.ts, backup's config-failure path):
+ * returns the cached profile, else a loose-schema safeParse (which passes even when a task's required
+ * *credential* is missing — those are optional here), else null. NEVER exits — so a Slack ❌ can still
+ * be posted when a task-level config error has already been detected. Caches a successful parse.
+ */
+export function peekProfile(): Profile | null {
+  if (cached) return cached;
+  const res = profileSchema.safeParse(buildRawProfile());
+  if (res.success) cached = res.data;
+  return res.success ? res.data : null;
+}
+
+/** Test seam — inject a fully-formed Profile (skips file/env reads). */
+export function setProfileForTest(p: Profile): void {
+  cached = p;
+}

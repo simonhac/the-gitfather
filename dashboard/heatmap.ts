@@ -11,6 +11,8 @@ import {
   DAYS_PER_WEEK,
   COLS_PER_WEEK,
   DISPLAY_TZ,
+  DEFAULT_RETENTION,
+  maxRetained,
   type PublicPayload,
   type BackupCellState,
   type BackupCell,
@@ -23,7 +25,7 @@ const GAP = 2;
 const PITCH = CELL + GAP;
 const LEFT_AXIS = 62; // fits "DD MMM YY" in monospace
 const TOP_AXIS = 20;
-const WEEKS = 58;
+const WEEKS = 52;
 const NOTCH = 3.5; // top-right corner bite that marks a multi-run slot
 const MONO = "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
 
@@ -82,12 +84,17 @@ const app = document.getElementById("app")!;
 // ── Header ───────────────────────────────────────────────────────────────────
 const header = elem("header", "header");
 header.appendChild(elem("h1", undefined, `${payload.label} — backup history`));
+const R = payload.retention ?? DEFAULT_RETENTION;
 header.appendChild(
   elem(
     "p",
     "subtitle",
-    `Every 2-hourly off-site Postgres backup over the last ${WEEKS} weeks (400-day GFS window). Times in ${DISPLAY_TZ}. ` +
-      `Grey is the GFS lifecycle at work — most slots age out after 2 days, leaving the daily/weekly/monthly anchors green for 21/70/400 days.`,
+    `This grid shows every off-site Postgres backup over the last ${WEEKS} weeks — a fresh one every 2 hours, ` +
+      `${SLOTS_PER_DAY} a day. Older copies thin out on a Grandfather–Father–Son schedule: the 2-hourly ` +
+      `“grandsons” are kept for ${R["2hourly"].label}, then one “son” per day for ${R.daily.label}, one “father” ` +
+      `per week for ${R.weekly.label}, and one “grandfather” per month for ${R.monthly.label} — at its fullest ` +
+      `about ${maxRetained(R)} backups at once. Greens are retained (brighter = restore-verified), amber flags a ` +
+      `failed verification drill, grey has aged out. Times in ${DISPLAY_TZ}.`,
   ),
 );
 app.appendChild(header);

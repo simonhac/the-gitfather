@@ -13,6 +13,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { capture, commandExists } from "./proc.js";
+import { pgConn } from "./pgconn.js";
 
 export interface ProbeResult {
   /** Short label shown in the checklist, e.g. "rclone" or "Postgres (backup source)". */
@@ -83,9 +84,15 @@ export function checkR2(remote: string, bucket: string, label = "R2"): ProbeResu
 export function checkPostgres(url: string, label: string): ProbeResult {
   const name = `Postgres (${label})`;
   if (!commandExists("psql")) return { name, ok: false, detail: "psql not found on PATH" };
-  const res = capture("psql", [url, "-tAc", "select 1"], { ...process.env, PGCONNECT_TIMEOUT: "10" });
-  const ok = res.ok && res.out.replace(/\s/g, "") === "1";
-  return { name, ok, detail: ok ? "connected, select 1 ok" : "connection / auth failed" };
+  // Keep the password off psql's argv — it rides in a temp 0600 PGPASSFILE.
+  const conn = pgConn(url);
+  try {
+    const res = capture("psql", [conn.safeUrl, "-tAc", "select 1"], { ...conn.env, PGCONNECT_TIMEOUT: "10" });
+    const ok = res.ok && res.out.replace(/\s/g, "") === "1";
+    return { name, ok, detail: ok ? "connected, select 1 ok" : "connection / auth failed" };
+  } finally {
+    conn.cleanup();
+  }
 }
 
 /** Slack token is valid (auth.test). Read-only — posts nothing. */

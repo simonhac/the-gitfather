@@ -3,18 +3,18 @@ import "./lib/bootEnv.js"; // MUST be first — loads $PROFILE before backupType
 // Durable-tier verification — guarantees every daily/weekly/monthly object is integrity-tested.
 // Runs daily (caller-owned cron); replaces the standalone weekly restore-drill.
 //
-//   PRIMARY (DURABLE_PRIMARY): on first sight, hash-check every durable object against the
+//   PRIMARY (verify-durable.fresh): on first sight, hash-check every durable object against the
 //     SHA-256 recorded at backup time (proves each server-side copy is byte-intact), AND full
 //     pg_restore the freshest daily object (proves the freshest dump restores — the "0 errors" leg).
-//   SECONDARY (DURABLE_SECONDARY): full pg_restore the newest weekly/monthly object ≥ RETEST_DAYS
+//   SECONDARY (verify-durable.aged): full pg_restore the newest weekly/monthly object ≥ verify-durable.retest-days
 //     old not yet restore-verified (the aged-copy proof, just inside the 14-day WORM window).
 //
 // Net: weekly/monthly are validated twice (hash on write + restore at ~2 weeks), daily once. State
 // lives in the verifications log (joined in memory via logStore), so a missed cron self-corrects.
 //
-// Usage:  PROFILE=profiles/example.env npx tsx scripts/verify-durable-pg.ts
+// Usage:  PROFILE=profiles/example.yaml npx tsx scripts/verify-durable-pg.ts
 // Env mirrors the drill (R2 creds, DRILL_DATABASE_URL, PG_LIVE_DATABASE_URL, AGE_IDENTITY for .age),
-// plus DURABLE_PRIMARY / DURABLE_SECONDARY / RETEST_DAYS / DURABLE_VERIFY_MAX_RESTORES.
+// plus verify-durable.fresh / verify-durable.aged / verify-durable.retest-days / verify-durable.max-restores.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { mkdtempSync, rmSync } from "node:fs";
@@ -24,7 +24,7 @@ import { loadVerifyDurableConfig } from "./lib/config.js";
 import { capture, commandExists } from "./lib/proc.js";
 import { stampToEpochMs } from "./lib/schedule.js";
 import { loadLog, stampFromKey, type LogStore } from "./lib/logStore.js";
-import { drillObject, extForEncryption, stampToIso, type DrillGate } from "./restore-drill-pg.js";
+import { drillObject, drillCoreFromProfile, extForEncryption, stampToIso, type DrillGate } from "./restore-drill-pg.js";
 import { appendVerify } from "./runlog.js";
 import { slackOneoff, alertWebhook } from "./lib/slack.js";
 import type { BackupTier, LogVerification } from "./lib/backupTypes.js";
@@ -36,7 +36,7 @@ function isoSeconds(d: Date): string {
 interface DurableObj {
   tier: BackupTier;
   name: string; // object filename
-  key: string; // tier/name (under BACKUP_PREFIX)
+  key: string; // tier/name (under backup-prefix)
   stamp: string; // compact dump stamp YYYYMMDDTHHMMSSZ
   ageMs: number;
 }
@@ -53,14 +53,13 @@ function priorCountsFrom(log: LogStore): Record<string, number> | null {
 
 async function main(): Promise<void> {
   const cfg = loadVerifyDurableConfig();
-  const {
-    BACKUP_PREFIX: backupPrefix,
-    FILE_BASENAME: fileBasename,
-    R2_ACCOUNT_ID: r2Account,
-    R2_BUCKET: r2Bucket,
-    R2_ACCESS_KEY_ID: r2Key,
-    R2_SECRET_ACCESS_KEY: r2Secret,
-  } = cfg;
+  const core = drillCoreFromProfile(cfg);
+  const backupPrefix = core.backupPrefix;
+  const r2Bucket = core.r2Bucket;
+  const fileBasename = cfg.name!;
+  const r2Account = cfg.credentials.r2.accountId!;
+  const r2Key = cfg.credentials.r2.accessKeyId!;
+  const r2Secret = cfg.credentials.r2.secretAccessKey!;
 
   const tmp = mkdtempSync(join(tmpdir(), "pg-durable-"));
   let cleaned = false;
@@ -101,12 +100,12 @@ async function main(): Promise<void> {
   let canRestore = true;
   if (!commandExists("pg_restore") || !commandExists("psql")) {
     canRestore = false;
-    if (cfg.DURABLE_PRIMARY || cfg.DURABLE_SECONDARY) {
+    if (cfg.verifyDurable.fresh || cfg.verifyDurable.aged) {
       process.stderr.write("warning: pg_restore/psql not found — restore legs skipped (hash leg still runs)\n");
     }
   }
 
-  const ext = extForEncryption(cfg.ENCRYPTION);
+  const ext = extForEncryption(cfg.encryption);
   let log: LogStore;
   try {
     log = loadLog();
@@ -116,9 +115,9 @@ async function main(): Promise<void> {
     cleanup();
     process.exit(1);
   }
-  const priorCounts = cfg.DRILL_DRIFT_MAX_DROP > 0 ? priorCountsFrom(log) : null;
+  const priorCounts = core.maxRowDrop > 0 ? priorCountsFrom(log) : null;
   const nowMs = Date.now();
-  const retestMs = cfg.RETEST_DAYS * 86_400_000;
+  const retestMs = cfg.verifyDurable.retestDays * 86_400_000;
 
   // ── Enumerate durable objects ──────────────────────────────────────────────
   const all: DurableObj[] = [];
@@ -143,12 +142,12 @@ async function main(): Promise<void> {
   const everVerifiedOk = (o: DurableObj): boolean => verifsFor(o).some((v) => v.ok);
   const restoreVerifiedOk = (o: DurableObj): boolean => verifsFor(o).some((v) => v.ok && v.kind !== "hash");
 
-  let restoresLeft = cfg.DURABLE_VERIFY_MAX_RESTORES;
+  let restoresLeft = cfg.verifyDurable.maxRestores;
 
   const recordRestore = async (o: DurableObj, gate: DrillGate): Promise<void> => {
     restoresLeft--;
     console.log(`Restore-verifying ${o.key} (gate=${gate}) …`);
-    const res = await drillObject({ key: o.key, tier: o.tier, gate, cfg, tmp, priorCounts });
+    const res = await drillObject({ key: o.key, tier: o.tier, gate, cfg: core, tmp, priorCounts });
     appendVerify({
       ts: isoSeconds(new Date()),
       verifiedTs: stampToIso(o.key) ?? "",
@@ -185,7 +184,7 @@ async function main(): Promise<void> {
       else await page(`hash mismatch ${o.key} (R2 ${got.slice(0, 12)}… vs recorded ${expected.slice(0, 12)}…)`);
       return;
     }
-    // No recorded baseline (run predates BACKUP_SHA256). Fall back to the live 2hourly copy if present.
+    // No recorded baseline (run predates integrity.checksum). Fall back to the live 2hourly copy if present.
     const twoH = capture("rclone", ["hashsum", "sha256", "--download", `r2:${r2Bucket}/${backupPrefix}/2hourly/${o.name}`, "--s3-no-check-bucket"]);
     const baseline = twoH.ok ? (twoH.out.trim().split(/\s+/)[0]?.toLowerCase() ?? "") : "";
     if (baseline) {
@@ -200,7 +199,7 @@ async function main(): Promise<void> {
   };
 
   // ── PRIMARY: hash-check unverified objects + restore the freshest daily ─────────────────────
-  if (cfg.DURABLE_PRIMARY) {
+  if (cfg.verifyDurable.fresh) {
     const hashDue = all.filter((o) => !everVerifiedOk(o));
     console.log(`Primary hash-check: ${hashDue.length} object(s) due`);
     for (const o of hashDue) await recordHash(o);
@@ -215,14 +214,14 @@ async function main(): Promise<void> {
   }
 
   // ── SECONDARY: restore the newest aged weekly/monthly not yet restore-verified ──────────────
-  if (cfg.DURABLE_SECONDARY && canRestore) {
+  if (cfg.verifyDurable.aged && canRestore) {
     const agedDue = all
       .filter((o) => (o.tier === "weekly" || o.tier === "monthly") && o.ageMs >= retestMs && !restoreVerifiedOk(o))
       .sort(byStampDesc);
     console.log(`Secondary restore: ${agedDue.length} aged weekly/monthly due, ${restoresLeft} restore slot(s) left`);
     for (const o of agedDue) {
       if (restoresLeft <= 0) {
-        console.log(`Secondary restore: hit DURABLE_VERIFY_MAX_RESTORES — ${agedDue.length - cfg.DURABLE_VERIFY_MAX_RESTORES} deferred to the next run`);
+        console.log(`Secondary restore: hit max-restores — ${agedDue.length - cfg.verifyDurable.maxRestores} deferred to the next run`);
         break;
       }
       await recordRestore(o, "nonempty");

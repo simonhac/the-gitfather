@@ -13,6 +13,7 @@
     "prepare": "git config core.hooksPath .githooks || true"
   },
   "dependencies": {
+    "yaml": "^2.6.0",
     "zod": "^4.0.0"
   },
   "devDependencies": {
