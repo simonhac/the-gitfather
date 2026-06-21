@@ -99,9 +99,12 @@ Everything here has a safe default or is feature-gated. Ask, but offer the defau
 | `drill.max-row-ratio` | `2.0` | restored/live row-count ceiling — catches duplicated/double-restored rows |
 | `dump.flags` | `-Fc --no-owner --no-privileges` | pg_dump flags; tune per database (e.g. `--exclude-schema=…`) |
 | `dump.client-major` | (unset) | if set, `doctor` checks your `pg_dump`/`pg_restore` major version ≥ this. Recommended — set it to your server's major version. |
-| `drill.nonempty-tables` | (none) | space-separated tables asserted simply non-empty after restore |
-| `drill.present-tables` | (none) | space-separated tables that must each **exist** and be non-empty after restore |
-| `FORCE_TIERS` | (none) | for manual runs: space-separated subset of `2hourly daily weekly monthly` |
+| `drill.present-tables` | (none) | space-separated tables that must each **exist** after restore (rows optional) |
+| `drill.nonempty-tables` | (none) | space-separated tables that must each exist **and** have ≥1 row after restore |
+
+> `FORCE_TIERS` is **not** a profile key — it's an **env var for manual runs only** (a space-separated
+> subset of `2hourly daily weekly monthly` that forces promotion to those tiers). Set it in the
+> workflow/env at dispatch time; never write it into the YAML.
 
 ### 3b. Encryption (→ profile + secrets)
 
@@ -166,11 +169,11 @@ All default-on and safe — surface them only if the user asks *"how do you know
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `integrity.checksum` | `1` | record a SHA-256 of each uploaded object (the durable hash-verify baseline) |
-| `integrity.check-structure` | `1` | `pg_restore -l` TOC check before declaring a backup good (`encryption: none`) |
-| `integrity.verify-after-upload` | `0` | opt-in: re-download + (decrypt) + `pg_restore -l` after upload; the only **backup-time** structural check for age (needs `AGE_IDENTITY` in the backup job) |
-| `verify-durable.fresh` | `1` | daily verify: hash-check each new durable object + restore the freshest `daily` |
-| `verify-durable.aged` | `1` | daily verify: restore the newest `weekly`/`monthly` ≥ `verify-durable.retest-days` old not yet restore-verified |
+| `integrity.checksum` | `true` | record a SHA-256 of each uploaded object (the durable hash-verify baseline) |
+| `integrity.check-structure` | `true` | `pg_restore -l` TOC check before declaring a backup good (`encryption: none`) |
+| `integrity.verify-after-upload` | `false` | opt-in: re-download + (decrypt) + `pg_restore -l` after upload; the only **backup-time** structural check for age (needs `AGE_IDENTITY` in the backup job) |
+| `verify-durable.fresh` | `true` | daily verify: hash-check each new durable object + restore the freshest `daily` |
+| `verify-durable.aged` | `true` | daily verify: restore the newest `weekly`/`monthly` ≥ `verify-durable.retest-days` old not yet restore-verified |
 | `verify-durable.retest-days` | `14` | age at which a weekly/monthly becomes secondary-due (set `13` to re-test inside the 14-day WORM lock) |
 | `verify-durable.max-restores` | `2` | cap on full restores per daily verify run (hash-checks uncapped) |
 | `drill.max-row-drop` | `0` (off) | if set (0–1), fail a drill when a table shrank more than this fraction vs the prior passing drill |

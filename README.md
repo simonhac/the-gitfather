@@ -25,7 +25,7 @@ the-gitfather/
     check-staleness.ts    # alert if no fresh backup landed recently; self-heal a missed tick
     build-dashboard.ts    # render the static backup-history dashboard from the R2 run-logs
     runlog.ts             # append-only run/verification log in R2 (the dashboard's source of truth)
-    lib/                  # slack, proc, config, logStore, pgRestore, profile, schedule, backupTypes, backupHistory (all .ts)
+    lib/                  # config, profile, duration, pgconn, slack, proc, logStore, pgRestore, preflight, bootEnv, schedule, backupTypes, backupHistory (all .ts)
     __tests__/            # unit + bash-parity tests (node:test via tsx)
   dashboard/              # single-file static dashboard (template + SVG heatmap renderer)
   profiles/example.yaml    # copy this into YOUR repo and edit
@@ -550,7 +550,7 @@ All have safe defaults — see **[Verifying backups](#verifying-backups-integrit
 
 ## Troubleshooting
 
-### Every run fails instantly with `✗ config validation failed` (e.g. `expected string, received undefined → at PG_BACKUP_DATABASE_URL`)
+### Every run fails instantly with `✗ config validation failed` (e.g. `✗ PG_BACKUP_DATABASE_URL — must be set`)
 
 The secrets are arriving **empty** — the task aborts at its zod config pre-flight (see
 [Config validation & `doctor`](#config-validation--doctor)). The usual cause is using

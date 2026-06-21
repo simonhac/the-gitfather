@@ -2,7 +2,7 @@ import "./lib/bootEnv.js"; // MUST be first — loads $PROFILE before backupType
 // ─────────────────────────────────────────────────────────────────────────────
 // doctor — the "is this consumer well configured?" preflight.
 //
-//   npx tsx scripts/doctor.ts <backup|drill|staleness|dashboard|all>
+//   npx tsx scripts/doctor.ts <backup|drill|verify-durable|staleness|dashboard|all>
 //   npm run doctor -- all
 //
 // For each selected task it: (1) runs the SAME zod schema the task itself uses

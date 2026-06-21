@@ -40,7 +40,15 @@ let seq = 0; // unique pgpass filenames when several pgConn() share one caller d
  */
 export function pgConn(url: string, dir?: string): PgConn {
   const u = new URL(url);
-  const password = decodeURIComponent(u.password);
+  // A password with a literal '%' (not a valid %-escape) makes decodeURIComponent throw URIError — and
+  // such a URL passes config validation (new URL() accepts it). Fall back to the raw bytes, which is
+  // what the operator typed and what libpq's pgpass expects, rather than crashing mid-run.
+  let password: string;
+  try {
+    password = decodeURIComponent(u.password);
+  } catch {
+    password = u.password;
+  }
   if (!password) {
     return { safeUrl: url, env: process.env, cleanup: () => {} };
   }

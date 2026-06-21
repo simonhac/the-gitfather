@@ -24,12 +24,20 @@ function toCamel(key: string): string {
   return key.replace(/[-_]([a-z0-9])/g, (_, c: string) => c.toUpperCase());
 }
 
-/** Recursively camelCase every object key (arrays/scalars pass through unchanged). */
+/**
+ * Recursively camelCase every object key (arrays/scalars pass through unchanged). A `null` value is
+ * DROPPED, not kept: in YAML a bare key with no value (`retention:` / `min-bytes:`) parses to null, and
+ * the intent is "unset → use the default". Dropping it makes the key absent so zod's defaults/.prefault
+ * fire (otherwise null would be rejected by object groups, or silently coerced to 0 by numeric fields).
+ */
 export function deepCamel(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(deepCamel);
   if (value && typeof value === "object") {
     const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value as Record<string, unknown>)) out[toCamel(k)] = deepCamel(v);
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (v === null || v === undefined) continue; // bare YAML key → treat as unset
+      out[toCamel(k)] = deepCamel(v);
+    }
     return out;
   }
   return value;

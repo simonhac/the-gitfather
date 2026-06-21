@@ -42,9 +42,29 @@ test("pgConn: escapes backslash and colon in the password", () => {
   }
 });
 
-test("pgConn: a URL with no password is returned unchanged, with no PGPASSFILE", () => {
-  const c = pgConn("postgres://u@h/db");
-  assert.equal(c.safeUrl, "postgres://u@h/db");
-  assert.equal(c.env.PGPASSFILE, undefined);
-  c.cleanup(); // no-op
+test("pgConn: a URL with no password is returned unchanged and adds no PGPASSFILE", () => {
+  // Guard against an ambient PGPASSFILE: the no-password branch passes process.env through, so we
+  // assert it doesn't INTRODUCE one rather than depending on the runner's environment.
+  const prev = process.env.PGPASSFILE;
+  delete process.env.PGPASSFILE;
+  try {
+    const c = pgConn("postgres://u@h/db");
+    assert.equal(c.safeUrl, "postgres://u@h/db");
+    assert.equal(c.env.PGPASSFILE, undefined);
+    c.cleanup(); // no-op
+  } finally {
+    if (prev === undefined) delete process.env.PGPASSFILE;
+    else process.env.PGPASSFILE = prev;
+  }
+});
+
+test("pgConn: a literal '%' in the password does not throw (URIError) and round-trips raw", () => {
+  // `new URL()` accepts p%ss (config validation passes); decodeURIComponent would throw on it.
+  const c = pgConn("postgres://u:p%ss@h/db");
+  try {
+    assert.ok(!c.safeUrl.includes("p%ss"), "password must not be on the URL");
+    assert.equal(readFileSync(c.env.PGPASSFILE!, "utf8"), "*:*:*:*:p%ss\n");
+  } finally {
+    c.cleanup();
+  }
 });

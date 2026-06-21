@@ -83,5 +83,5 @@ jobs:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL: ${{ inputs.slack_channel }}
           ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
-          GH_TOKEN: ${{ github.token }}   # self-heal: `gh workflow run <backup_workflow>` on a missed tick
+          GH_TOKEN: ${{ github.token }}   # self-heal: `gh workflow run <staleness.heal-workflow>` on a missed tick
         run: npx tsx scripts/check-staleness.ts

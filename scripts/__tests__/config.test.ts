@@ -46,8 +46,16 @@ test("backup: defaults applied for an otherwise-minimal config", () => {
 test("retention: defaults to 2 days / 3 weeks / 13 weeks / 2 years as { days, label }", () => {
   const d = backupSchema.safeParse(backupBase).data!;
   assert.deepEqual(d.retention.grandson, { days: 2, label: "2 days" });
+  assert.deepEqual(d.retention.son, { days: 21, label: "3 weeks" });
   assert.deepEqual(d.retention.father, { days: 91, label: "13 weeks" });
   assert.deepEqual(d.retention.grandfather, { days: 730, label: "2 years" });
+});
+
+test("strict: unknown / typo'd / misplaced keys are rejected, not silently dropped", () => {
+  assert.ok(!backupSchema.safeParse({ ...backupBase, bogusTopLevel: 1 }).success);
+  assert.ok(!backupSchema.safeParse({ ...backupBase, retention: { weekley: "1 week" } }).success); // tier typo
+  // Slack creds belong in env, not under the YAML slack: group — must fail, not silently disable Slack.
+  assert.ok(!backupSchema.safeParse({ ...backupBase, slack: { token: "xoxb-1", channel: "C1" } }).success);
 });
 
 test("retention: overrides parse; a malformed duration is rejected", () => {

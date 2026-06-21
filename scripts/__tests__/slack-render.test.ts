@@ -39,10 +39,14 @@ test("renderDailyText today: +1h grace gates which empty buckets show ⬜", () =
 });
 
 test("dashboardLink wraps text in a Slack link only when the dashboard url is set", () => {
-  setProfileForTest(profileSchema.parse({ name: "boost" }));
-  assert.equal(dashboardLink("boost DB backup"), "boost DB backup");
-  setProfileForTest(profileSchema.parse({ name: "boost", dashboard: { url: "https://dash.example.com/" } }));
-  assert.equal(dashboardLink("boost DB backup"), "<https://dash.example.com/|boost DB backup>");
+  try {
+    setProfileForTest(profileSchema.parse({ name: "boost" }));
+    assert.equal(dashboardLink("boost DB backup"), "boost DB backup");
+    setProfileForTest(profileSchema.parse({ name: "boost", dashboard: { url: "https://dash.example.com/" } }));
+    assert.equal(dashboardLink("boost DB backup"), "<https://dash.example.com/|boost DB backup>");
+  } finally {
+    setProfileForTest(null); // don't leak the injected profile into sibling tests
+  }
 });
 
 test("renderDailyText today: a filled bucket suppresses its ⬜", () => {

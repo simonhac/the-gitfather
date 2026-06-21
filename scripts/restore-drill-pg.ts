@@ -22,9 +22,10 @@ import "./lib/bootEnv.js"; // MUST be first — loads $PROFILE before backupType
 // Optional env: SLACK_BOT_TOKEN / SLACK_CHANNEL ; AGE_IDENTITY (only if backups are .age). Other config from $PROFILE.
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { mkdtempSync, rmSync, statSync, writeFileSync, copyFileSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync, writeFileSync, copyFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { loadDrillConfig, type Profile } from "./lib/config.js";
 import { run, runToFile, capture, captureStderr, commandExists } from "./lib/proc.js";
 import { pgConn } from "./lib/pgconn.js";
@@ -98,6 +99,39 @@ export function drillCoreFromProfile(cfg: Profile): DrillCoreConfig {
  *                  assert structural validity + the sentinel/expected tables are present & non-empty.
  */
 export type DrillGate = "live-ratio" | "nonempty";
+
+/** Result of probing one table: `ok` = the count query RAN (false ⇒ table absent or DB unreachable). */
+export interface TableProbe {
+  ok: boolean;
+  count: number;
+}
+
+/**
+ * Pure table assertion over a restore — extracted from drillObject so it's unit-testable without a live
+ * psql. `present` tables must EXIST (the count query ran; rows optional); `nonempty` tables must exist
+ * AND have ≥1 row. A failed query is reported as "missing or unreadable" (we can't tell a dropped table
+ * from a dropped connection from count(*) alone, so the message covers both). Records every probed
+ * table's count for the drift gate.
+ */
+export function checkRestoredTables(
+  present: string[],
+  nonempty: string[],
+  probe: (table: string) => TableProbe,
+): { ok: boolean; reason: string | null; counts: Record<string, number> } {
+  const counts: Record<string, number> = {};
+  for (const t of present) {
+    const r = probe(t);
+    counts[t] = r.count;
+    if (!r.ok) return { ok: false, reason: `expected table ${t} is missing or unreadable in the restore`, counts };
+  }
+  for (const t of nonempty) {
+    const r = probe(t);
+    counts[t] = r.count;
+    if (!r.ok) return { ok: false, reason: `table ${t} is missing or unreadable in the restore`, counts };
+    if (r.count <= 0) return { ok: false, reason: `restored ${t} is empty/zero`, counts };
+  }
+  return { ok: true, reason: null, counts };
+}
 
 export interface DrillObjectOpts {
   /** Key UNDER backup-prefix, e.g. "2hourly/<file>" or "daily/<file>". */
@@ -187,8 +221,12 @@ export async function drillObject(opts: DrillObjectOpts): Promise<DrillObjectRes
       : `pg_restore: completed with ${cls.benign.length} benign managed-schema line(s) (continuing to row-count check)`,
   );
 
-  const restored = (table: string): string =>
-    capture("psql", [drill.safeUrl, "-tAc", `SELECT count(*) FROM public.${table}`], drill.env).out.replace(/\s/g, "");
+  // One psql round-trip per table. capture().ok is the "query ran" signal: count(*) on a missing table
+  // (or an unreachable drill DB) exits non-zero → ok=false; an existing empty table → ok=true, count=0.
+  const probe = (table: string): TableProbe => {
+    const r = capture("psql", [drill.safeUrl, "-tAc", `SELECT count(*) FROM public.${table}`], drill.env);
+    return { ok: r.ok, count: Number(r.out.replace(/\s/g, "")) || 0 };
+  };
   const liveEst = (table: string): string =>
     capture("psql", [
       live.safeUrl,
@@ -197,10 +235,10 @@ export async function drillObject(opts: DrillObjectOpts): Promise<DrillObjectRes
     ], live.env).out.replace(/\s/g, "");
 
   const sentinel = cfg.rowCountTable;
-  const sentRestored = restored(sentinel);
-  const restoredNum = Number(sentRestored);
-  counts[sentinel] = Number.isFinite(restoredNum) ? restoredNum : 0;
-  if (!(sentRestored !== "" && restoredNum > 0)) return done(false, null, `restored ${sentinel} is empty/zero`);
+  const sent = probe(sentinel);
+  counts[sentinel] = sent.count;
+  if (!sent.ok || sent.count <= 0) return done(false, null, `restored ${sentinel} is empty/zero or unreadable`);
+  const restoredNum = sent.count;
 
   let ratio: number | null = null;
   if (gate === "live-ratio") {
@@ -210,33 +248,22 @@ export async function drillObject(opts: DrillObjectOpts): Promise<DrillObjectRes
     ratio = Number((restoredNum / liveNum).toFixed(4));
     // restored should be >= min-row-ratio × live (allows rows added since the backup; catches truncation)
     if (!(restoredNum >= liveNum * cfg.minRowRatio)) {
-      return done(false, ratio, `restored ${sentinel} ${sentRestored} < ${cfg.minRowRatio}× live ${sentLive} — truncated or stale`);
+      return done(false, ratio, `restored ${sentinel} ${restoredNum} < ${cfg.minRowRatio}× live ${sentLive} — truncated or stale`);
     }
     // …and <= max-row-ratio × live (catches duplicated / double-restored rows)
     if (!(restoredNum <= liveNum * cfg.maxRowRatio)) {
-      return done(false, ratio, `restored ${sentinel} ${sentRestored} > ${cfg.maxRowRatio}× live ${sentLive} — duplicated?`);
+      return done(false, ratio, `restored ${sentinel} ${restoredNum} > ${cfg.maxRowRatio}× live ${sentLive} — duplicated?`);
     }
-    console.log(`Row-count table public.${sentinel}: restored=${sentRestored} (live≈${sentLive}, ratio ${ratio})`);
+    console.log(`Row-count table public.${sentinel}: restored=${restoredNum} (live≈${sentLive}, ratio ${ratio})`);
   } else {
-    console.log(`Row-count table public.${sentinel}: restored=${sentRestored} (nonempty gate — aged copy, no live ratio)`);
+    console.log(`Row-count table public.${sentinel}: restored=${restoredNum} (nonempty gate — aged copy, no live ratio)`);
   }
 
-  // present-tables: must EXIST in the restore (rows optional). A count query on a missing table errors
-  // (psql writes to stderr, stdout empty), so an empty result = the table is absent.
-  for (const t of cfg.presentTables) {
-    const n = restored(t);
-    counts[t] = Number(n) || 0;
-    if (n === "") return done(false, ratio, `expected table ${t} is missing from the restore`);
-    console.log(`  table public.${t}: restored=${n} (present)`);
-  }
-
-  // nonempty-tables: must exist AND be non-empty.
-  for (const t of cfg.nonemptyTables) {
-    const n = restored(t);
-    counts[t] = Number(n) || 0;
-    console.log(`  table public.${t}: restored=${n || "?"}`);
-    if (!(n !== "" && Number(n) > 0)) return done(false, ratio, `restored ${t} is empty/zero`);
-  }
+  // present-tables (must EXIST; rows optional) + nonempty-tables (must exist AND have ≥1 row). Pure check.
+  const tableCheck = checkRestoredTables(cfg.presentTables, cfg.nonemptyTables, probe);
+  Object.assign(counts, tableCheck.counts);
+  for (const [t, n] of Object.entries(tableCheck.counts)) console.log(`  table public.${t}: restored=${n}`);
+  if (!tableCheck.ok) return done(false, ratio, tableCheck.reason);
 
   // Drift gate (optional): a table that shrank > max-row-drop vs the prior passing drill.
   if (cfg.maxRowDrop > 0 && opts.priorCounts) {
@@ -363,7 +390,21 @@ async function main(): Promise<void> {
   cleanup();
 }
 
-main().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+// Run main() only when invoked directly — this module is also IMPORTED by verify-durable-pg.ts (and the
+// tests) for drillObject/checkRestoredTables/extForEncryption/stampToIso, where the standalone drill must NOT run.
+function isEntrypoint(): boolean {
+  const argv1 = process.argv[1];
+  if (!argv1) return false;
+  try {
+    return realpathSync(fileURLToPath(import.meta.url)) === realpathSync(argv1);
+  } catch {
+    return false;
+  }
+}
+
+if (isEntrypoint()) {
+  main().catch((e) => {
+    console.error(e);
+    process.exit(1);
+  });
+}

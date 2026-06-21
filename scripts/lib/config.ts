@@ -120,7 +120,7 @@ const dumpGroup = z
     clientMajor: optInt(1, 99),
     minBytes: intIn(1_048_576, 0, Number.MAX_SAFE_INTEGER),
   })
-  .prefault({} as never);
+  .strict().prefault({} as never);
 
 const integrityGroup = z
   .object({
@@ -128,7 +128,7 @@ const integrityGroup = z
     checkStructure: boolIn(true), // pg_restore -l TOC check before declaring success (none-mode)
     verifyAfterUpload: boolIn(false), // re-download + (decrypt) + pg_restore -l (only age-mode structural check)
   })
-  .prefault({} as never);
+  .strict().prefault({} as never);
 
 const retentionGroup = z
   .object({
@@ -137,7 +137,7 @@ const retentionGroup = z
     father: durationField(DEFAULT_RETENTION.weekly),
     grandfather: durationField(DEFAULT_RETENTION.monthly),
   })
-  .prefault({} as never);
+  .strict().prefault({} as never);
 
 const drillGroup = z
   .object({
@@ -150,7 +150,7 @@ const drillGroup = z
     maxRowRatio: numIn(2, 1, 1_000_000), // restored/live ceiling — catches duplicated/double-restored rows
     maxRowDrop: numIn(0, 0, 1), // 0 = off; else fail if a table dropped > this fraction vs the prior passing drill
   })
-  .prefault({} as never);
+  .strict().prefault({} as never);
 
 const verifyDurableGroup = z
   .object({
@@ -159,7 +159,7 @@ const verifyDurableGroup = z
     retestDays: intIn(14, 1, 365), // 13 to re-validate while still inside the 14-day WORM lock
     maxRestores: intIn(2, 0, 100), // cap full restores per run (hash-checks uncapped)
   })
-  .prefault({} as never);
+  .strict().prefault({} as never);
 
 const stalenessGroup = z
   .object({
@@ -168,7 +168,7 @@ const stalenessGroup = z
     selfHeal: boolIn(true),
     dryRun: boolIn(false),
   })
-  .prefault({} as never);
+  .strict().prefault({} as never);
 
 const slackGroup = z
   .object({
@@ -176,7 +176,7 @@ const slackGroup = z
     // credentials group (SLACK_CHANNEL), like r2.bucket pairs with the R2 keys — not here.
     alertMention: strDefault("<!here>"),
   })
-  .prefault({} as never);
+  .strict().prefault({} as never);
 
 const dashboardGroup = z
   .object({
@@ -184,7 +184,7 @@ const dashboardGroup = z
     hideRunLinks: boolIn(false),
     url: opt(z.url()),
   })
-  .prefault({} as never);
+  .strict().prefault({} as never);
 
 // ── Credentials (from env/secrets; all optional here — per-task refinements require them) ──
 
@@ -195,7 +195,7 @@ const r2Creds = z
     accessKeyId: opt(nonEmpty()),
     secretAccessKey: opt(nonEmpty()),
   })
-  .prefault({} as never);
+  .strict().prefault({} as never);
 
 const credentialsGroup = z
   .object({
@@ -204,13 +204,13 @@ const credentialsGroup = z
     liveDatabaseUrl: opt(pgUrl), // PG_LIVE_DATABASE_URL
     r2: r2Creds,
     dashboardR2: r2Creds,
-    age: z.object({ recipient: opt(nonEmpty()), identity: opt(nonEmpty()) }).prefault({} as never),
+    age: z.object({ recipient: opt(nonEmpty()), identity: opt(nonEmpty()) }).strict().prefault({} as never),
     slackToken: opt(nonEmpty()), // SLACK_BOT_TOKEN (secret)
     slackChannel: opt(nonEmpty()), // SLACK_CHANNEL (non-secret id, paired with the token; a GitHub Variable)
     heartbeatUrl: opt(z.url()), // HEARTBEAT_URL
     alertWebhookUrl: opt(z.url()), // ALERT_WEBHOOK_URL
   })
-  .prefault({} as never);
+  .strict().prefault({} as never);
 
 // ── Full profile schema (loose creds) — drives getProfile()'s typed singleton ────────────
 
@@ -231,7 +231,7 @@ export const profileSchema = z.object({
   slack: slackGroup,
   dashboard: dashboardGroup,
   credentials: credentialsGroup,
-});
+}).strict(); // reject unknown/typo'd or misplaced keys (e.g. Slack creds under slack:) instead of silently dropping them
 
 export type Profile = z.infer<typeof profileSchema>;
 
@@ -408,7 +408,7 @@ export function peekProfile(): Profile | null {
   return res.success ? res.data : null;
 }
 
-/** Test seam — inject a fully-formed Profile (skips file/env reads). */
-export function setProfileForTest(p: Profile): void {
+/** Test seam — inject a fully-formed Profile, or null to clear the cache (so it doesn't leak between tests). */
+export function setProfileForTest(p: Profile | null): void {
   cached = p;
 }
