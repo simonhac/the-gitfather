@@ -220,19 +220,27 @@ export function dashboardLink(text: string): string {
   return url ? `<${url}|${text}>` : text;
 }
 
-/** Per-day keys for the current DISPLAY_TZ day. */
-function dailyKeys(now: Date = new Date()): { dateKey: string; header: string; objKey: string } {
-  const { y, mo, day } = tzParts(now);
-  const dateKey = `${y}-${pad2(mo)}-${pad2(day)}`;
+/**
+ * The day-message header for `now` in DISPLAY_TZ, e.g. `*<url|boost DB backup> — Sun 22 Jun 2026 (AEST)*`.
+ * Recomputed from current config on every persist (not just first creation), so adding `dashboard.url`
+ * relinks the existing day's message in place.
+ */
+export function dailyHeader(now: Date = new Date()): string {
   const dp = headerDateFmt.formatToParts(now);
   const get = (t: string) => dp.find((p) => p.type === t)?.value ?? "";
   const tz = tzAbbrFmt.formatToParts(now).find((p) => p.type === "timeZoneName")?.value ?? "";
   // Only the "<basename> DB backup" name is linked; the whole header stays bold (Slack renders a
   // link inside *…*). With unfurl_links:false on every post, the link never expands to a preview.
   const name = dashboardLink(`${fileBasename()} DB backup`);
-  const header = `*${name} — ${get("weekday")} ${get("day")} ${get("month")} ${get("year")} (${tz})*`;
+  return `*${name} — ${get("weekday")} ${get("day")} ${get("month")} ${get("year")} (${tz})*`;
+}
+
+/** Per-day keys for the current DISPLAY_TZ day. */
+function dailyKeys(now: Date = new Date()): { dateKey: string; header: string; objKey: string } {
+  const { y, mo, day } = tzParts(now);
+  const dateKey = `${y}-${pad2(mo)}-${pad2(day)}`;
   const objKey = `_status/${fileBasename()}/${dateKey}.json`;
-  return { dateKey, header, objKey };
+  return { dateKey, header: dailyHeader(now), objKey };
 }
 
 /**
@@ -331,6 +339,11 @@ async function loadDaily(now: Date = new Date()): Promise<DailyState | null> {
  */
 async function persistDaily(state: DailyState, mode: "create" | "refresh", now: Date = new Date()): Promise<string> {
   if (!state.ts && mode === "refresh") return "";
+  // Recompute the header from current config each persist so config changes (e.g. adding
+  // dashboard.url) and manual runs relink the existing day's message in place — the stored
+  // header is otherwise frozen at first creation. Safe because loadDaily(now) always loads
+  // today's state, so dailyHeader(now) labels the same day the message represents.
+  state.header = dailyHeader(now);
   const text = renderDailyText(state, now);
   if (!state.ts) {
     const ts = await slackPost(text);
