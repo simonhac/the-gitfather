@@ -124,7 +124,9 @@ export function deriveState(
   if (!run) return "empty";
   if (!run.ok) return "failed";
   if (now >= retainedUntil(run)) return "expired";
-  return verification?.ok ? "verified" : "ok";
+  // A matching verification that FAILED → "unverified" (amber): the backup exists but a restore/hash
+  // drill failed. run.ok short-circuited above, so this can never be confused with a failed BACKUP.
+  return verification ? (verification.ok ? "verified" : "unverified") : "ok";
 }
 
 /**
@@ -210,7 +212,7 @@ export function buildBackupGrid(payload: PublicPayload, now: Date, weeks = 58): 
 
   // Reduce each slot to one cell. Headline colour = best success (verified > ok > expired); a slot
   // with both successes and failures is rendered as a diagonal split (see heatmap.ts).
-  const SUCCESS_RANK: Record<string, number> = { verified: 3, ok: 2, expired: 1 };
+  const SUCCESS_RANK: Record<string, number> = { verified: 4, ok: 3, unverified: 2, expired: 1 };
   for (let r = 0; r < weeks; r++) {
     const byCol = slotRuns.get(r);
     if (!byCol) continue;
@@ -241,7 +243,7 @@ export function buildBackupGrid(payload: PublicPayload, now: Date, weeks = 58): 
 
 export function summarize(grid: BackupGrid): BackupStats {
   const stats: BackupStats = {
-    total: 0, ok: 0, verified: 0, failed: 0, expired: 0, latestLabel: null, latestState: null,
+    total: 0, ok: 0, verified: 0, unverified: 0, failed: 0, expired: 0, latestLabel: null, latestState: null,
   };
   let latestMs = -Infinity;
   // Count actual runs (a slot may hold several), so the totals stay honest under conflicts.
@@ -251,6 +253,7 @@ export function summarize(grid: BackupGrid): BackupStats {
         stats.total++;
         if (sr.state === "verified") stats.verified++;
         else if (sr.state === "ok") stats.ok++;
+        else if (sr.state === "unverified") stats.unverified++;
         else if (sr.state === "failed") stats.failed++;
         else if (sr.state === "expired") stats.expired++;
         const ms = Date.parse(sr.run.t);

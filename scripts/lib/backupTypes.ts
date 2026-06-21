@@ -44,6 +44,9 @@ export interface LogRun {
   tiers: BackupTier[];
   bytes: number | null;
   key: string | null;
+  /** SHA-256 hex of the uploaded object (ciphertext for age). PRIVATE; the integrity baseline
+   * for the durable hash-verify. null for runs predating this field or when hashing was skipped. */
+  sha256: string | null;
   runId: string | null;
   runUrl: string | null;
   /** Raw failure reason — PRIVATE only, never published. */
@@ -58,6 +61,17 @@ export interface LogVerification {
   ratio: number | null;
   runId: string | null;
   runUrl: string | null;
+  /** Which durable copy was tested (null = a legacy/2hourly drill record). */
+  tier?: BackupTier | null;
+  /** The exact object key tested (null on legacy records). */
+  key?: string | null;
+  /** "restore" = full pg_restore + row counts; "hash" = byte-integrity check of the stored object.
+   * Missing on legacy records → treat as "restore". */
+  kind?: "restore" | "hash";
+  /** Restored per-table row counts (drift signal). PRIVATE — never published. */
+  counts?: Record<string, number> | null;
+  /** Private failure reason (mirrors LogRun.error) — never published. */
+  reason?: string | null;
 }
 
 // ── Public (scrubbed) payload inlined into the dashboard ──────────────────────
@@ -74,6 +88,7 @@ export interface PublicVerification {
   vt: string; // verifiedTs
   ok: boolean;
   ratio: number | null;
+  kind?: "restore" | "hash"; // for the dashboard tooltip; counts/reason/key/tier stay private
 }
 
 export interface PublicPayload {
@@ -87,7 +102,7 @@ export interface PublicPayload {
 
 // ── Derived grid types ───────────────────────────────────────────────────────
 
-export type BackupCellState = "empty" | "failed" | "ok" | "verified" | "expired";
+export type BackupCellState = "empty" | "failed" | "ok" | "verified" | "unverified" | "expired";
 
 /** Origin of a run, driving the Slack-row marker: "schedule" (none), "manual" (🖐️), "self-heal" (🩹). */
 export type RunOrigin = "schedule" | "manual" | "self-heal";
@@ -133,6 +148,7 @@ export interface BackupStats {
   total: number;
   ok: number;
   verified: number;
+  unverified: number;
   failed: number;
   expired: number;
   latestLabel: string | null;

@@ -121,6 +121,8 @@ export interface RunRecordInput {
   tiers: BackupTier[];
   bytes?: number | null;
   key?: string | null;
+  /** SHA-256 hex of the uploaded object (the durable hash-verify baseline). */
+  sha256?: string | null;
   /** Raw failure reason — PRIVATE only, never published. */
   error?: string | null;
 }
@@ -134,6 +136,7 @@ export function appendRun(input: RunRecordInput): void {
     tiers: input.tiers,
     bytes: input.bytes ?? null,
     key: input.key ?? null,
+    sha256: input.sha256 ?? null,
     runId,
     runUrl,
     error: input.error ?? null,
@@ -147,6 +150,13 @@ export interface VerifyRecordInput {
   verifiedTs: string;
   ok: boolean;
   ratio?: number | null;
+  /** Which durable copy / object was tested + how (see LogVerification). */
+  tier?: BackupTier | null;
+  key?: string | null;
+  kind?: "restore" | "hash";
+  counts?: Record<string, number> | null;
+  /** Private failure reason — never published. */
+  reason?: string | null;
 }
 
 /** Append a verification record to the private R2 run-log. Best-effort (never throws). */
@@ -159,6 +169,11 @@ export function appendVerify(input: VerifyRecordInput): void {
     ratio: input.ratio ?? null,
     runId,
     runUrl,
+    tier: input.tier ?? null,
+    key: input.key ?? null,
+    kind: input.kind ?? "restore",
+    counts: input.counts ?? null,
+    reason: input.reason ?? null,
   };
   appendRecord("verifications", input.ts, record);
 }

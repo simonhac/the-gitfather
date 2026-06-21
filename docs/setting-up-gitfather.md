@@ -96,9 +96,11 @@ Everything here has a safe default or is feature-gated. Ask, but offer the defau
 | `MIN_BYTES` | `1048576` (1 MB) | abort the upload if the dump is smaller (catches a truncated dump) |
 | `STALE_HOURS` | `3` (example.env suggests `5`) | staleness alert if newest 2-hourly object is older than this |
 | `MIN_RATIO` | `0.95` | restored/live row-count floor for the drill sentinel table |
+| `MAX_RATIO` | `2.0` | restored/live row-count ceiling — catches duplicated/double-restored rows |
 | `PG_DUMP_FLAGS` | `-Fc --no-owner --no-privileges` | pg_dump flags; tune per database (e.g. `--exclude-schema=…`) |
 | `PG_CLIENT_MAJOR` | (unset) | if set, `doctor` checks your `pg_dump`/`pg_restore` major version ≥ this. Recommended — set it to your server's major version. |
 | `DRILL_EXTRA_TABLES` | (none) | space-separated tables asserted simply non-empty after restore |
+| `DRILL_EXPECTED_TABLES` | (none) | space-separated tables that must each **exist** and be non-empty after restore |
 | `FORCE_TIERS` | (none) | for manual runs: space-separated subset of `2hourly daily weekly monthly` |
 
 ### 3b. Encryption (→ profile + secrets)
@@ -107,7 +109,7 @@ Everything here has a safe default or is feature-gated. Ask, but offer the defau
 |---|---|---|
 | `ENCRYPTION` | `none` | `none` \| `age` \| `aes-gcm` (aes-gcm not implemented) |
 | `AGE_RECIPIENT` | — | **required when `ENCRYPTION=age`** (public key, `age1…`); used to encrypt |
-| `AGE_IDENTITY` | — | **required when `ENCRYPTION=age`** (private key); used by the drill to decrypt |
+| `AGE_IDENTITY` | — | **required when `ENCRYPTION=age`** (private key); used by the drill + durable-verify to decrypt (and by the backup when `BACKUP_VERIFY=1`) |
 
 ### 3c. Slack status row (→ profile + secrets)
 
@@ -154,6 +156,27 @@ Everything here has a safe default or is feature-gated. Ask, but offer the defau
 | `DRY_RUN` | `false` | staleness check evaluates but takes no action |
 | `BACKUP_WORKFLOW` | `pg-backup.yml` | workflow file self-heal triggers |
 | `HEARTBEAT_URL` | (unset) | optional dead-man's-switch URL pinged on success (e.g. healthchecks.io) |
+
+> `MIN_BYTES` is **also** the staleness floor: a fresh-but-smaller newest object is treated as broken
+> (pages directly) rather than just stale.
+
+### 3f. Backup integrity & durable verification (→ profile, defaults fine)
+
+All default-on and safe — surface them only if the user asks *"how do you know the backups are good?"*
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `BACKUP_SHA256` | `1` | record a SHA-256 of each uploaded object (the durable hash-verify baseline) |
+| `BACKUP_VALIDATE_STRUCTURE` | `1` | `pg_restore -l` TOC check before declaring a backup good (`ENCRYPTION=none`) |
+| `BACKUP_VERIFY` | `0` | opt-in: re-download + (decrypt) + `pg_restore -l` after upload; the only **backup-time** structural check for age (needs `AGE_IDENTITY` in the backup job) |
+| `DURABLE_PRIMARY` | `1` | daily verify: hash-check each new durable object + restore the freshest `daily` |
+| `DURABLE_SECONDARY` | `1` | daily verify: restore the newest `weekly`/`monthly` ≥ `RETEST_DAYS` old not yet restore-verified |
+| `RETEST_DAYS` | `14` | age at which a weekly/monthly becomes secondary-due (set `13` to re-test inside the 14-day WORM lock) |
+| `DURABLE_VERIFY_MAX_RESTORES` | `2` | cap on full restores per daily verify run (hash-checks uncapped) |
+| `DRILL_DRIFT_MAX_DROP` | `0` (off) | if set (0–1), fail a drill when a table shrank more than this fraction vs the prior passing drill |
+
+These power `verify-durable-pg.ts` (the daily `pg-durable-verify.yml` workflow), which guarantees every
+durable file is tested — **weekly/monthly twice, daily once**. See README → **Verifying backups**.
 
 ---
 
@@ -219,8 +242,8 @@ set -a; source .context/gitfather-secrets.env; set +a
 PROFILE=profiles/<name>.env npm run doctor -- all
 ```
 
-`-- all` checks `backup`, `drill`, `staleness`, and `dashboard`. You can scope to one task:
-`npm run doctor -- backup`.
+`-- all` checks `backup`, `drill`, `verify-durable`, `staleness`, and `dashboard`. You can scope to one
+task: `npm run doctor -- backup`.
 
 **Reading the output** — each line is `✓` / `⚠` / `✗`:
 - `✓ config — all variables present & valid` means the schema passed. A schema failure prints an
@@ -314,7 +337,7 @@ Once doctor is green locally, tell the user the remaining steps the engine can't
 1. Commit `profiles/<name>.env` to their consuming repo (verify no secret leaked in).
 2. Move the credentials from `.context/gitfather-secrets.env` into GitHub **Secrets** (and the three
    bucket/channel values into GitHub **Variables**) — see the README secrets/variables table.
-3. Wire the caller workflows (`pg-backup.yml`, `pg-restore-drill.yml`, `pg-staleness-check.yml`,
-   `pg-dashboard.yml`) per the README "Wiring a consuming repo" section, pointing `profile:` at the
-   new profile.
+3. Wire the caller workflows (`pg-backup.yml`, `pg-durable-verify.yml` — daily; supersedes the weekly
+   `pg-restore-drill.yml` — `pg-staleness-check.yml`, `pg-dashboard.yml`) per the README "Wiring a
+   consuming repo" section, pointing `profile:` at the new profile.
 4. Delete `.context/gitfather-secrets.env` (or keep it knowing it's gitignored) once secrets are in GitHub.

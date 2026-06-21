@@ -1,0 +1,109 @@
+name: pg-durable-verify (reusable)
+
+# Reusable DAILY durable-tier verification — guarantees every daily/weekly/monthly object is
+# integrity-tested at least once. PRIMARY: hash-check each durable object against the SHA-256
+# recorded at backup time + full-restore the freshest daily. SECONDARY: full-restore the newest
+# weekly/monthly object ≥ RETEST_DAYS old not yet restore-verified. Replaces the standalone weekly
+# pg-restore-drill in the recommended caller wiring. Cadence/limits come from the profile
+# (DURABLE_PRIMARY / DURABLE_SECONDARY / RETEST_DAYS / DURABLE_VERIFY_MAX_RESTORES). See README.
+
+on:
+  workflow_call:
+    inputs:
+      profile:
+        description: "Path (within the CALLER repo) to the profile .env."
+        type: string
+        required: true
+      gitfather_ref:
+        type: string
+        required: false
+        default: main
+      r2_bucket:
+        description: "Private R2 dump bucket name (caller passes vars.R2_BUCKET)."
+        type: string
+        required: true
+      slack_channel:
+        description: "Slack channel id (caller passes vars.SLACK_CHANNEL); empty disables Slack."
+        type: string
+        required: false
+        default: ""
+    # Secrets passed EXPLICITLY by the caller (inherit only works same-org/enterprise; this repo is
+    # owned by a different account than its consumers). Non-secret config is threaded via inputs.
+    secrets:
+      PG_BACKUP_DATABASE_URL:   # read-only, used only as the live row-count reference
+        required: true
+      R2_ACCOUNT_ID:
+        required: true
+      R2_ACCESS_KEY_ID:
+        required: true
+      R2_SECRET_ACCESS_KEY:
+        required: true
+      SLACK_BOT_TOKEN:
+        required: false
+      AGE_IDENTITY:             # only if backups are .age-encrypted
+        required: false
+      ALERT_WEBHOOK_URL:        # optional generic failure webhook (Slack-compatible); redundant to the bot
+        required: false
+
+jobs:
+  verify-durable:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      pg:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: drill
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    steps:
+      - name: Checkout caller repo (holds the profile)
+        uses: actions/checkout@v4
+        with:
+          path: caller
+
+      - name: Checkout the-gitfather (holds the scripts)
+        uses: actions/checkout@v4
+        with:
+          repository: simonhac/the-gitfather
+          ref: ${{ inputs.gitfather_ref }}
+          path: engine
+
+      - name: Read profile (PG_CLIENT_MAJOR for the client install)
+        run: |
+          set -euo pipefail
+          set -a; source "$GITHUB_WORKSPACE/caller/${{ inputs.profile }}"; set +a
+          echo "PG_CLIENT_MAJOR=${PG_CLIENT_MAJOR:-17}" >> "$GITHUB_ENV"
+
+      - uses: ./engine/.github/actions/setup-tools
+        with:
+          pg-client-major: ${{ env.PG_CLIENT_MAJOR }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: engine/package-lock.json
+
+      - name: Install engine deps
+        run: npm ci
+        working-directory: engine
+
+      - name: Durable verify
+        working-directory: engine
+        env:
+          PROFILE: ${{ github.workspace }}/caller/${{ inputs.profile }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ inputs.r2_bucket }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          DRILL_DATABASE_URL: postgres://postgres:drill@localhost:5432/postgres?sslmode=disable
+          PG_LIVE_DATABASE_URL: ${{ secrets.PG_BACKUP_DATABASE_URL }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL: ${{ inputs.slack_channel }}
+          AGE_IDENTITY: ${{ secrets.AGE_IDENTITY }}
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+        run: npx tsx scripts/verify-durable-pg.ts

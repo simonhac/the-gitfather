@@ -17,7 +17,8 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { spawn, execFileSync, execSync } from "node:child_process";
-import { openSync, closeSync } from "node:fs";
+import { openSync, closeSync, createReadStream } from "node:fs";
+import { createHash } from "node:crypto";
 
 type Env = NodeJS.ProcessEnv;
 
@@ -181,6 +182,54 @@ export function capture(cmd: string, args: string[], env: Env = process.env): { 
     const err = e as { stdout?: Buffer | string };
     return { ok: false, out: err.stdout ? err.stdout.toString() : "" };
   }
+}
+
+/**
+ * `cmd args` with stdout INHERITED and stderr CAPTURED (bounded) — for pg_restore, whose data plane
+ * is the input file + the target DB (never our pipes), so only its small error stream returns here.
+ * Resolves { code, stderr } and NEVER rejects (127 on a spawn error, like run()), so the caller's
+ * fail() discipline always runs. stderr is capped (default 1 MiB) so a pathological flood can't OOM.
+ */
+export function captureStderr(
+  cmd: string,
+  args: string[],
+  opts: { env?: Env; maxBytes?: number } = {},
+): Promise<{ code: number; stderr: string }> {
+  const maxBytes = opts.maxBytes ?? 1024 * 1024;
+  return new Promise((resolve) => {
+    let stderr = "";
+    let truncated = false;
+    const child = spawn(cmd, args, { stdio: ["ignore", "inherit", "pipe"], env: opts.env ?? process.env });
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk: string) => {
+      if (truncated) return;
+      stderr += chunk;
+      if (stderr.length > maxBytes) {
+        stderr = stderr.slice(0, maxBytes) + "\n…[stderr truncated]\n";
+        truncated = true;
+      }
+    });
+    child.on("error", (e) => {
+      process.stderr.write(`${cmd}: ${(e as Error).message}\n`);
+      resolve({ code: 127, stderr });
+    });
+    child.on("close", (code) => resolve({ code: code ?? 1, stderr }));
+  });
+}
+
+/**
+ * Streaming SHA-256 (hex) of a file — reads via a fs stream so a multi-GB dump never transits the
+ * V8 heap (mirrors the data-plane discipline above). Rejects on a read error; callers wrap it in
+ * bestEffort() so a hashing hiccup can't fail an otherwise-good backup.
+ */
+export function sha256File(path: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const hash = createHash("sha256");
+    const stream = createReadStream(path);
+    stream.on("error", reject);
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("end", () => resolve(hash.digest("hex")));
+  });
 }
 
 /**

@@ -123,6 +123,11 @@ export const backupSchema = z
     R2_SECRET_ACCESS_KEY: nonEmpty(),
     ENCRYPTION: z.enum(ENCRYPTIONS).default("none"),
     AGE_RECIPIENT: opt(nonEmpty()),
+    AGE_IDENTITY: opt(nonEmpty()),
+    // ── Backup-time integrity ──
+    BACKUP_SHA256: boolIn(true), // record a SHA-256 of the uploaded object (durable hash-verify baseline)
+    BACKUP_VALIDATE_STRUCTURE: boolIn(true), // pg_restore -l TOC check before declaring success (none-mode)
+    BACKUP_VERIFY: boolIn(false), // opt-in post-upload re-download + decrypt + pg_restore -l (only age-mode structural check)
     MIN_BYTES: intIn(1_048_576, 0, Number.MAX_SAFE_INTEGER),
     ANCHOR_HOUR_UTC: intIn(16, 0, 23),
     PG_DUMP_FLAGS: dumpFlags,
@@ -140,43 +145,71 @@ export const backupSchema = z
     if (v.ENCRYPTION === "age" && !v.AGE_RECIPIENT) {
       ctx.addIssue({ code: "custom", path: ["AGE_RECIPIENT"], message: "required when ENCRYPTION=age" });
     }
-  });
-
-export const drillSchema = z
-  .object({
-    PROFILE: nonEmpty("set PROFILE to a profiles/*.env file"),
-    BACKUP_PREFIX: nonEmpty("profile must set BACKUP_PREFIX"),
-    FILE_BASENAME: strDefault("pg"),
-    DRILL_SENTINEL_TABLE: nonEmpty("profile must set DRILL_SENTINEL_TABLE").regex(
-      /^[\w.]+$/,
-      "must be a table name (letters, digits, _ and .)",
-    ),
-    DRILL_EXTRA_TABLES: tableList,
-    R2_ACCOUNT_ID: nonEmpty(),
-    R2_BUCKET: bucket,
-    R2_ACCESS_KEY_ID: nonEmpty(),
-    R2_SECRET_ACCESS_KEY: nonEmpty(),
-    DRILL_DATABASE_URL: pgUrl,
-    PG_LIVE_DATABASE_URL: pgUrl,
-    MIN_RATIO: numIn(0.95, 0, 1),
-    ENCRYPTION: z.enum(ENCRYPTIONS).default("none"),
-    AGE_IDENTITY: opt(nonEmpty()),
-    PG_CLIENT_MAJOR: optInt(1, 99),
-    SLACK_BOT_TOKEN: opt(nonEmpty()),
-    SLACK_CHANNEL: opt(nonEmpty()),
-    ALERT_WEBHOOK_URL: opt(z.url()),
-    DISPLAY_TZ: displayTz,
   })
-  .superRefine(requireSlackChannel)
   .superRefine((v, ctx) => {
-    if (v.ENCRYPTION === "age" && !v.AGE_IDENTITY) {
+    if (v.BACKUP_VERIFY && v.ENCRYPTION === "age" && !v.AGE_IDENTITY) {
       ctx.addIssue({
         code: "custom",
         path: ["AGE_IDENTITY"],
-        message: "required when ENCRYPTION=age (needed to decrypt .age objects)",
+        message: "required when BACKUP_VERIFY=1 and ENCRYPTION=age (to decrypt for the post-upload check)",
       });
     }
   });
+
+// Shared drill field grammar — drillSchema (the weekly newest-2hourly drill) and verifyDurableSchema
+// (the daily durable primary/secondary job) both build on it, so the two can never drift.
+const drillFields = {
+  PROFILE: nonEmpty("set PROFILE to a profiles/*.env file"),
+  BACKUP_PREFIX: nonEmpty("profile must set BACKUP_PREFIX"),
+  FILE_BASENAME: strDefault("pg"),
+  DRILL_SENTINEL_TABLE: nonEmpty("profile must set DRILL_SENTINEL_TABLE").regex(
+    /^[\w.]+$/,
+    "must be a table name (letters, digits, _ and .)",
+  ),
+  DRILL_EXTRA_TABLES: tableList,
+  DRILL_EXPECTED_TABLES: tableList, // must exist AND be non-empty in the restore (default [])
+  R2_ACCOUNT_ID: nonEmpty(),
+  R2_BUCKET: bucket,
+  R2_ACCESS_KEY_ID: nonEmpty(),
+  R2_SECRET_ACCESS_KEY: nonEmpty(),
+  DRILL_DATABASE_URL: pgUrl,
+  PG_LIVE_DATABASE_URL: pgUrl,
+  MIN_RATIO: numIn(0.95, 0, 1), // restored/live floor for the sentinel
+  MAX_RATIO: numIn(2, 1, 1_000_000), // restored/live ceiling — catches duplicated/double-restored rows
+  DRILL_DRIFT_MAX_DROP: numIn(0, 0, 1), // 0 = disabled; else fail if a table dropped > this vs the prior passing drill
+  ENCRYPTION: z.enum(ENCRYPTIONS).default("none"),
+  AGE_IDENTITY: opt(nonEmpty()),
+  PG_CLIENT_MAJOR: optInt(1, 99),
+  SLACK_BOT_TOKEN: opt(nonEmpty()),
+  SLACK_CHANNEL: opt(nonEmpty()),
+  ALERT_WEBHOOK_URL: opt(z.url()),
+  DISPLAY_TZ: displayTz,
+};
+
+function requireAgeIdentity(v: { ENCRYPTION?: string; AGE_IDENTITY?: string }, ctx: z.core.$RefinementCtx): void {
+  if (v.ENCRYPTION === "age" && !v.AGE_IDENTITY) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["AGE_IDENTITY"],
+      message: "required when ENCRYPTION=age (needed to decrypt .age objects)",
+    });
+  }
+}
+
+export const drillSchema = z.object(drillFields).superRefine(requireSlackChannel).superRefine(requireAgeIdentity);
+
+export const verifyDurableSchema = z
+  .object({
+    ...drillFields,
+    // Daily durable-verify cadence. Primary = restore freshest daily + hash-check same-day copies;
+    // secondary = restore the newest weekly/monthly ≥ RETEST_DAYS old not yet secondarily validated.
+    DURABLE_PRIMARY: boolIn(true),
+    DURABLE_SECONDARY: boolIn(true),
+    RETEST_DAYS: intIn(14, 1, 365), // set 13 to re-validate while still inside the 14-day WORM lock
+    DURABLE_VERIFY_MAX_RESTORES: intIn(2, 0, 100), // cap full restores per run (hash-checks uncapped)
+  })
+  .superRefine(requireSlackChannel)
+  .superRefine(requireAgeIdentity);
 
 export const stalenessSchema = z
   .object({
@@ -188,6 +221,7 @@ export const stalenessSchema = z
     R2_ACCESS_KEY_ID: nonEmpty(),
     R2_SECRET_ACCESS_KEY: nonEmpty(),
     STALE_HOURS: intIn(3, 1, Number.MAX_SAFE_INTEGER),
+    MIN_BYTES: intIn(1_048_576, 0, Number.MAX_SAFE_INTEGER), // a fresh object smaller than this is broken, not just stale
     BACKUP_WORKFLOW: strDefault("pg-backup.yml"),
     SELF_HEAL: boolIn(true),
     DRY_RUN: boolIn(false),
@@ -234,6 +268,7 @@ export function dashboardSchema(opts: { fromR2?: boolean; upload?: boolean } = {
 
 export type BackupConfig = z.infer<typeof backupSchema>;
 export type DrillConfig = z.infer<typeof drillSchema>;
+export type VerifyDurableConfig = z.infer<typeof verifyDurableSchema>;
 export type StalenessConfig = z.infer<typeof stalenessSchema>;
 export type DashboardConfig = z.infer<ReturnType<typeof dashboardSchema>>;
 
@@ -266,6 +301,7 @@ export function loadConfig<T extends z.ZodType>(schema: T): z.infer<T> {
 
 export const loadBackupConfig = (): BackupConfig => loadConfig(backupSchema);
 export const loadDrillConfig = (): DrillConfig => loadConfig(drillSchema);
+export const loadVerifyDurableConfig = (): VerifyDurableConfig => loadConfig(verifyDurableSchema);
 export const loadStalenessConfig = (): StalenessConfig => loadConfig(stalenessSchema);
 export const loadDashboardConfig = (opts?: { fromR2?: boolean; upload?: boolean }): DashboardConfig =>
   loadConfig(dashboardSchema(opts));
