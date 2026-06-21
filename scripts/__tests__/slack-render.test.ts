@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { renderDailyText, dailyLabel, dashboardLink, type DailyState } from "../lib/slack.js";
+import { renderDailyText, dailyLabel, dashboardLink, dailyHeader, type DailyState } from "../lib/slack.js";
 import { setProfileForTest, profileSchema } from "../lib/config.js";
 import type { RunOrigin } from "../lib/backupTypes.js";
 
@@ -44,6 +44,26 @@ test("dashboardLink wraps text in a Slack link only when the dashboard url is se
     assert.equal(dashboardLink("boost DB backup"), "boost DB backup");
     setProfileForTest(profileSchema.parse({ name: "boost", dashboard: { url: "https://dash.example.com/" } }));
     assert.equal(dashboardLink("boost DB backup"), "<https://dash.example.com/|boost DB backup>");
+  } finally {
+    setProfileForTest(null); // don't leak the injected profile into sibling tests
+  }
+});
+
+test("dailyHeader recomputes the link from current config — relinks a frozen plain header", () => {
+  try {
+    const now = new Date(Date.UTC(2026, 5, 22, 5, 30, 0));
+    // First created before dashboard.url existed → plain header (this is what gets frozen into state).
+    setProfileForTest(profileSchema.parse({ name: "boost" }));
+    const plain = dailyHeader(now);
+    assert.ok(plain.startsWith("*boost DB backup — "), `unexpected plain header: ${plain}`);
+    assert.ok(!plain.includes("<https"), "plain header must not contain a link");
+    // url now configured → the same day's header recomputes WITH the link, so persistDaily relinks in place.
+    setProfileForTest(profileSchema.parse({ name: "boost", dashboard: { url: "https://dash.example.com/" } }));
+    const linked = dailyHeader(now);
+    assert.ok(
+      linked.startsWith("*<https://dash.example.com/|boost DB backup> — "),
+      `header should be relinked: ${linked}`,
+    );
   } finally {
     setProfileForTest(null); // don't leak the injected profile into sibling tests
   }
