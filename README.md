@@ -19,18 +19,19 @@ environment (GitHub secrets), never from the repo. See [Where this fits: 3-2-1-1
 ```
 the-gitfather/
   scripts/
-    backup-pg-to-r2.ts    # dump → (encrypt) → upload 2hourly/ → promote to daily/weekly/monthly
-    restore-drill-pg.ts   # pull newest → restore into a throwaway → assert row counts
+    backup-pg-to-r2.ts    # dump → (encrypt) → upload 2hourly/ → promote to daily/weekly/monthly; records a SHA-256
+    restore-drill-pg.ts   # pull newest → restore into a throwaway → assert row counts (exports drillObject)
+    verify-durable-pg.ts  # DAILY: hash-check each durable object + restore freshest daily + re-restore aged weekly/monthly
     check-staleness.ts    # alert if no fresh backup landed recently; self-heal a missed tick
     build-dashboard.ts    # render the static backup-history dashboard from the R2 run-logs
     runlog.ts             # append-only run/verification log in R2 (the dashboard's source of truth)
-    lib/                  # slack, proc (subprocess helpers), profile, schedule, backupTypes, backupHistory (all .ts)
+    lib/                  # slack, proc, config, logStore, pgRestore, profile, schedule, backupTypes, backupHistory (all .ts)
     __tests__/            # unit + bash-parity tests (node:test via tsx)
   dashboard/              # single-file static dashboard (template + SVG heatmap renderer)
   profiles/example.env    # copy this into YOUR repo and edit
   .github/
     workflows/            # REUSABLE (on: workflow_call): pg-backup, pg-restore-drill,
-                          #   pg-staleness-check, pg-dashboard
+                          #   pg-durable-verify, pg-staleness-check, pg-dashboard
     actions/setup-tools   # composite: pinned rclone (+ optional pg client)
 ```
 
@@ -59,7 +60,7 @@ the honest mapping of what the-gitfather delivers:
 | **2** media | ❌ not provided | Every copy the tool writes lives on one medium / provider / failure domain (R2). "2 media" only exists incidentally because your prod DB lives elsewhere. |
 | **1** off-site | ✅ delivered | Dumps go to Cloudflare R2 — a different provider and location from your Postgres host. |
 | **1** immutable | ✅ delivered* | R2 bucket locks (WORM) + a no-delete CI token make the durable tiers immutable for 14 days against the primary threat (a leaked CI key). *It's immutable, not air-gapped — a full account takeover can strip the locks. See [Threat model](#threat-model). |
-| **0** errors | ✅ delivered | `restore-drill-pg.ts` restores the newest dump into a throwaway DB and asserts row counts, backed by the staleness check, Slack status, and an external dead-man's switch. |
+| **0** errors | ✅ delivered | Each backup carries a SHA-256 and is structurally validated (`pg_restore -l`) before it's declared good; `verify-durable-pg.ts` then proves **every** durable copy — hash-checked on write, full-restored daily (the freshest dump) and again at ~2 weeks (weekly/monthly) — with row-count gates, a `pg_restore`-error classifier, and failed drills recorded to the log. Backed by the staleness check (size + freshness), Slack status, and an external dead-man's switch. |
 
 **Net:** the tool nails the back half (**1-1-0**) and supplies **one off-site copy** toward the front
 half — it does not by itself give you 3 independent copies on 2 distinct media. To earn the full
@@ -82,7 +83,8 @@ your-repo                              the-gitfather (this repo, public)
   pg-backup/myproject.env   ─────►     scripts/ + dashboard/
   .github/workflows/                   .github/workflows/  (reusable)
     pg-backup.yml ───────────uses────────►  pg-backup.yml
-    pg-restore-drill.yml ────uses────────►  pg-restore-drill.yml
+    pg-durable-verify.yml ───uses────────►  pg-durable-verify.yml   (daily; supersedes the weekly drill)
+    pg-restore-drill.yml ────uses────────►  pg-restore-drill.yml    (optional once durable-verify is wired)
     pg-staleness-check.yml ──uses────────►  pg-staleness-check.yml
     pg-dashboard.yml ────────uses────────►  pg-dashboard.yml
 ```
@@ -160,6 +162,39 @@ jobs:
       R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}   # optional
+      ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}   # optional failure webhook
+```
+
+`pg-durable-verify.yml` (runs **daily**) — guarantees *every* durable file is integrity-tested, not just
+the newest. Its **primary** leg hash-checks each new daily/weekly/monthly object against the SHA-256 recorded
+at backup time and full-restores the freshest `daily`; its **secondary** leg re-restores the newest
+weekly/monthly object ≥ `RETEST_DAYS` (14) old not yet restore-verified. Net: weekly/monthly are validated
+twice (hash on write + restore at ~2 weeks), daily once. Because the daily primary restore covers the freshest
+dump more often than the weekly drill, this **supersedes `pg-restore-drill.yml`** — wire this one and drop the
+weekly drill (or keep both). Cadence/limits are profile knobs (`DURABLE_PRIMARY`, `DURABLE_SECONDARY`,
+`RETEST_DAYS`, `DURABLE_VERIFY_MAX_RESTORES`).
+
+```yaml
+name: My DB durable verify
+on:
+  schedule:
+    - cron: "37 18 * * *"        # daily, after the anchor-hour backup
+  workflow_dispatch: {}
+concurrency: { group: pg-durable-verify, cancel-in-progress: false }
+jobs:
+  verify:
+    uses: simonhac/the-gitfather/.github/workflows/pg-durable-verify.yml@main
+    with:
+      profile: pg-backup/myproject.env
+      r2_bucket: ${{ vars.R2_BUCKET }}
+      slack_channel: ${{ vars.SLACK_CHANNEL }}
+    secrets:
+      PG_BACKUP_DATABASE_URL: ${{ secrets.PG_BACKUP_DATABASE_URL }}
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}   # optional
+      AGE_IDENTITY: ${{ secrets.AGE_IDENTITY }}   # only if backups are .age-encrypted
       ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}   # optional failure webhook
 ```
 
@@ -289,6 +324,55 @@ bucket gains no web surface).
 
 ---
 
+## Verifying backups (integrity)
+
+"A backup you've never restored is a hope, not a backup." Integrity is checked at three points, so
+**every durable file is proven recoverable**, not just the newest one.
+
+**1. At backup time** (`backup-pg-to-r2.ts`) — before a dump is declared good:
+
+- **`MIN_BYTES`** floor — a suspiciously small dump is never uploaded.
+- **`BACKUP_VALIDATE_STRUCTURE=1`** (default) — `pg_restore -l` lists the archive's TOC; a corrupt or
+  truncated `>MIN_BYTES` dump can't be listed and is rejected *before* it's reported as a success. (For
+  `ENCRYPTION=none`; age dumps are validated by the drill / by `BACKUP_VERIFY`.)
+- **`BACKUP_SHA256=1`** (default) — a streaming SHA-256 of the exact uploaded bytes (ciphertext for age)
+  is recorded in the run-log; it's the baseline the durable hash-check compares against.
+- **`BACKUP_VERIFY=1`** (opt-in, off by default) — after upload, re-download the object, confirm its
+  SHA-256 matches, and `pg_restore -l` it. This is the only *backup-time* structural check for age
+  (it needs `AGE_IDENTITY` in the backup job to decrypt). Costs a re-download per run, so it's opt-in.
+
+**2. The restore drill** (`restore-drill-pg.ts`) — restores the newest `2hourly` dump into a throwaway
+Postgres and gates on the data, not just a clean exit:
+
+- Sentinel-table row count must be **`MIN_RATIO` ≤ restored/live ≤ `MAX_RATIO`** (catches truncation
+  *and* duplication; live is `n_live_tup`, an estimate).
+- **`DRILL_EXTRA_TABLES`** must be non-empty; **`DRILL_EXPECTED_TABLES`** must each exist *and* be
+  non-empty (catches a partial-schema restore).
+- `pg_restore` stderr is **classified**: known managed-schema noise (missing roles/extensions, ownership,
+  idempotent "already exists") is tolerated; any *unrecognised* error fails the drill.
+- **`DRILL_DRIFT_MAX_DROP`** (optional, off by default) fails the drill if a table shrank more than the
+  given fraction vs the previous passing drill.
+
+**3. Daily durable verification** (`verify-durable-pg.ts`, the `pg-durable-verify.yml` workflow) —
+guarantees **every** `daily`/`weekly`/`monthly` object is tested, driven by the verifications log so a
+missed run self-corrects:
+
+- **Primary** (`DURABLE_PRIMARY=1`): on first sight, hash-check each durable object against its recorded
+  SHA-256 (proves the server-side copy is byte-intact), and full-restore the freshest `daily`.
+- **Secondary** (`DURABLE_SECONDARY=1`): full-restore the newest `weekly`/`monthly` object **≥
+  `RETEST_DAYS` (14)** old not yet restore-verified (the aged-copy proof, just inside the WORM lock).
+- **`DURABLE_VERIFY_MAX_RESTORES`** caps full restores per run (hash-checks are uncapped — cheap).
+
+Net: **weekly/monthly are validated twice** (hash on write + restore at ~2 weeks), **daily once** (it's
+the short-lived 21-day tier). Because the daily primary restore covers the freshest dump every day, this
+**supersedes the weekly `pg-restore-drill.yml`** — wire `pg-durable-verify.yml` and drop the weekly drill.
+
+Every drill — pass **or fail** — is recorded to the verifications log, so a failed restore shows up: on
+the dashboard as an **amber "Drill failed"** cell (distinct from a red *failed backup*), and as a loud
+Slack/`ALERT_WEBHOOK_URL` page. The hash-vs-restore distinction drives the tooltip wording.
+
+---
+
 ## Slack (optional)
 
 Instead of one message per run (spam), the backup keeps **one message per day** and **updates it in
@@ -322,18 +406,20 @@ backup pings it on success, so its absence pages independently of GitHub.
 ## Backup-history dashboard
 
 A static, self-contained page visualises **every 2-hourly run over the 400-day window** as a heatmap
-(green = healthy & retained, brighter green = restore-verified, grey = aged out of retention, red =
-failed, blank = no run). It reads an **append-only run-log in R2** (no server, no DB) that the backup +
-drill scripts write via `runlog.ts`:
+(green = healthy & retained, brighter green = restore-verified, **amber = restore/hash drill failed**,
+grey = aged out of retention, red = failed backup, blank = no run). It reads an **append-only run-log in
+R2** (no server, no DB) that the backup + drill + durable-verify scripts write via `runlog.ts`:
 
 ```
-_log/<basename>/runs-YYYY-MM.jsonl           # {ts, ok, tiers, bytes, key, runId, runUrl, error}
-_log/<basename>/verifications-YYYY-MM.jsonl   # {ts, verifiedTs, ok, ratio, runId, runUrl}
+_log/<basename>/runs-YYYY-MM.jsonl           # {ts, ok, tiers, bytes, key, sha256, runId, runUrl, error}
+_log/<basename>/verifications-YYYY-MM.jsonl   # {ts, verifiedTs, ok, ratio, tier, key, kind, counts, reason, runId, runUrl}
 ```
 
-Monthly files roll over by name; an R2 lifecycle rule trims old months. `build-dashboard.ts` reads the
-logs, **scrubs** them to a public payload (drops raw error text), `esbuild`-bundles the SVG renderer into
-a single `index.html`, and uploads it to the **separate public** dashboard bucket.
+`kind` is `restore` or `hash`; `counts` (restored per-table) and `reason` are **private** (never
+published). Monthly files roll over by name; an R2 lifecycle rule trims old months. `build-dashboard.ts`
+reads the logs, **scrubs** them to a public payload (drops `sha256`, `key`, `counts`, `reason`, and raw
+error text), `esbuild`-bundles the SVG renderer into a single `index.html`, and uploads it to the
+**separate public** dashboard bucket.
 
 > **Privacy.** The published page includes the project label + sizes + tiers + timestamps + verification
 > ratio + run links; it **drops raw error text** (set `DASHBOARD_HIDE_RUN_LINKS=1` to also drop run
@@ -379,12 +465,13 @@ strict where a typo is genuinely catchable and lenient where they can't prove va
 
 | Strict (catches typos) | Lenient (presence + light shape) |
 |---|---|
-| `ENCRYPTION` ∈ {`none`,`age`,`aes-gcm`} · `ANCHOR_HOUR_UTC` 0–23 · `MIN_RATIO` 0–1 · `STALE_HOURS` > 0 · `DISPLAY_TZ` (real IANA zone) · `FORCE_TIERS` ⊆ {2hourly,daily,weekly,monthly} · `SELF_HEAL`/`DRY_RUN` (1/0/true/false/yes/no/on/off) · `*_DATABASE_URL` scheme = `postgres(ql)://` | R2 account id / keys / secrets · bucket names (whitespace-free) · `AGE_RECIPIENT`/`AGE_IDENTITY` · Slack token/channel |
+| `ENCRYPTION` ∈ {`none`,`age`,`aes-gcm`} · `ANCHOR_HOUR_UTC` 0–23 · `MIN_RATIO` 0–1 · `MAX_RATIO` ≥ 1 · `DRILL_DRIFT_MAX_DROP` 0–1 · `STALE_HOURS` > 0 · `MIN_BYTES`/`RETEST_DAYS`/`DURABLE_VERIFY_MAX_RESTORES` (ints) · `DISPLAY_TZ` (real IANA zone) · `FORCE_TIERS` ⊆ {2hourly,daily,weekly,monthly} · env-booleans `SELF_HEAL`/`DRY_RUN`/`BACKUP_SHA256`/`BACKUP_VALIDATE_STRUCTURE`/`BACKUP_VERIFY`/`DURABLE_PRIMARY`/`DURABLE_SECONDARY` (1/0/true/false/yes/no/on/off) · `*_DATABASE_URL` scheme = `postgres(ql)://` | R2 account id / keys / secrets · bucket names (whitespace-free) · `AGE_RECIPIENT`/`AGE_IDENTITY` · table-name lists (`DRILL_EXTRA_TABLES`/`DRILL_EXPECTED_TABLES`) · Slack token/channel |
 
 Conditional rules are enforced too: `ENCRYPTION=age` ⇒ `AGE_RECIPIENT` (backup) / `AGE_IDENTITY`
-(drill); `SLACK_BOT_TOKEN` set ⇒ `SLACK_CHANNEL`. The report prints variable **names** only — never a
-value — so nothing secret reaches a log. Real credential/endpoint validity isn't guessed from a regex;
-it's proven by `doctor`'s live probes.
+(drill, durable-verify); `BACKUP_VERIFY=1` + `ENCRYPTION=age` ⇒ `AGE_IDENTITY` (backup); `SLACK_BOT_TOKEN`
+set ⇒ `SLACK_CHANNEL`. The report prints variable **names** only — never a value — so nothing secret
+reaches a log. Real credential/endpoint validity isn't guessed from a regex; it's proven by `doctor`'s
+live probes.
 
 `doctor` is a **read-only** preflight — *"is this consumer actually wired up?"* — for verifying a
 freshly-configured repo before go-live. It runs the **same** config schema, then probes the external
@@ -393,7 +480,7 @@ Postgres via `select 1`, Slack `auth.test`, `gh auth status`). It performs **no 
 upload, no `gh workflow run`, no Slack post — so it's safe against production creds.
 
 ```bash
-npm run doctor -- backup           # one task: backup | drill | staleness | dashboard
+npm run doctor -- backup           # one task: backup | drill | verify-durable | staleness | dashboard
 npm run doctor -- all              # every task's config + probes
 PROFILE=profiles/example.env npm run doctor -- backup   # ✓/⚠/✗ checklist; exit 0 iff all required pass
 ```
@@ -441,7 +528,12 @@ warn in a vanilla Postgres — restore into a fresh instance of the same platfor
 
 See [`profiles/example.env`](profiles/example.env): `BACKUP_PREFIX`, `FILE_BASENAME`, `PG_DUMP_FLAGS`,
 `ENCRYPTION`, `PG_CLIENT_MAJOR`, `ANCHOR_HOUR_UTC`, `DRILL_SENTINEL_TABLE`, `DRILL_EXTRA_TABLES`,
-`MIN_RATIO`, `MIN_BYTES`, `STALE_HOURS`, `DISPLAY_TZ`, `SLACK_ALERT_MENTION`, `DASHBOARD_LABEL`, `DASHBOARD_URL`.
+`DRILL_EXPECTED_TABLES`, `MIN_RATIO`, `MAX_RATIO`, `DRILL_DRIFT_MAX_DROP`, `MIN_BYTES`, `STALE_HOURS`,
+`DISPLAY_TZ`, `SLACK_ALERT_MENTION`, `DASHBOARD_LABEL`, `DASHBOARD_URL`.
+
+Backup-time integrity: `BACKUP_SHA256`, `BACKUP_VALIDATE_STRUCTURE`, `BACKUP_VERIFY`. Durable
+verification: `DURABLE_PRIMARY`, `DURABLE_SECONDARY`, `RETEST_DAYS`, `DURABLE_VERIFY_MAX_RESTORES`. All
+have safe defaults — see **[Verifying backups](#verifying-backups-integrity)**.
 
 ---
 
@@ -475,6 +567,24 @@ start, a runner that dies, the cron not firing — never reach the Slack code, a
 (`HEARTBEAT_URL` → healthchecks.io etc.) is the catch-all for exactly these cases: it pages on the
 *absence* of a success ping, independent of GitHub. Treat a healthchecks alarm with a quiet Slack row
 as "the wiring/secrets/runner is broken," and check the Actions run logs.
+
+### An amber "Drill failed" cell, or a `restore-drill`/`durable-verify FAILED` page
+
+A drill restored a dump but the **data gate** didn't pass — this is *not* a failed backup (those are
+red). The Slack/webhook message names the reason. Common ones:
+
+- *"`<table>` is empty/zero"* or *"< `MIN_RATIO`× live"* — a genuinely truncated dump, **or** a sentinel
+  table whose live `n_live_tup` estimate is stale (run `ANALYZE`, or widen `MIN_RATIO`).
+- *"N unrecognised error(s): …"* — `pg_restore` emitted an error not in the benign managed-schema
+  allow-list (`scripts/lib/pgRestore.ts`). If it's actually harmless for your provider, that file is the
+  one place to add the pattern.
+- *"`<table>` dropped X% vs prior drill"* — only with `DRILL_DRIFT_MAX_DROP` set; a real shrink or an
+  over-tight threshold.
+
+A failed **durable** verify (`verify-durable-pg.ts`) on an *aged* copy uses a non-empty gate (it can't
+compare to current live), so its failures mean the object didn't restore or an expected table was empty —
+investigate that specific object. Every failure is recorded to the verifications log (the amber cell), so
+the dashboard shows it even after the alert scrolls away.
 
 ### `Unrecognized named-value: 'vars'` when validating a workflow
 

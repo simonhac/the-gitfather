@@ -34,6 +34,7 @@ const FILL: Record<Exclude<BackupCellState, "empty">, string> = {
   expired: DARK ? "#3a414e" : "#cdd3dc", // aged-out slot — recedes into the grid
   ok: DARK ? "#2a9d63" : "#1f8a54", // succeeded, still retained
   verified: DARK ? "#41d586" : "#2fb872", // brighter green — restore-verified
+  unverified: DARK ? "#e0a23a" : "#d9911f", // amber — backup OK but a restore/hash drill FAILED (≠ red failed backup)
 };
 const EMPTY_FILL = DARK ? "#20242d" : "#eef0f4";
 const GRID_BORDER = DARK ? "#2a2f3a" : "#e3e6ec";
@@ -44,7 +45,8 @@ const TIER_LABEL: Record<string, string> = {
   "2hourly": "2-hourly", daily: "daily", weekly: "weekly", monthly: "monthly",
 };
 const STATE_LABEL: Record<BackupCellState, string> = {
-  empty: "No backup", failed: "Failed", expired: "Expired (was OK)", ok: "Backup OK", verified: "Restore-verified",
+  empty: "No backup", failed: "Failed", expired: "Expired (was OK)", ok: "Backup OK",
+  verified: "Restore-verified", unverified: "Drill failed",
 };
 
 function formatBytes(n: number | null): string {
@@ -127,6 +129,7 @@ const MIXED_SWATCH = `linear-gradient(to top right, ${FILL.failed} 0 50%, ${FILL
 const legendItems: [string, string, boolean][] = [
   ["Verified", FILL.verified, false],
   ["Backup OK", FILL.ok, false],
+  ["Drill failed", FILL.unverified, false],
   ["Mixed (ok + failed)", MIXED_SWATCH, false],
   ["Expired", FILL.expired, false],
   ["Failed", FILL.failed, false],
@@ -342,7 +345,15 @@ function cellHtml(cell: BackupCell): string {
     lines.push(`<div class="tip-state">${dot(sr.state)}${STATE_LABEL[sr.state]}</div>`);
     if (sr.run.ok) lines.push(`<div class="tip-muted">${formatBytes(sr.run.bytes)} · ${sr.run.tiers.map((t) => TIER_LABEL[t] ?? t).join(", ")}</div>`);
     if (sr.state === "expired") lines.push(`<div class="tip-muted">Object has aged out of R2 retention.</div>`);
-    if (sr.verification?.ok) lines.push(`<div class="tip-muted">Drill restored &amp; verified${sr.verification.ratio != null ? ` (${(sr.verification.ratio * 100).toFixed(0)}% of live rows)` : ""}.</div>`);
+    const v = sr.verification;
+    if (v?.ok) {
+      const what = v.kind === "hash"
+        ? "Byte-verified (checksum match)"
+        : `Drill restored &amp; verified${v.ratio != null ? ` (${(v.ratio * 100).toFixed(0)}% of live rows)` : ""}`;
+      lines.push(`<div class="tip-muted">${what}.</div>`);
+    } else if (v && !v.ok) {
+      lines.push(`<div class="tip-fail">${v.kind === "hash" ? "Integrity check FAILED" : "Restore drill FAILED"} for this dump.</div>`);
+    }
     if (!sr.run.ok) lines.push(`<div class="tip-fail">Backup failed.</div>`);
   }
   if (clickable(cell)) {

@@ -15,7 +15,7 @@ import "./lib/bootEnv.js"; // MUST be first — loads $PROFILE before backupType
 // build-dashboard's `--sample` and check-staleness's `DRY_RUN`.
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { loadBackupConfig, loadDrillConfig, loadStalenessConfig, loadDashboardConfig } from "./lib/config.js";
+import { loadBackupConfig, loadDrillConfig, loadVerifyDurableConfig, loadStalenessConfig, loadDashboardConfig } from "./lib/config.js";
 import {
   type ProbeResult,
   checkBinary,
@@ -27,12 +27,13 @@ import {
   configureRcloneRemote,
 } from "./lib/preflight.js";
 
-const TASKS = ["backup", "drill", "staleness", "dashboard"] as const;
+const TASKS = ["backup", "drill", "verify-durable", "staleness", "dashboard"] as const;
 type Task = (typeof TASKS)[number];
 
 async function probeBackup(): Promise<ProbeResult[]> {
   const cfg = loadBackupConfig();
   const out: ProbeResult[] = [checkBinary("rclone"), checkBinary("pg_dump")];
+  if (cfg.BACKUP_VALIDATE_STRUCTURE || cfg.BACKUP_VERIFY) out.push(checkBinary("pg_restore")); // TOC validation
   if (cfg.ENCRYPTION === "age") out.push(checkBinary("age"));
   if (cfg.PG_CLIENT_MAJOR) out.push(checkPgClientVersion(cfg.PG_CLIENT_MAJOR, "pg_dump"));
   configureRcloneRemote("r2", cfg.R2_ACCOUNT_ID, cfg.R2_ACCESS_KEY_ID, cfg.R2_SECRET_ACCESS_KEY);
@@ -44,6 +45,19 @@ async function probeBackup(): Promise<ProbeResult[]> {
 
 async function probeDrill(): Promise<ProbeResult[]> {
   const cfg = loadDrillConfig();
+  const out: ProbeResult[] = [checkBinary("rclone"), checkBinary("pg_restore"), checkBinary("psql")];
+  if (cfg.ENCRYPTION === "age") out.push(checkBinary("age"));
+  if (cfg.PG_CLIENT_MAJOR) out.push(checkPgClientVersion(cfg.PG_CLIENT_MAJOR, "pg_restore"));
+  configureRcloneRemote("r2", cfg.R2_ACCOUNT_ID, cfg.R2_ACCESS_KEY_ID, cfg.R2_SECRET_ACCESS_KEY);
+  out.push(checkR2("r2", cfg.R2_BUCKET, "R2 dump bucket"));
+  out.push(checkPostgres(cfg.DRILL_DATABASE_URL, "drill target"));
+  out.push(checkPostgres(cfg.PG_LIVE_DATABASE_URL, "live row-count source"));
+  if (cfg.SLACK_BOT_TOKEN && cfg.SLACK_CHANNEL) out.push(await checkSlack(cfg.SLACK_BOT_TOKEN, cfg.SLACK_CHANNEL));
+  return out;
+}
+
+async function probeVerifyDurable(): Promise<ProbeResult[]> {
+  const cfg = loadVerifyDurableConfig();
   const out: ProbeResult[] = [checkBinary("rclone"), checkBinary("pg_restore"), checkBinary("psql")];
   if (cfg.ENCRYPTION === "age") out.push(checkBinary("age"));
   if (cfg.PG_CLIENT_MAJOR) out.push(checkPgClientVersion(cfg.PG_CLIENT_MAJOR, "pg_restore"));
@@ -108,6 +122,7 @@ async function probeDashboard(): Promise<ProbeResult[]> {
 const PROBES: Record<Task, () => Promise<ProbeResult[]>> = {
   backup: probeBackup,
   drill: probeDrill,
+  "verify-durable": probeVerifyDurable,
   staleness: probeStaleness,
   dashboard: probeDashboard,
 };

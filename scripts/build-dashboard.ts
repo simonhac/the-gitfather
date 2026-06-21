@@ -16,11 +16,11 @@ import "./lib/bootEnv.js"; // first — loads $PROFILE (no-op if unset) before D
 
 import { build } from "esbuild";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadDashboardConfig } from "./lib/config.js";
+import { readLogDir, downloadLogsFromR2 } from "./lib/logStore.js";
 import type { LogRun, LogVerification, PublicPayload, BackupTier } from "./lib/backupTypes.js";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
@@ -41,51 +41,14 @@ const cfg = loadDashboardConfig({ fromR2: !useSample && !logdir, upload });
 const label = cfg.DASHBOARD_LABEL ?? cfg.FILE_BASENAME ?? "database";
 const hideLinks = cfg.DASHBOARD_HIDE_RUN_LINKS;
 
-function readLogDir(dir: string): { runs: LogRun[]; verifications: LogVerification[] } {
-  const runs: LogRun[] = [];
-  const verifications: LogVerification[] = [];
-  let files: string[];
-  try {
-    files = readdirSync(dir);
-  } catch {
-    return { runs, verifications };
-  }
-  for (const f of files) {
-    if (!f.endsWith(".jsonl")) continue;
-    const lines = readFileSync(join(dir, f), "utf8").split("\n").map((s) => s.trim()).filter(Boolean);
-    for (const ln of lines) {
-      try {
-        const o = JSON.parse(ln);
-        if (f.startsWith("runs-")) runs.push(o as LogRun);
-        else if (f.startsWith("verifications-")) verifications.push(o as LogVerification);
-      } catch {
-        /* skip malformed line */
-      }
-    }
-  }
-  return { runs, verifications };
-}
-
-function downloadLogsFromR2(): { runs: LogRun[]; verifications: LogVerification[] } {
-  const bucket = cfg.R2_BUCKET; // schema-required when fromR2 (this path); guard kept for the type
-  const basename = cfg.FILE_BASENAME;
-  if (!bucket || !basename) throw new Error("R2_BUCKET / FILE_BASENAME must be set to read logs from R2");
-  const dest = mkdtempSync(join(tmpdir(), "pg-log-"));
-  execFileSync(
-    "rclone",
-    ["copy", `r2:${bucket}/_log/${basename}/`, dest, "--include", "*.jsonl", "--s3-no-check-bucket"],
-    { stdio: "inherit" },
-  );
-  return readLogDir(dest);
-}
-
 function scrub(runs: LogRun[], verifications: LogVerification[]): PublicPayload {
   return {
     label,
     generatedAt: process.env.DASHBOARD_NOW || new Date().toISOString(),
     // Privacy: drop key + raw error text; keep label, sizes, tiers, run links (toggleable).
     runs: runs.map((r) => ({ t: r.ts, ok: r.ok, tiers: r.tiers, bytes: r.bytes, runUrl: hideLinks ? null : r.runUrl })),
-    verifications: verifications.map((v) => ({ vt: v.verifiedTs, ok: v.ok, ratio: v.ratio })),
+    // kind drives the tooltip wording (restore vs byte-check); counts/reason/key/tier stay private.
+    verifications: verifications.map((v) => ({ vt: v.verifiedTs, ok: v.ok, ratio: v.ratio, kind: v.kind })),
   };
 }
 
@@ -94,11 +57,16 @@ function escHtml(s: string): string {
 }
 
 async function main(): Promise<void> {
-  const { runs, verifications } = useSample
-    ? makeSample(new Date())
-    : logdir
-      ? readLogDir(logdir)
-      : downloadLogsFromR2();
+  let runs: LogRun[];
+  let verifications: LogVerification[];
+  if (useSample) {
+    ({ runs, verifications } = makeSample(new Date()));
+  } else if (logdir) {
+    ({ runs, verifications } = readLogDir(logdir));
+  } else {
+    if (!cfg.R2_BUCKET || !cfg.FILE_BASENAME) throw new Error("R2_BUCKET / FILE_BASENAME must be set to read logs from R2");
+    ({ runs, verifications } = downloadLogsFromR2(cfg.R2_BUCKET, cfg.FILE_BASENAME));
+  }
   const payload = scrub(runs, verifications);
   console.log(`dashboard: ${payload.runs.length} runs, ${payload.verifications.length} verifications (label="${label}")`);
 
@@ -182,7 +150,7 @@ function makeSample(now: Date): { runs: LogRun[]; verifications: LogVerification
       const error = inOutage
         ? "pg_dump: could not connect to server: Connection refused"
         : "pg_dump: server closed the connection unexpectedly";
-      runs.push({ ts, ok: false, tiers: [], bytes: null, key: null, runId: null, runUrl: ghRun(t), error });
+      runs.push({ ts, ok: false, tiers: [], bytes: null, key: null, sha256: null, runId: null, runUrl: ghRun(t), error });
       continue;
     }
 
@@ -198,7 +166,7 @@ function makeSample(now: Date): { runs: LogRun[]; verifications: LogVerification
     const jitter = 1 + (rand() - 0.5) * 0.02; // ±1% intraday
     const bytes = Math.round(trend * dayWobble * jitter);
 
-    runs.push({ ts, ok: true, tiers, bytes, key: null, runId: null, runUrl: ghRun(t), error: null });
+    runs.push({ ts, ok: true, tiers, bytes, key: null, sha256: null, runId: null, runUrl: ghRun(t), error: null });
   }
 
   // A couple of slots with more than one run, to exercise the multi-run rendering: when two
@@ -211,11 +179,11 @@ function makeSample(now: Date): { runs: LogRun[]; verifications: LogVerification
   // (a) Mixed slot: the scheduled run (already added by the loop, OK) plus a manual rerun ~40 min
   //     later that failed → diagonal split (green/red) + notch.
   const mixed = bucket(20) + 40 * 60_000;
-  runs.push({ ts: iso(mixed), ok: false, tiers: [], bytes: null, key: null, runId: null, runUrl: ghRun(mixed), error: "pg_dump: canceled statement due to lock_timeout" });
+  runs.push({ ts: iso(mixed), ok: false, tiers: [], bytes: null, key: null, sha256: null, runId: null, runUrl: ghRun(mixed), error: "pg_dump: canceled statement due to lock_timeout" });
 
   // (b) Multi-success slot: the scheduled run plus a successful manual rerun ~50 min later → notch.
   const rerun = bucket(40) + 50 * 60_000;
-  runs.push({ ts: iso(rerun), ok: true, tiers: ["2hourly"], bytes: 4_840_000_000, key: null, runId: null, runUrl: ghRun(rerun), error: null });
+  runs.push({ ts: iso(rerun), ok: true, tiers: ["2hourly"], bytes: 4_840_000_000, key: null, sha256: null, runId: null, runUrl: ghRun(rerun), error: null });
 
   // One restore drill per weekly anchor (Sunday daily backup), run ~30 h later. ~97% pass.
   const weekly = runs.filter((r) => r.ok && r.tiers.includes("weekly")).map((r) => r.ts);

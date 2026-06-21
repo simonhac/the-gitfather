@@ -22,11 +22,11 @@ import "./lib/bootEnv.js"; // MUST be first — loads $PROFILE before backupType
 // Optional env: SLACK_BOT_TOKEN / SLACK_CHANNEL / HEARTBEAT_URL / FORCE_TIERS / AGE_RECIPIENT
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { statSync, mkdtempSync, rmSync } from "node:fs";
+import { statSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { backupSchema, reportConfigError } from "./lib/config.js";
-import { run, runToFile, pipeToFile, commandExists, bestEffort } from "./lib/proc.js";
+import { run, runToFile, pipeToFile, commandExists, bestEffort, sha256File, capture } from "./lib/proc.js";
 import { computeTiers, runOrigin } from "./lib/schedule.js";
 import { appendRun } from "./runlog.js";
 import { slackEnabled, slackPost, slackDailyRecord, dailyLabel, alertWebhook } from "./lib/slack.js";
@@ -221,6 +221,32 @@ async function main(): Promise<void> {
   console.log(`Dump size: ${Math.floor(size / 1024 / 1024)} MB (${size} bytes)`);
   if (size < minBytes) await fail(`dump suspiciously small (${size} < ${minBytes}) — not uploading`);
 
+  // ── Structural validation (#4): prove the dump is a parseable custom-format archive ────────
+  // `pg_restore -l` lists the TOC (cheap — header + table of contents, not the data); a corrupt or
+  // truncated archive can't be listed, and a real data dump has ≥1 TABLE/TABLE DATA entry. This
+  // catches a >MIN_BYTES-but-corrupt dump BEFORE it's reported as a successful backup. Only the
+  // plaintext (none-mode) is checkable here without a key; age is covered by BACKUP_VERIFY / the drill.
+  if (encryption === "none" && cfg.BACKUP_VALIDATE_STRUCTURE) {
+    if (!commandExists("pg_restore")) {
+      process.stderr.write("warning: BACKUP_VALIDATE_STRUCTURE=1 but pg_restore not found — skipping TOC validation\n");
+    } else {
+      const toc = capture("pg_restore", ["-l", out]);
+      if (!toc.ok) await fail("dump is not a parseable pg_dump archive (pg_restore -l failed)");
+      const tableEntries = toc.out.split("\n").filter((l) => /\bTABLE( DATA)?\b/.test(l)).length;
+      if (tableEntries === 0) await fail("dump TOC has no TABLE entries — suspect an empty or schema-only dump");
+      console.log(`Structural check: ${tableEntries} TABLE/TABLE DATA TOC entries — archive is parseable`);
+    }
+  }
+
+  // ── Content hash (#1): SHA-256 of the EXACT bytes we upload (ciphertext for age) ───────────
+  // Streamed (never buffers the dump on the heap). Best-effort — a hash hiccup must not fail an
+  // otherwise-good backup. Recorded in the run-log as the durable hash-verify baseline.
+  let sha256: string | null = null;
+  if (cfg.BACKUP_SHA256) {
+    sha256 = (await bestEffort("sha256", () => sha256File(out))) ?? null;
+    if (sha256) console.log(`SHA-256: ${sha256}`);
+  }
+
   // ── Which tiers does this run belong to? ───────────────────────────────────
   // Always 2hourly; the anchor-hour run is also daily, +weekly on Sun, +monthly on the 1st (UTC).
   const tiers = computeTiers(now, anchorHour, cfg.FORCE_TIERS);
@@ -255,6 +281,48 @@ async function main(): Promise<void> {
     if (promoCode !== 0) await fail(`R2 promotion copy to ${tier} failed`);
   }
 
+  // ── Opt-in post-upload self-verify (#1/#4): re-fetch what R2 actually stored and prove it ──
+  // Default off (a single-PUT upload is atomic; a re-download every 2h burns runner minutes). When on,
+  // this is the ONLY backup-time structural check for age (needs age + AGE_IDENTITY to decrypt).
+  if (cfg.BACKUP_VERIFY) {
+    console.log("Post-upload verify: re-fetching the stored object …");
+    const verifyObj = join(tmp, "verify.obj");
+    const dl = await run("rclone", ["copyto", `r2:${r2Bucket}/${firstKey}`, verifyObj, "--s3-no-check-bucket"]);
+    if (dl !== 0) await fail("post-upload verify: re-download failed");
+    // (a) Byte integrity: the re-fetched object must hash to exactly what we uploaded.
+    const localSha = sha256 ?? (await bestEffort("sha256", () => sha256File(out))) ?? null;
+    if (localSha) {
+      const got = (await bestEffort("verify sha256", () => sha256File(verifyObj))) ?? null;
+      if (got && got.toLowerCase() !== localSha.toLowerCase()) {
+        await fail(`post-upload sha256 mismatch (local ${localSha.slice(0, 12)}… vs R2 ${got.slice(0, 12)}…)`);
+      }
+    }
+    // (b) Structural: decrypt if age, then pg_restore -l on the re-fetched bytes.
+    if (!commandExists("pg_restore")) {
+      process.stderr.write("warning: BACKUP_VERIFY=1 but pg_restore not found — skipping the structural re-check\n");
+    } else {
+      let toCheck = verifyObj;
+      if (encryption === "age") {
+        const identity = cfg.AGE_IDENTITY;
+        if (!commandExists("age") || !identity) await fail("post-upload verify: ENCRYPTION=age needs age + AGE_IDENTITY to decrypt");
+        let idfile = identity!;
+        try {
+          if (!statSync(identity!).isFile()) throw new Error("not a file");
+        } catch {
+          idfile = join(tmp, "verify.id");
+          writeFileSync(idfile, identity!, { mode: 0o600 });
+        }
+        const plain = join(tmp, "verify.dump");
+        const dc = await runToFile("age", ["-d", "-i", idfile, verifyObj], plain);
+        if (dc !== 0) await fail("post-upload verify: age decrypt failed");
+        toCheck = plain;
+      }
+      const toc = capture("pg_restore", ["-l", toCheck]);
+      if (!toc.ok) await fail("post-upload verify: the stored object is not a parseable archive");
+      console.log("Post-upload verify: OK (byte + structural)");
+    }
+  }
+
   // Marker for the Slack row: which durable tiers this run was promoted to.
   const promoted = tiers.filter((t) => t !== "2hourly").join(",");
   const marker = promoted ? `📅(${promoted})` : "";
@@ -262,7 +330,7 @@ async function main(): Promise<void> {
   console.log(`✓ Backup complete: ${filename} (${Math.floor(size / 1024 / 1024)} MB) → tiers: ${tiers.join(" ")}`);
   await bestEffort("slack ok tick", () => slackDailyRecord(true, label, marker, origin, now));
   await bestEffort("runlog ok", () =>
-    appendRun({ ts: runTsIso, ok: true, tiers: tiers as BackupTier[], bytes: size, key: firstKey }),
+    appendRun({ ts: runTsIso, ok: true, tiers: tiers as BackupTier[], bytes: size, key: firstKey, sha256 }),
   );
 
   // Dead-man's-switch ping (success only) — its absence is the staleness signal.

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { z } from "zod";
-import { backupSchema, drillSchema, stalenessSchema, dashboardSchema } from "../lib/config.js";
+import { backupSchema, drillSchema, verifyDurableSchema, stalenessSchema, dashboardSchema } from "../lib/config.js";
 
 // Minimal valid inputs per task — tests then mutate one field at a time.
 const backupBase = {
@@ -90,6 +90,50 @@ test("MIN_RATIO: number in 0..1", () => {
 test("STALE_HOURS: positive integer", () => {
   assert.equal(stalenessSchema.safeParse({ ...stalenessBase, STALE_HOURS: "5" }).data?.STALE_HOURS, 5);
   assert.ok(!stalenessSchema.safeParse({ ...stalenessBase, STALE_HOURS: "0" }).success);
+});
+
+// ── New integrity knobs ──────────────────────────────────────────────────────
+
+test("staleness: MIN_BYTES default + coercion", () => {
+  assert.equal(stalenessSchema.safeParse(stalenessBase).data?.MIN_BYTES, 1_048_576);
+  assert.equal(stalenessSchema.safeParse({ ...stalenessBase, MIN_BYTES: "2048" }).data?.MIN_BYTES, 2048);
+  assert.ok(!stalenessSchema.safeParse({ ...stalenessBase, MIN_BYTES: "abc" }).success);
+});
+
+test("drill: MAX_RATIO default 2, must be >= 1; DRILL_DRIFT_MAX_DROP in 0..1, default 0", () => {
+  assert.equal(drillSchema.safeParse(drillBase).data?.MAX_RATIO, 2);
+  assert.ok(!drillSchema.safeParse({ ...drillBase, MAX_RATIO: "0.5" }).success);
+  assert.equal(drillSchema.safeParse(drillBase).data?.DRILL_DRIFT_MAX_DROP, 0);
+  assert.ok(!drillSchema.safeParse({ ...drillBase, DRILL_DRIFT_MAX_DROP: "1.5" }).success);
+});
+
+test("drill: DRILL_EXPECTED_TABLES split, default []", () => {
+  assert.deepEqual(drillSchema.safeParse(drillBase).data?.DRILL_EXPECTED_TABLES, []);
+  assert.deepEqual(
+    drillSchema.safeParse({ ...drillBase, DRILL_EXPECTED_TABLES: "users  orders" }).data?.DRILL_EXPECTED_TABLES,
+    ["users", "orders"],
+  );
+});
+
+test("verify-durable: clones the drill grammar + adds cadence knobs with defaults", () => {
+  const r = verifyDurableSchema.safeParse(drillBase);
+  assert.ok(r.success);
+  assert.equal(r.data.DURABLE_PRIMARY, true);
+  assert.equal(r.data.DURABLE_SECONDARY, true);
+  assert.equal(r.data.RETEST_DAYS, 14);
+  assert.equal(r.data.DURABLE_VERIFY_MAX_RESTORES, 2);
+  assert.ok(!verifyDurableSchema.safeParse({ ...drillBase, RETEST_DAYS: "0" }).success);
+  assert.ok(!verifyDurableSchema.safeParse({ ...drillBase, DURABLE_VERIFY_MAX_RESTORES: "-1" }).success);
+});
+
+test("backup: integrity knobs default (validate on, verify off); BACKUP_VERIFY+age needs AGE_IDENTITY", () => {
+  const d = backupSchema.safeParse(backupBase).data;
+  assert.equal(d?.BACKUP_SHA256, true);
+  assert.equal(d?.BACKUP_VALIDATE_STRUCTURE, true);
+  assert.equal(d?.BACKUP_VERIFY, false);
+  const age = { ...backupBase, ENCRYPTION: "age", AGE_RECIPIENT: "age1x" };
+  assert.ok(!backupSchema.safeParse({ ...age, BACKUP_VERIFY: "1" }).success);
+  assert.ok(backupSchema.safeParse({ ...age, BACKUP_VERIFY: "1", AGE_IDENTITY: "/run/key" }).success);
 });
 
 // ── IANA tz probe ────────────────────────────────────────────────────────────

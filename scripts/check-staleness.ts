@@ -35,6 +35,7 @@ async function main(): Promise<void> {
     R2_ACCESS_KEY_ID: r2Key,
     R2_SECRET_ACCESS_KEY: r2Secret,
     STALE_HOURS: staleHours,
+    MIN_BYTES: minBytes,
     BACKUP_WORKFLOW: backupWorkflow,
   } = cfg;
 
@@ -133,15 +134,37 @@ async function main(): Promise<void> {
   process.env.RCLONE_CONFIG_R2_SECRET_ACCESS_KEY = r2Secret;
   process.env.RCLONE_CONFIG_R2_ENDPOINT = endpoint;
 
+  // "<size>;<name>" per line (--format sp) so we get the object SIZE too — a fresh-but-empty object
+  // must not read as healthy. Sort by name (lexical = chronological) to pick the newest.
   const ls = capture("rclone", [
     "lsf",
     "--files-only",
+    "--format",
+    "sp",
+    "--separator",
+    ";",
     `r2:${r2Bucket}/${backupPrefix}/2hourly/`,
     "--s3-no-check-bucket",
   ]);
-  const objs = ls.out.split("\n").map((s) => s.trim()).filter(Boolean).sort();
-  const newest = objs.length ? objs[objs.length - 1] : "";
+  const entries = ls.out
+    .split("\n")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const i = line.indexOf(";");
+      return i < 0 ? { size: NaN, name: line } : { size: Number(line.slice(0, i)), name: line.slice(i + 1) };
+    })
+    .filter((e) => e.name)
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  const newestEntry = entries.length ? entries[entries.length - 1] : null;
+  const newest = newestEntry?.name ?? "";
   if (!newest) await fail(`no objects under ${backupPrefix}/2hourly/`);
+
+  // Size gate (#7): a fresh-but-truncated/empty object is BROKEN, not a missed tick — page directly
+  // (never self-heal, which would just re-trigger a backup that may keep producing a bad object).
+  if (newestEntry && Number.isFinite(newestEntry.size) && newestEntry.size < minBytes) {
+    await fail(`newest object ${newest} is ${newestEntry.size} bytes (< MIN_BYTES ${minBytes}) — truncated/empty, not just stale`);
+  }
 
   // Filename: <FILE_BASENAME>-YYYYMMDDTHHMMSSZ.<ext> → extract the stamp.
   const prefix = `${fileBasename}-`;

@@ -8,6 +8,10 @@ import "./lib/bootEnv.js"; // MUST be first — loads $PROFILE before backupType
 // live count (catches both a truncated dump and a stale/stuck backup). Best-effort Slack alert +
 // non-zero exit on failure.
 //
+// The restore + assertion core is exported as drillObject() so the daily durable-verify job
+// (verify-durable-pg.ts) can restore a SPECIFIC durable key, not just the newest 2hourly object.
+// Every drill — pass OR fail — now records a verification (gap #5: failed drills were unlogged).
+//
 // Usage:
 //   PROFILE=profiles/example.env npx tsx scripts/restore-drill-pg.ts
 //
@@ -22,13 +26,218 @@ import { mkdtempSync, rmSync, statSync, writeFileSync, copyFileSync } from "node
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { loadDrillConfig } from "./lib/config.js";
-import { run, runToFile, capture, commandExists } from "./lib/proc.js";
+import { run, runToFile, capture, captureStderr, commandExists } from "./lib/proc.js";
+import { classifyPgRestoreStderr } from "./lib/pgRestore.js";
+import { loadLog } from "./lib/logStore.js";
 import { appendVerify } from "./runlog.js";
 import { slackOneoff, alertWebhook } from "./lib/slack.js";
+import type { BackupTier } from "./lib/backupTypes.js";
 
 /** ISO-8601 UTC to seconds precision (matches bash `date -u +%Y-%m-%dT%H:%M:%SZ`). */
 function isoSeconds(d: Date): string {
   return d.toISOString().replace(/\.\d+Z$/, "Z");
+}
+
+/** Object extension for an ENCRYPTION mode (mirrors backup-pg-to-r2.ts upload). */
+export function extForEncryption(encryption: string): string {
+  return encryption === "age" ? "dump.age" : encryption === "aes-gcm" ? "dump.enc" : "dump";
+}
+
+/** The dump stamp embedded in a key → an ISO-8601 UTC ts (matches a LogRun.ts), or null. */
+export function stampToIso(key: string): string | null {
+  const m = basename(key).match(/[0-9]{8}T[0-9]{6}Z/);
+  if (!m) return null;
+  const s = m[0];
+  return (
+    `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}` +
+    `T${s.slice(9, 11)}:${s.slice(11, 13)}:${s.slice(13, 15)}Z`
+  );
+}
+
+/** Config fields drillObject needs — satisfied by both DrillConfig and VerifyDurableConfig. */
+export interface DrillCoreConfig {
+  BACKUP_PREFIX: string;
+  R2_BUCKET: string;
+  DRILL_DATABASE_URL: string;
+  PG_LIVE_DATABASE_URL: string;
+  DRILL_SENTINEL_TABLE: string;
+  DRILL_EXTRA_TABLES: string[];
+  DRILL_EXPECTED_TABLES: string[];
+  MIN_RATIO: number;
+  MAX_RATIO: number;
+  DRILL_DRIFT_MAX_DROP: number;
+  ENCRYPTION: "none" | "age" | "aes-gcm";
+  AGE_IDENTITY?: string;
+}
+
+/**
+ * Gate mode for the row-count assertion:
+ *   "live-ratio" — newest dump, live ≈ dump: assert MIN_RATIO × live ≤ restored ≤ MAX_RATIO × live.
+ *   "nonempty"   — aged durable copy (live has moved on in ~2 weeks, so a live ratio is invalid):
+ *                  assert structural validity + the sentinel/expected tables are present & non-empty.
+ */
+export type DrillGate = "live-ratio" | "nonempty";
+
+export interface DrillObjectOpts {
+  /** Key UNDER BACKUP_PREFIX, e.g. "2hourly/<file>" or "daily/<file>". */
+  key: string;
+  tier: BackupTier;
+  gate: DrillGate;
+  cfg: DrillCoreConfig;
+  tmp: string;
+  /** Prior passing drill's per-table counts, for the optional DRILL_DRIFT_MAX_DROP gate. */
+  priorCounts?: Record<string, number> | null;
+}
+
+export interface DrillObjectResult {
+  ok: boolean;
+  ratio: number | null;
+  counts: Record<string, number>;
+  reason: string | null;
+}
+
+/**
+ * Download one object, decrypt/decompress, pg_restore it into the throwaway target, and assert the
+ * restored data. Returns a result (does NOT exit) so a caller can record + alert + continue. Cleans
+ * up its own scratch files so it can be called repeatedly within one tmp dir.
+ */
+export async function drillObject(opts: DrillObjectOpts): Promise<DrillObjectResult> {
+  const { key, gate, cfg, tmp } = opts;
+  const drillUrl = cfg.DRILL_DATABASE_URL;
+  const liveUrl = cfg.PG_LIVE_DATABASE_URL;
+  const counts: Record<string, number> = {};
+  const done = (ok: boolean, ratio: number | null, reason: string | null): DrillObjectResult => ({ ok, ratio, counts, reason });
+
+  const obj = join(tmp, "obj");
+  const dump = join(tmp, "restore.dump");
+  rmSync(obj, { force: true });
+  rmSync(dump, { force: true });
+
+  console.log(`Downloading r2:${cfg.R2_BUCKET}/${cfg.BACKUP_PREFIX}/${key} …`);
+  const dlCode = await run("rclone", ["copyto", `r2:${cfg.R2_BUCKET}/${cfg.BACKUP_PREFIX}/${key}`, obj, "--s3-no-check-bucket"]);
+  if (dlCode !== 0) return done(false, null, "download failed");
+
+  // ── Decrypt / decompress to a plain custom-format dump ─────────────────────
+  if (key.endsWith(".dump.age")) {
+    if (!commandExists("age")) return done(false, null, "object is .age but 'age' not found");
+    const identity = cfg.AGE_IDENTITY;
+    if (!identity) return done(false, null, "object is .age but AGE_IDENTITY is unset");
+    let isRegularFile = false;
+    try {
+      isRegularFile = statSync(identity).isFile();
+    } catch {
+      /* not a path */
+    }
+    let idfile: string;
+    if (isRegularFile) {
+      idfile = identity;
+    } else {
+      idfile = join(tmp, "id");
+      writeFileSync(idfile, identity, { mode: 0o600 });
+    }
+    const code = await runToFile("age", ["-d", "-i", idfile, obj], dump);
+    if (code !== 0) return done(false, null, "age decrypt failed");
+  } else if (key.endsWith(".dump.enc")) {
+    return done(false, null, "object is aes-gcm encrypted but decrypt is not implemented yet");
+  } else {
+    copyFileSync(obj, dump);
+  }
+
+  // ── Restore into the throwaway target ──────────────────────────────────────
+  // Restoring provider-managed schemas into vanilla Postgres emits benign errors (missing
+  // roles/extensions); --disable-triggers sidesteps cross-schema FK ordering. pg_restore's bare
+  // exit is NOT the gate (it's nonzero on benign noise), but UNRECOGNISED stderr lines now ARE.
+  console.log("Restoring into the drill target …");
+  const { code: restoreCode, stderr } = await captureStderr("pg_restore", [
+    "--no-owner",
+    "--no-privileges",
+    "--no-comments",
+    "--disable-triggers",
+    "-j",
+    "4",
+    "-d",
+    drillUrl,
+    dump,
+  ]);
+  const cls = classifyPgRestoreStderr(stderr);
+  if (cls.suspicious.length > 0) {
+    for (const line of cls.suspicious) process.stderr.write(`pg_restore (suspicious): ${line}\n`);
+    return done(false, null, `pg_restore: ${cls.suspicious.length} unrecognised error(s): ${cls.suspicious[0]}`);
+  }
+  console.log(
+    restoreCode === 0
+      ? "pg_restore: clean"
+      : `pg_restore: completed with ${cls.benign.length} benign managed-schema line(s) (continuing to row-count check)`,
+  );
+
+  const restored = (table: string): string =>
+    capture("psql", [drillUrl, "-tAc", `SELECT count(*) FROM public.${table}`]).out.replace(/\s/g, "");
+  const liveEst = (table: string): string =>
+    capture("psql", [
+      liveUrl,
+      "-tAc",
+      `SELECT n_live_tup FROM pg_stat_user_tables WHERE schemaname='public' AND relname='${table}'`,
+    ]).out.replace(/\s/g, "");
+
+  const sentinel = cfg.DRILL_SENTINEL_TABLE;
+  const sentRestored = restored(sentinel);
+  const restoredNum = Number(sentRestored);
+  counts[sentinel] = Number.isFinite(restoredNum) ? restoredNum : 0;
+  if (!(sentRestored !== "" && restoredNum > 0)) return done(false, null, `restored ${sentinel} is empty/zero`);
+
+  let ratio: number | null = null;
+  if (gate === "live-ratio") {
+    const sentLive = liveEst(sentinel);
+    const liveNum = Number(sentLive);
+    if (!(sentLive !== "" && liveNum > 0)) return done(false, null, `could not read live ${sentinel} estimate`);
+    ratio = Number((restoredNum / liveNum).toFixed(4));
+    // restored should be >= MIN_RATIO × live (allows rows added since the backup; catches truncation)
+    if (!(restoredNum >= liveNum * cfg.MIN_RATIO)) {
+      return done(false, ratio, `restored ${sentinel} ${sentRestored} < ${cfg.MIN_RATIO}× live ${sentLive} — truncated or stale`);
+    }
+    // …and <= MAX_RATIO × live (catches duplicated / double-restored rows)
+    if (!(restoredNum <= liveNum * cfg.MAX_RATIO)) {
+      return done(false, ratio, `restored ${sentinel} ${sentRestored} > ${cfg.MAX_RATIO}× live ${sentLive} — duplicated?`);
+    }
+    console.log(`Sentinel public.${sentinel}: restored=${sentRestored} (live≈${sentLive}, ratio ${ratio})`);
+  } else {
+    console.log(`Sentinel public.${sentinel}: restored=${sentRestored} (nonempty gate — aged copy, no live ratio)`);
+  }
+
+  // Expected + extra tables: must exist AND be non-empty.
+  for (const t of [...cfg.DRILL_EXPECTED_TABLES, ...cfg.DRILL_EXTRA_TABLES]) {
+    const n = restored(t);
+    counts[t] = Number(n) || 0;
+    console.log(`  table public.${t}: restored=${n || "?"}`);
+    if (!(n !== "" && Number(n) > 0)) return done(false, ratio, `restored ${t} is empty/zero`);
+  }
+
+  // Drift gate (optional): a table that shrank > DRILL_DRIFT_MAX_DROP vs the prior passing drill.
+  if (cfg.DRILL_DRIFT_MAX_DROP > 0 && opts.priorCounts) {
+    for (const [t, prev] of Object.entries(opts.priorCounts)) {
+      const cur = counts[t];
+      if (cur == null || prev <= 0) continue;
+      const drop = (prev - cur) / prev;
+      if (drop > cfg.DRILL_DRIFT_MAX_DROP) {
+        return done(false, ratio, `table ${t} dropped ${(drop * 100).toFixed(1)}% vs prior drill (${prev}→${cur})`);
+      }
+    }
+  }
+
+  return done(true, ratio, null);
+}
+
+/** Most recent passing RESTORE drill's per-table counts (the drift baseline), best-effort. */
+function priorDrillCounts(): Record<string, number> | null {
+  try {
+    const log = loadLog();
+    const prior = log.verifications
+      .filter((v) => v.ok && v.counts && v.kind !== "hash")
+      .sort((a, b) => (a.ts < b.ts ? 1 : -1))[0];
+    return prior?.counts ?? null;
+  } catch {
+    return null;
+  }
 }
 
 async function main(): Promise<void> {
@@ -36,14 +245,10 @@ async function main(): Promise<void> {
   const cfg = loadDrillConfig();
   const {
     BACKUP_PREFIX: backupPrefix,
-    DRILL_SENTINEL_TABLE: sentinel,
     R2_ACCOUNT_ID: r2Account,
     R2_BUCKET: r2Bucket,
     R2_ACCESS_KEY_ID: r2Key,
     R2_SECRET_ACCESS_KEY: r2Secret,
-    DRILL_DATABASE_URL: drillUrl,
-    PG_LIVE_DATABASE_URL: liveUrl,
-    MIN_RATIO: minRatio,
     FILE_BASENAME: fileBasename,
   } = cfg;
 
@@ -84,23 +289,11 @@ async function main(): Promise<void> {
 
   // Newest dump = the newest object in 2hourly/. Every run writes there; daily/weekly/monthly are
   // server-side copies of OLDER 2hourly objects. Listing 2hourly/ NON-recursively keeps the lexical
-  // sort genuinely chronological (the same way check-staleness.ts picks "newest"), so the drill
-  // verifies the latest dump — not an older durable copy. (This deliberately changes the original
-  // bash behavior of `lsf -R | sort | tail -1`, which sorted by the tier prefix first and so picked
-  // the newest of the lexically-last tier — usually a weekly copy up to ~7 days old.)
-  // Expected object extension for this project's ENCRYPTION (mirrors backup-pg-to-r2.ts upload).
-  // Filtering the listing to it means a foreign/legacy object (e.g. a .dump.gz from a previous tool,
-  // or a half-written temp key) can never be selected and mask a real backup — the catch-all decrypt
-  // path below would just choke on it. ENCRYPTION is zod-validated to one of these three.
-  const ext = cfg.ENCRYPTION === "age" ? "dump.age" : cfg.ENCRYPTION === "aes-gcm" ? "dump.enc" : "dump";
-
-  console.log(`Finding newest .${ext} object under r2:${r2Bucket}/${backupPrefix}/2hourly/ ...`);
-  const ls = capture("rclone", [
-    "lsf",
-    "--files-only",
-    `r2:${r2Bucket}/${backupPrefix}/2hourly/`,
-    "--s3-no-check-bucket",
-  ]);
+  // sort genuinely chronological, so the drill verifies the latest dump. Filtering to the expected
+  // extension means a foreign/legacy object can never be selected and mask a real backup.
+  const ext = extForEncryption(cfg.ENCRYPTION);
+  console.log(`Finding newest .${ext} object under r2:${r2Bucket}/${backupPrefix}/2hourly/ …`);
+  const ls = capture("rclone", ["lsf", "--files-only", `r2:${r2Bucket}/${backupPrefix}/2hourly/`, "--s3-no-check-bucket"]);
   const objs = ls.out
     .split("\n")
     .map((s) => s.trim())
@@ -112,109 +305,35 @@ async function main(): Promise<void> {
   const key = `2hourly/${newest}`;
   console.log(`Latest: ${backupPrefix}/${key}`);
 
-  const obj = join(tmp, "obj");
-  const dlCode = await run("rclone", [
-    "copyto",
-    `r2:${r2Bucket}/${backupPrefix}/${key}`,
-    obj,
-    "--s3-no-check-bucket",
-  ]);
-  if (dlCode !== 0) await fail("download failed");
+  // verifiedTs known the moment the object is selected → fail() paths below can still attribute it.
+  const verifiedTs = stampToIso(key);
+  const priorCounts = cfg.DRILL_DRIFT_MAX_DROP > 0 ? priorDrillCounts() : null;
 
-  // ── Decrypt / decompress to a plain custom-format dump ─────────────────────
-  const dump = join(tmp, "restore.dump");
-  if (key.endsWith(".dump.age")) {
-    if (!commandExists("age")) await fail("object is .age but 'age' not found");
-    const identity = cfg.AGE_IDENTITY;
-    if (!identity) await fail("object is .age but AGE_IDENTITY is unset");
-    // file path → use as-is; otherwise treat as a literal key (bash `-f` = regular file only).
-    let isRegularFile = false;
-    try {
-      isRegularFile = statSync(identity!).isFile();
-    } catch {
-      /* not a path */
-    }
-    let idfile: string;
-    if (isRegularFile) {
-      idfile = identity!;
-    } else {
-      idfile = join(tmp, "id");
-      writeFileSync(idfile, identity!, { mode: 0o600 });
-    }
-    const code = await runToFile("age", ["-d", "-i", idfile, obj], dump);
-    if (code !== 0) await fail("age decrypt failed");
-  } else if (key.endsWith(".dump.enc")) {
-    await fail("object is aes-gcm encrypted but decrypt is not implemented yet (encryption is a planned follow-up)");
-  } else {
-    copyFileSync(obj, dump);
+  const result = await drillObject({ key, tier: "2hourly", gate: "live-ratio", cfg, tmp, priorCounts });
+
+  // Record the verification — PASS or FAIL (gap #5). Pre-selection failures above have no dump to
+  // attribute, so they fail() without a verification; here we always have a selected object.
+  if (verifiedTs) {
+    appendVerify({
+      ts: isoSeconds(new Date()),
+      verifiedTs,
+      ok: result.ok,
+      ratio: result.ratio,
+      tier: "2hourly",
+      key,
+      kind: "restore",
+      counts: result.counts,
+      reason: result.reason,
+    });
   }
 
-  // ── Restore into the throwaway target ──────────────────────────────────────
-  // Restoring provider-managed schemas into vanilla Postgres emits benign errors (missing
-  // roles/extensions); --disable-triggers sidesteps cross-schema FK ordering. The row-count
-  // assertion below — not a clean restore — is the real gate, so pg_restore's exit is NOT fatal.
-  console.log("Restoring into the drill target ...");
-  const restoreCode = await run("pg_restore", [
-    "--no-owner",
-    "--no-privileges",
-    "--no-comments",
-    "--disable-triggers",
-    "-j",
-    "4",
-    "-d",
-    drillUrl,
-    dump,
-  ]);
-  console.log(restoreCode === 0 ? "pg_restore: clean" : "pg_restore: completed with warnings (continuing to row-count check)");
+  if (!result.ok) await fail(`${result.reason ?? "restore drill failed"} (${key})`);
 
-  const restored = (table: string): string =>
-    capture("psql", [drillUrl, "-tAc", `SELECT count(*) FROM public.${table}`]).out.replace(/\s/g, "");
-  const liveEst = (table: string): string =>
-    capture("psql", [
-      liveUrl,
-      "-tAc",
-      `SELECT n_live_tup FROM pg_stat_user_tables WHERE schemaname='public' AND relname='${table}'`,
-    ]).out.replace(/\s/g, "");
-
-  const sentRestored = restored(sentinel);
-  const sentLive = liveEst(sentinel);
-  console.log(`Sentinel public.${sentinel}: restored=${sentRestored || "?"}  (live≈${sentLive || "?"})`);
-
-  const restoredNum = Number(sentRestored);
-  const liveNum = Number(sentLive);
-  if (!(sentRestored !== "" && restoredNum > 0)) await fail(`restored ${sentinel} is empty/zero`);
-  if (!(sentLive !== "" && liveNum > 0)) await fail(`could not read live ${sentinel} estimate`);
-
-  // restored should be >= MIN_RATIO × live (allows rows added since the backup; catches truncation).
-  if (!(restoredNum >= liveNum * minRatio)) {
-    await fail(`restored ${sentinel} ${sentRestored} < ${minRatio}× live ${sentLive} — truncated or stale`);
-  }
-
-  // Extra tables: simply non-empty.
-  for (const t of cfg.DRILL_EXTRA_TABLES) {
-    const n = restored(t);
-    console.log(`  extra public.${t}: restored=${n || "?"}`);
-    if (!(n !== "" && Number(n) > 0)) await fail(`restored ${t} is empty/zero`);
-  }
-
-  console.log(
-    `✓ Restore drill PASSED: public.${sentinel} ${sentRestored} ≥ ${minRatio}× live ${sentLive} (${key})`,
-  );
+  const sentCount = result.counts[cfg.DRILL_SENTINEL_TABLE];
+  console.log(`✓ Restore drill PASSED: public.${cfg.DRILL_SENTINEL_TABLE} ${sentCount} (ratio ${result.ratio ?? "?"}) — ${key}`);
   await slackOneoff(
-    `✅ PG restore-drill OK (${fileBasename}) — ${sentinel} ${sentRestored} (≥${minRatio}× live ${sentLive}) — ${key}`,
+    `✅ PG restore-drill OK (${fileBasename}) — ${cfg.DRILL_SENTINEL_TABLE} ${sentCount} (ratio ${result.ratio ?? "?"}) — ${key}`,
   ).catch(() => {});
-
-  // Record the verification so the dashboard can mark that dump's cell as restore-verified. The dump
-  // stamp (YYYYMMDDTHHMMSSZ) embedded in the key maps to the matching run-log entry's ts.
-  const stampMatch = basename(key).match(/[0-9]{8}T[0-9]{6}Z/);
-  if (stampMatch) {
-    const s = stampMatch[0];
-    const verifiedTs =
-      `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}` +
-      `T${s.slice(9, 11)}:${s.slice(11, 13)}:${s.slice(13, 15)}Z`;
-    const ratio = liveNum > 0 ? Number((restoredNum / liveNum).toFixed(4)) : null;
-    appendVerify({ ts: isoSeconds(new Date()), verifiedTs, ok: true, ratio });
-  }
 
   cleanup();
 }

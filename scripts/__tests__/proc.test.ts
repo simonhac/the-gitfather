@@ -1,9 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { run, runToFile, pipeToFile, capture, commandExists } from "../lib/proc.js";
+import { run, runToFile, pipeToFile, capture, captureStderr, sha256File, commandExists } from "../lib/proc.js";
 
 const scratch = mkdtempSync(join(tmpdir(), "proc-test-"));
 
@@ -57,6 +58,26 @@ test("capture: returns ok+stdout on success, ok:false on a non-zero exit", () =>
 test("commandExists: true for sh, false for a bogus binary", () => {
   assert.equal(commandExists("sh"), true);
   assert.equal(commandExists("definitely-not-a-real-binary-xyz"), false);
+});
+
+test("sha256File: streams the same digest as a one-shot hash", async () => {
+  const p = join(scratch, "h.bin");
+  const data = "the-gitfather\n".repeat(5000);
+  writeFileSync(p, data);
+  const expected = createHash("sha256").update(data).digest("hex");
+  assert.equal(await sha256File(p), expected);
+});
+
+test("captureStderr: captures stderr + the exit code; stdout is not captured", async () => {
+  const r = await captureStderr("sh", ["-c", "echo oops 1>&2; echo out; exit 4"]);
+  assert.equal(r.code, 4);
+  assert.match(r.stderr, /oops/);
+  assert.ok(!r.stderr.includes("out"));
+});
+
+test("captureStderr: a missing command resolves 127 (never rejects)", async () => {
+  const r = await captureStderr("definitely-not-a-real-binary-xyz", []);
+  assert.equal(r.code, 127);
 });
 
 test.after(() => rmSync(scratch, { recursive: true, force: true }));
