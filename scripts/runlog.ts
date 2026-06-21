@@ -9,16 +9,16 @@
 //   tsx runlog.ts run    --ts ISO --ok true|false [--tiers "2hourly daily"] [--bytes N] [--key K] [--error MSG]
 //   tsx runlog.ts verify --ts ISO --verified-ts ISO --ok true|false [--ratio R]
 //
-// Records land in _log/<FILE_BASENAME>/{runs,verifications}-YYYY-MM.jsonl in R2.
+// Records land in _log/<name>/{runs,verifications}-YYYY-MM.jsonl in R2.
 // "Append" = read-modify-write of the CURRENT month's file (S3/R2 has no native
 // append): monthly partitioning rotates the file by name (prior months freeze);
 // an R2 lifecycle rule on _log/ expires old months. Everything is BEST-EFFORT —
 // any failure logs a warning and returns (never throws) so a logging hiccup never
 // fails a backup.
 //
-// Reads from the environment: R2_BUCKET, FILE_BASENAME, the RCLONE_CONFIG_R2_*
-// rclone remote (set by the calling backup/drill script), and the GitHub default
-// vars GITHUB_RUN_ID / GITHUB_SERVER_URL / GITHUB_REPOSITORY (for run links).
+// Reads: R2_BUCKET + the RCLONE_CONFIG_R2_* rclone remote from the environment (set by the calling
+// backup/drill script), the profile `name` (read tolerantly — appendRun runs on the config-FAILURE
+// path too), and the GitHub default vars GITHUB_RUN_ID / GITHUB_SERVER_URL / GITHUB_REPOSITORY.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { execFileSync } from "node:child_process";
@@ -26,6 +26,7 @@ import { writeFileSync, unlinkSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { buildRawProfile } from "./lib/profile.js";
 import type { LogRun, LogVerification, BackupTier } from "./lib/backupTypes.js";
 
 function warn(msg: string): void {
@@ -57,10 +58,13 @@ function githubRunInfo(): { runId: string | null; runUrl: string | null } {
  */
 function appendRecord(fileBase: "runs" | "verifications", ts: string, record: LogRun | LogVerification): void {
   const remote = process.env.RUNLOG_RCLONE_REMOTE ?? "r2";
-  const bucket = process.env.R2_BUCKET;
-  const basename = process.env.FILE_BASENAME;
+  const bucket = process.env.R2_BUCKET; // credential (env)
+  // Read the profile `name` tolerantly (raw, unvalidated) — appendRun is best-effort and is also called
+  // from backup's config-FAILURE path, so it must never trigger full validation (which exits the process).
+  const rawName = buildRawProfile().name;
+  const basename = typeof rawName === "string" ? rawName : undefined;
   if (!bucket || !basename) {
-    warn("R2_BUCKET / FILE_BASENAME not set — skipping run-log");
+    warn("R2_BUCKET / profile name not set — skipping run-log");
     return;
   }
 

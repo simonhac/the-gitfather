@@ -1,14 +1,14 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // Side-effecting boot module — MUST be the FIRST import in every entrypoint.
 //
-// backupTypes.ts reads `process.env.DISPLAY_TZ` at MODULE-LOAD time (line 31), and
-// backupHistory.ts builds its Intl.DateTimeFormat instances from DISPLAY_TZ at load too.
-// ES modules evaluate a script's imports depth-first in source order, so importing this
-// module before lib/slack.js (which pulls in backupTypes/backupHistory) guarantees the
-// profile is in process.env before those constants/formatters are frozen. Loading the
-// profile later — e.g. in main() — would be too late and silently fall back to UTC.
+// backupTypes.ts reads `process.env.DISPLAY_TZ` at MODULE-LOAD time, and backupHistory.ts /
+// slack.ts build their Intl.DateTimeFormat instances from DISPLAY_TZ at load too. ES modules
+// evaluate a script's imports depth-first in source order, so importing this module first —
+// and it imports ONLY lib/profile.js, which imports ONLY yaml + node:fs — guarantees the
+// profile's timezone is bridged into process.env BEFORE any module that captures it is loaded.
+// (Full profile validation happens later, in each task's load*Config / getProfile.)
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { loadProfile } from "./profile.js";
+import { bridgeDisplayTz } from "./profile.js";
 
-loadProfile();
+bridgeDisplayTz();

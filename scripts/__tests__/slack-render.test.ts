@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { renderDailyText, dailyLabel, dashboardLink, type DailyState } from "../lib/slack.js";
+import { setProfileForTest, profileSchema } from "../lib/config.js";
 import type { RunOrigin } from "../lib/backupTypes.js";
 
 // Parity fixtures captured from the original bash _slack_daily_text (lib/slack.sh) — see
@@ -37,16 +38,14 @@ test("renderDailyText today: +1h grace gates which empty buckets show ⬜", () =
   assert.equal(renderDailyText(state, now), "*H*\n⬜ 00:00  ·  ⬜ 02:00  ·  ⬜ 04:00");
 });
 
-test("dashboardLink wraps text in a Slack link only when DASHBOARD_URL is set", () => {
-  const saved = process.env.DASHBOARD_URL;
+test("dashboardLink wraps text in a Slack link only when the dashboard url is set", () => {
   try {
-    delete process.env.DASHBOARD_URL;
+    setProfileForTest(profileSchema.parse({ name: "boost" }));
     assert.equal(dashboardLink("boost DB backup"), "boost DB backup");
-    process.env.DASHBOARD_URL = "https://dash.example.com/";
+    setProfileForTest(profileSchema.parse({ name: "boost", dashboard: { url: "https://dash.example.com/" } }));
     assert.equal(dashboardLink("boost DB backup"), "<https://dash.example.com/|boost DB backup>");
   } finally {
-    if (saved === undefined) delete process.env.DASHBOARD_URL;
-    else process.env.DASHBOARD_URL = saved;
+    setProfileForTest(null); // don't leak the injected profile into sibling tests
   }
 });
 

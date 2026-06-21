@@ -12,6 +12,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { getProfile } from "./config.js";
 import type { LogRun, LogVerification } from "./backupTypes.js";
 
 export interface RawLog {
@@ -100,12 +101,13 @@ export function indexLog(raw: RawLog): LogStore {
 }
 
 /**
- * Load + index the whole log from R2 using env R2_BUCKET / FILE_BASENAME (the caller must have
+ * Load + index the whole log from R2 using the profile's R2 bucket + name (the caller must have
  * already configured the RCLONE_CONFIG_R2_* remote, as the drill/verify scripts do).
  */
 export function loadLog(): LogStore {
-  const bucket = process.env.R2_BUCKET;
-  const basename = process.env.FILE_BASENAME;
-  if (!bucket || !basename) throw new Error("R2_BUCKET / FILE_BASENAME must be set to load the run-log");
+  const cfg = getProfile();
+  const bucket = cfg.credentials.r2.bucket;
+  const basename = cfg.name;
+  if (!bucket || !basename) throw new Error("R2 bucket / profile name must be set to load the run-log");
   return indexLog(downloadLogsFromR2(bucket, basename));
 }

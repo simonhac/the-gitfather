@@ -12,20 +12,23 @@ import "./lib/bootEnv.js"; // MUST be first — loads $PROFILE before backupType
 // lib/slack.ts). A failed run appends ❌ and posts a loud, mentioning threaded alert.
 //
 // Usage:
-//   PROFILE=profiles/example.env npx tsx scripts/backup-pg-to-r2.ts
+//   PROFILE=profiles/example.yaml npx tsx scripts/backup-pg-to-r2.ts
 //
 // Required env (credentials — from GitHub secrets, NOT the profile):
 //   PG_BACKUP_DATABASE_URL   postgres://USER:PW@HOST:5432/DB?sslmode=require
 //                            ^ if your provider has a connection pooler, prefer its SESSION pooler.
 //   R2_ACCOUNT_ID            endpoint = https://$R2_ACCOUNT_ID.r2.cloudflarestorage.com
 //   R2_BUCKET / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY
-// Optional env: SLACK_BOT_TOKEN / SLACK_CHANNEL / HEARTBEAT_URL / FORCE_TIERS / AGE_RECIPIENT
+// Optional env: SLACK_BOT_TOKEN / SLACK_CHANNEL / HEARTBEAT_URL / AGE_RECIPIENT / FORCE_TIERS.
+// All other config comes from $PROFILE (the YAML profile).
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { statSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { backupSchema, reportConfigError } from "./lib/config.js";
+import { backupSchema, reportConfigError, peekProfile } from "./lib/config.js";
+import { buildRawProfile } from "./lib/profile.js";
+import { pgConn } from "./lib/pgconn.js";
 import { run, runToFile, pipeToFile, commandExists, bestEffort, sha256File, capture } from "./lib/proc.js";
 import { computeTiers, runOrigin } from "./lib/schedule.js";
 import { appendRun } from "./runlog.js";
@@ -65,7 +68,9 @@ async function pingHeartbeat(url: string): Promise<void> {
  * where only the DB URL was empty). NEVER echoes a config value — the message is generic (secret-safe).
  */
 async function recordConfigFailure(): Promise<void> {
-  const basename = process.env.FILE_BASENAME;
+  // The profile `name` comes from the YAML (read tolerantly); R2 creds are env. peekProfile() never exits,
+  // so this works even though task-level config validation just failed.
+  const basename = peekProfile()?.name;
   const acct = process.env.R2_ACCOUNT_ID,
     bkt = process.env.R2_BUCKET;
   const key = process.env.R2_ACCESS_KEY_ID,
@@ -85,8 +90,9 @@ async function recordConfigFailure(): Promise<void> {
   const origin = runOrigin(process.env.GITHUB_EVENT_NAME, process.env.BACKUP_TRIGGER);
   const msg = "config validation failed"; // GENERIC — never include the offending value (secret-safe)
   const dayts = (await bestEffort("slack config-fail tick", () => slackDailyRecord(false, label, "", origin, now))) ?? "";
+  const mention = peekProfile()?.slack.alertMention || "<!here>";
   await bestEffort("slack config-fail alert", () =>
-    slackPost(`${process.env.SLACK_ALERT_MENTION || "<!here>"} 🔴 *${basename}* backup FAILED at ${label} — ${msg}`, {
+    slackPost(`${mention} 🔴 *${basename}* backup FAILED at ${label} — ${msg}`, {
       thread: dayts,
       broadcast: true,
     }),
@@ -99,25 +105,24 @@ async function main(): Promise<void> {
   // Validate + type all config up front (zod). On any missing/malformed var, record a best-effort ❌
   // on today's Slack row (so a config crash is distinguishable from a dropped tick — it is NOT ⬜),
   // print the same aggregated report (names only), then exit 1 — before any dump/upload. See lib/config.ts.
-  const parsed = backupSchema.safeParse(process.env);
+  const parsed = backupSchema.safeParse(buildRawProfile());
   if (!parsed.success) {
     await recordConfigFailure();
     reportConfigError(parsed.error);
     process.exit(1);
   }
   const cfg = parsed.data;
-  const {
-    BACKUP_PREFIX: backupPrefix,
-    FILE_BASENAME: fileBasename,
-    PG_BACKUP_DATABASE_URL: dbUrl,
-    R2_ACCOUNT_ID: r2Account,
-    R2_BUCKET: r2Bucket,
-    R2_ACCESS_KEY_ID: r2Key,
-    R2_SECRET_ACCESS_KEY: r2Secret,
-    ENCRYPTION: encryption,
-    MIN_BYTES: minBytes,
-    ANCHOR_HOUR_UTC: anchorHour,
-  } = cfg;
+  // All required by backupSchema's refinements (non-null below).
+  const backupPrefix = cfg.backupPrefix!;
+  const fileBasename = cfg.name!;
+  const dbUrl = cfg.credentials.databaseUrl!;
+  const r2Account = cfg.credentials.r2.accountId!;
+  const r2Bucket = cfg.credentials.r2.bucket!;
+  const r2Key = cfg.credentials.r2.accessKeyId!;
+  const r2Secret = cfg.credentials.r2.secretAccessKey!;
+  const encryption = cfg.encryption;
+  const minBytes = cfg.dump.minBytes;
+  const anchorHour = cfg.anchorHourUtc;
 
   const now = new Date();
   const stamp = utcStamp(now);
@@ -180,7 +185,7 @@ async function main(): Promise<void> {
       const dayts = (await bestEffort("slack fail tick", () => slackDailyRecord(false, label, "", origin, now))) ?? "";
       await bestEffort("slack fail alert", () =>
         slackPost(
-          `${process.env.SLACK_ALERT_MENTION || "<!here>"} 🔴 *${fileBasename}* backup FAILED at ${label} — ${msg}`,
+          `${cfg.slack.alertMention || "<!here>"} 🔴 *${fileBasename}* backup FAILED at ${label} — ${msg}`,
           { thread: dayts, broadcast: true },
         ),
       );
@@ -195,21 +200,24 @@ async function main(): Promise<void> {
   if (!commandExists("rclone")) await fail("rclone not found");
 
   // ── Dump (+ optional encrypt) → out ────────────────────────────────────────
-  const dumpFlags = cfg.PG_DUMP_FLAGS; // already split (defaults to -Fc --no-owner --no-privileges)
+  const dumpFlags = cfg.dump.flags; // already split (defaults to -Fc --no-owner --no-privileges)
+  // Keep the DB password off pg_dump's argv (visible in `ps`) — it rides in a 0600 PGPASSFILE instead.
+  const db = pgConn(dbUrl, tmp);
 
   console.log(`Dumping Postgres → ${out} (ENCRYPTION=${encryption}) ...`);
   if (encryption === "none") {
-    const code = await runToFile("pg_dump", [...dumpFlags, dbUrl], out);
+    const code = await runToFile("pg_dump", [...dumpFlags, db.safeUrl], out, db.env);
     if (code !== 0) await fail("pg_dump failed");
   } else if (encryption === "age") {
     if (!commandExists("age")) await fail("ENCRYPTION=age but 'age' not found");
     // Presence is already enforced by the schema (age ⇒ AGE_RECIPIENT); guard kept as defence-in-depth.
-    const recipient = cfg.AGE_RECIPIENT;
+    const recipient = cfg.credentials.age.recipient;
     if (!recipient) await fail("ENCRYPTION=age requires AGE_RECIPIENT");
     const code = await pipeToFile(
-      { cmd: "pg_dump", args: [...dumpFlags, dbUrl] },
+      { cmd: "pg_dump", args: [...dumpFlags, db.safeUrl] },
       { cmd: "age", args: ["-r", recipient!] },
       out,
+      db.env,
     );
     if (code !== 0) await fail("pg_dump | age pipeline failed");
   } else {
@@ -224,11 +232,11 @@ async function main(): Promise<void> {
   // ── Structural validation (#4): prove the dump is a parseable custom-format archive ────────
   // `pg_restore -l` lists the TOC (cheap — header + table of contents, not the data); a corrupt or
   // truncated archive can't be listed, and a real data dump has ≥1 TABLE/TABLE DATA entry. This
-  // catches a >MIN_BYTES-but-corrupt dump BEFORE it's reported as a successful backup. Only the
-  // plaintext (none-mode) is checkable here without a key; age is covered by BACKUP_VERIFY / the drill.
-  if (encryption === "none" && cfg.BACKUP_VALIDATE_STRUCTURE) {
+  // catches a >dump.min-bytes-but-corrupt dump BEFORE it's reported as a successful backup. Only the
+  // plaintext (none-mode) is checkable here without a key; age is covered by integrity.verify-after-upload / the drill.
+  if (encryption === "none" && cfg.integrity.checkStructure) {
     if (!commandExists("pg_restore")) {
-      process.stderr.write("warning: BACKUP_VALIDATE_STRUCTURE=1 but pg_restore not found — skipping TOC validation\n");
+      process.stderr.write("warning: integrity.check-structure is on but pg_restore not found — skipping TOC validation\n");
     } else {
       const toc = capture("pg_restore", ["-l", out]);
       if (!toc.ok) await fail("dump is not a parseable pg_dump archive (pg_restore -l failed)");
@@ -242,14 +250,16 @@ async function main(): Promise<void> {
   // Streamed (never buffers the dump on the heap). Best-effort — a hash hiccup must not fail an
   // otherwise-good backup. Recorded in the run-log as the durable hash-verify baseline.
   let sha256: string | null = null;
-  if (cfg.BACKUP_SHA256) {
+  if (cfg.integrity.checksum) {
     sha256 = (await bestEffort("sha256", () => sha256File(out))) ?? null;
     if (sha256) console.log(`SHA-256: ${sha256}`);
   }
 
   // ── Which tiers does this run belong to? ───────────────────────────────────
   // Always 2hourly; the anchor-hour run is also daily, +weekly on Sun, +monthly on the 1st (UTC).
-  const tiers = computeTiers(now, anchorHour, cfg.FORCE_TIERS);
+  // FORCE_TIERS is a per-run override (manual/self-heal dispatch), so it stays an env read, not profile config.
+  const forceTiers = (process.env.FORCE_TIERS ?? "").split(/\s+/).filter(Boolean) as BackupTier[];
+  const tiers = computeTiers(now, anchorHour, forceTiers);
   console.log(`Tiers for this run: ${tiers.join(" ")}`);
 
   // Upload once to the first tier (always 2hourly), then server-side copy to the rest. Single-PUT
@@ -284,7 +294,7 @@ async function main(): Promise<void> {
   // ── Opt-in post-upload self-verify (#1/#4): re-fetch what R2 actually stored and prove it ──
   // Default off (a single-PUT upload is atomic; a re-download every 2h burns runner minutes). When on,
   // this is the ONLY backup-time structural check for age (needs age + AGE_IDENTITY to decrypt).
-  if (cfg.BACKUP_VERIFY) {
+  if (cfg.integrity.verifyAfterUpload) {
     console.log("Post-upload verify: re-fetching the stored object …");
     const verifyObj = join(tmp, "verify.obj");
     const dl = await run("rclone", ["copyto", `r2:${r2Bucket}/${firstKey}`, verifyObj, "--s3-no-check-bucket"]);
@@ -299,11 +309,11 @@ async function main(): Promise<void> {
     }
     // (b) Structural: decrypt if age, then pg_restore -l on the re-fetched bytes.
     if (!commandExists("pg_restore")) {
-      process.stderr.write("warning: BACKUP_VERIFY=1 but pg_restore not found — skipping the structural re-check\n");
+      process.stderr.write("warning: integrity.verify-after-upload is on but pg_restore not found — skipping the structural re-check\n");
     } else {
       let toCheck = verifyObj;
       if (encryption === "age") {
-        const identity = cfg.AGE_IDENTITY;
+        const identity = cfg.credentials.age.identity;
         if (!commandExists("age") || !identity) await fail("post-upload verify: ENCRYPTION=age needs age + AGE_IDENTITY to decrypt");
         let idfile = identity!;
         try {
@@ -334,8 +344,8 @@ async function main(): Promise<void> {
   );
 
   // Dead-man's-switch ping (success only) — its absence is the staleness signal.
-  if (cfg.HEARTBEAT_URL) {
-    const heartbeatUrl = cfg.HEARTBEAT_URL;
+  if (cfg.credentials.heartbeatUrl) {
+    const heartbeatUrl = cfg.credentials.heartbeatUrl;
     await bestEffort("heartbeat", () => pingHeartbeat(heartbeatUrl));
   }
 

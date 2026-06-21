@@ -1,0 +1,82 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# the-gitfather — example profile (copy this into your OWN repo and edit)
+#
+# A profile holds everything project-specific; the actual DB/R2 *credentials* come
+# from the environment (GitHub secrets), never from here. Loaded by the scripts via
+# $PROFILE, e.g.:
+#
+#   PROFILE=profiles/example.yaml npx tsx scripts/backup-pg-to-r2.ts
+#
+# In CI you keep this file in your consuming repo and point the caller workflow's
+# `profile:` input at it (see README → "Wiring a consuming repo").
+#
+# Keys are kebab-case. Every task validates this file (zod) at startup and fails fast
+# with one aggregated report naming any missing/malformed field. To check a freshly-wired
+# consumer end-to-end (config + live R2/Postgres/Slack/gh probes, read-only):
+#
+#   PROFILE=profiles/example.yaml npm run doctor -- all
+#
+# Credentials expected in the environment (NOT set here):
+#   PG_BACKUP_DATABASE_URL   postgres://USER:PW@HOST:5432/DB?sslmode=require
+#                            (if your provider has a pooler, use the SESSION pooler)
+#   R2_ACCOUNT_ID / R2_BUCKET / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY
+#   DRILL_DATABASE_URL / PG_LIVE_DATABASE_URL   (restore-drill / durable-verify)
+#   SLACK_BOT_TOKEN          (optional) xoxb-… (scope chat:write) — enables the daily Slack row
+#   HEARTBEAT_URL            (optional) dead-man's-switch ping hit on success
+#   ALERT_WEBHOOK_URL        (optional) generic failure webhook
+#   AGE_RECIPIENT / AGE_IDENTITY   (only if encryption: age)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Object-key layout: <backup-prefix>/<tier>/<name>-<stamp>.<ext>
+name: example                  # db shortname → R2 key basename + Slack header
+backup-prefix: pg/example      # R2 object-key prefix
+timezone: UTC                  # IANA tz for the dashboard + Slack row (day boundary, HH:MM, abbrev)
+encryption: none               # none | age | aes-gcm  (age = client-side; needs AGE_RECIPIENT/AGE_IDENTITY)
+anchor-hour-utc: 16            # the 2-hourly run at this UTC hour is also promoted to daily/weekly/monthly
+
+dump:
+  flags: "-Fc --no-owner --no-privileges"  # full custom-format dump, restorable without source roles
+  client-major: 17             # Postgres client major — must be >= the server you dump
+  min-bytes: 1048576           # abort (don't upload) below this; also staleness's fresh-but-broken floor
+
+integrity:                     # backup-time integrity checks
+  checksum: true               # record a SHA-256 of the uploaded object (the durable hash-verify baseline)
+  check-structure: true        # pg_restore -l TOC check before declaring success (encryption: none)
+  verify-after-upload: false   # opt-in: re-download + (decrypt) + pg_restore -l after upload (age structural check)
+
+retention:                     # GFS windows as natural-language durations (these are the defaults).
+  grandson: 2 days             #   2-hourly — every 2 h, kept this long
+  son: 3 weeks                 #   daily    — one per day at the anchor hour
+  father: 13 weeks             #   weekly   — one per week (Sundays)
+  grandfather: 2 years         #   monthly  — one per month (the 1st)
+# NOTE: R2 actually deletes objects via bucket lifecycle rules — keep those in sync with these
+# values (see README → "Backup tiers"); changing this file does not reconfigure R2.
+
+drill:                         # restore-drill / durable-verify row checks
+  row-count-table: your_largest_table   # gated against the live row count (min/max-row-ratio)
+  present-tables: []           # these must EXIST in the restore (rows optional)
+  nonempty-tables: []          # these must exist AND have ≥1 row
+  min-row-ratio: 0.95          # restored/live floor for row-count-table (catches truncation)
+  max-row-ratio: 2.0           # restored/live ceiling (catches duplicated/double-restored rows)
+  max-row-drop: 0              # 0 = off; else fail if a table shrank > this fraction vs the prior passing drill
+
+verify-durable:                # daily durable-tier verification (verify-durable-pg.ts)
+  fresh: true                  # hash-check each new durable object + restore the freshest daily
+  aged: true                   # re-restore the newest weekly/monthly ≥ retest-days old
+  retest-days: 14              # age at which a weekly/monthly is aged-due (13 to stay inside the WORM lock)
+  max-restores: 2              # cap full restores per run (hash-checks uncapped)
+
+staleness:                     # check-staleness.ts
+  max-age-hours: 5             # alert if the newest 2hourly object is older than this
+  heal-workflow: pg-backup.yml # the workflow self-heal re-triggers on a missed tick
+  self-heal: true              # false = alert only (never auto-retry)
+  dry-run: false               # true = log the trigger, don't fire
+
+slack:                         # optional. Credentials are env: SLACK_BOT_TOKEN (secret) +
+  alert-mention: "<!here>"     #   SLACK_CHANNEL (a GitHub Variable). Here, only the mention string:
+                               #   prepended to failure alerts (<!here> active members, <!channel> everyone)
+
+dashboard:                     # optional public backup-history dashboard
+  label: ""                    # display label; defaults to `name`
+  hide-run-links: false        # true = drop GitHub run links from the public page
+  url: ""                      # if set, the Slack header's "<name> DB backup" links here

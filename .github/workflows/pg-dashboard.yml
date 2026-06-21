@@ -8,7 +8,7 @@ on:
   workflow_call:
     inputs:
       profile:
-        description: "Path (within the CALLER repo) to the profile .env (for FILE_BASENAME / DASHBOARD_LABEL / DISPLAY_TZ)."
+        description: "Path (within the CALLER repo) to the profile .yaml (for name / dashboard.label / timezone)."
         type: string
         required: true
       gitfather_ref:
@@ -86,9 +86,7 @@ jobs:
             RCLONE_CONFIG_R2DASH_ACCESS_KEY_ID="$DASHBOARD_R2_ACCESS_KEY_ID" \
             RCLONE_CONFIG_R2DASH_SECRET_ACCESS_KEY="$DASHBOARD_R2_SECRET_ACCESS_KEY" \
             RCLONE_CONFIG_R2DASH_ENDPOINT="$ENDPOINT"
-          # Export the profile (FILE_BASENAME, DASHBOARD_LABEL, DISPLAY_TZ) so the dashboard label +
-          # rendered timezone match the project.
-          set -a; source "$PROFILE"; set +a
+          # build-dashboard.ts reads $PROFILE (YAML) directly for the label + timezone — no sourcing needed.
           cd engine
           npm ci
           npx tsx scripts/build-dashboard.ts --upload

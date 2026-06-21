@@ -16,19 +16,19 @@ There are **two kinds of input**, and they live in **two different files**:
 
 | Kind | What | Where it goes | Committed? |
 |---|---|---|---|
-| **Config** | project choices (prefix, basename, schedule, thresholds, tz…) | `profiles/<name>.env` | ✅ yes — checked into the consuming repo |
+| **Config** | project choices (prefix, basename, schedule, thresholds, tz…) | `profiles/<name>.yaml` | ✅ yes — checked into the consuming repo |
 | **Credentials** | DB URLs, R2 keys, Slack token… | environment / GitHub Secrets; locally a **gitignored** file under `.context/` | ❌ **never** committed |
 
 Your job is to produce three things, in order:
 
 1. `.context/gitfather-setup.md` — the running interview record (what the user told you, decisions, open questions).
-2. `profiles/<name>.env` — the committed config profile (copy of `profiles/example.env`, filled in).
+2. `profiles/<name>.yaml` — the committed config profile (copy of `profiles/example.yaml`, filled in).
 3. `.context/gitfather-secrets.env` — a gitignored credentials file used **only** to run `doctor` locally. It mirrors what the user will later store as GitHub Secrets/Variables.
 
 Then you run `npm run doctor -- all` with both files in scope and interpret the result.
 
 > **Security guardrails — state these to the user and obey them:**
-> - Never write a credential into `profiles/*.env` (it gets committed). Credentials go in `.context/gitfather-secrets.env` only.
+> - Never write a credential into `profiles/*.yaml` (it gets committed). Credentials go in `.context/gitfather-secrets.env` only.
 > - `.context/` is gitignored, but still treat the secrets file as sensitive: don't echo full secret values back in chat, don't paste them into commit messages, don't `cat` it into shared logs.
 > - Confirm `.context/gitfather-secrets.env` is gitignored before writing secrets to it (`git check-ignore .context/gitfather-secrets.env`).
 
@@ -39,7 +39,7 @@ Then you run `npm run doctor -- all` with both files in scope and interpret the 
 `doctor` will verify these, but flag missing ones early so the user can install them:
 
 - `node` + `npm ci` already run (installs `tsx`, `zod`, `esbuild`).
-- CLI tools on PATH: `rclone`, `pg_dump`, `pg_restore`, `psql`. Plus `age` **only if** they choose `ENCRYPTION=age`, and `gh` **only if** staleness self-heal is on (the default).
+- CLI tools on PATH: `rclone`, `pg_dump`, `pg_restore`, `psql`. Plus `age` **only if** they choose `encryption: age`, and `gh` **only if** staleness self-heal is on (the default).
 - The Cloudflare R2 buckets already exist with lifecycle + lock rules applied. This is a **one-time manual step** done with account-level Cloudflare creds — see the README "Create the buckets" / wrangler section. The engine does **not** create buckets; `doctor` only probes that they're reachable.
 
 If buckets don't exist yet, pause the setup and walk the user through the README's `wrangler r2 bucket create / lifecycle add / lock add` commands first.
@@ -55,8 +55,8 @@ column is what you tell a user who doesn't already know the value.
 
 | Variable | Meaning | How to get it |
 |---|---|---|
-| `BACKUP_PREFIX` | object-key prefix in R2, e.g. `pg/myapp` | user's choice; convention is `pg/<project>` |
-| `FILE_BASENAME` | names dump files + Slack message + log paths, e.g. `myapp` | user's choice; short slug |
+| `backup-prefix` | object-key prefix in R2, e.g. `pg/myapp` | user's choice; convention is `pg/<project>` |
+| `name` | names dump files + Slack message + log paths, e.g. `myapp` | user's choice; short slug |
 
 ### 2b. Database (→ secrets)
 
@@ -70,7 +70,7 @@ For the **restore drill** (only if they want automated restore verification — 
 |---|---|---|
 | `DRILL_DATABASE_URL` | a *throwaway* DB the drill restores into (gets wiped) | a separate empty database / instance |
 | `PG_LIVE_DATABASE_URL` | live DB used only to read row counts for the ratio check | usually same as `PG_BACKUP_DATABASE_URL` |
-| `DRILL_SENTINEL_TABLE` | `public.<table>` whose restored/live row ratio is asserted | the user's largest stable table |
+| `drill.row-count-table` | `public.<table>` whose restored/live row ratio is asserted | the user's largest stable table |
 
 ### 2c. Cloudflare R2 — private dump bucket (→ secrets + one variable)
 
@@ -92,46 +92,49 @@ Everything here has a safe default or is feature-gated. Ask, but offer the defau
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `ANCHOR_HOUR_UTC` | `16` | the UTC hour whose run is also promoted to daily/weekly/monthly tiers |
-| `MIN_BYTES` | `1048576` (1 MB) | abort the upload if the dump is smaller (catches a truncated dump) |
-| `STALE_HOURS` | `3` (example.env suggests `5`) | staleness alert if newest 2-hourly object is older than this |
-| `MIN_RATIO` | `0.95` | restored/live row-count floor for the drill sentinel table |
-| `MAX_RATIO` | `2.0` | restored/live row-count ceiling — catches duplicated/double-restored rows |
-| `PG_DUMP_FLAGS` | `-Fc --no-owner --no-privileges` | pg_dump flags; tune per database (e.g. `--exclude-schema=…`) |
-| `PG_CLIENT_MAJOR` | (unset) | if set, `doctor` checks your `pg_dump`/`pg_restore` major version ≥ this. Recommended — set it to your server's major version. |
-| `DRILL_EXTRA_TABLES` | (none) | space-separated tables asserted simply non-empty after restore |
-| `DRILL_EXPECTED_TABLES` | (none) | space-separated tables that must each **exist** and be non-empty after restore |
-| `FORCE_TIERS` | (none) | for manual runs: space-separated subset of `2hourly daily weekly monthly` |
+| `anchor-hour-utc` | `16` | the UTC hour whose run is also promoted to daily/weekly/monthly tiers |
+| `dump.min-bytes` | `1048576` (1 MB) | abort the upload if the dump is smaller (catches a truncated dump) |
+| `staleness.max-age-hours` | `3` (example.yaml suggests `5`) | staleness alert if newest 2-hourly object is older than this |
+| `drill.min-row-ratio` | `0.95` | restored/live row-count floor for the drill sentinel table |
+| `drill.max-row-ratio` | `2.0` | restored/live row-count ceiling — catches duplicated/double-restored rows |
+| `dump.flags` | `-Fc --no-owner --no-privileges` | pg_dump flags; tune per database (e.g. `--exclude-schema=…`) |
+| `dump.client-major` | (unset) | if set, `doctor` checks your `pg_dump`/`pg_restore` major version ≥ this. Recommended — set it to your server's major version. |
+| `drill.present-tables` | (none) | space-separated tables that must each **exist** after restore (rows optional) |
+| `drill.nonempty-tables` | (none) | space-separated tables that must each exist **and** have ≥1 row after restore |
+
+> `FORCE_TIERS` is **not** a profile key — it's an **env var for manual runs only** (a space-separated
+> subset of `2hourly daily weekly monthly` that forces promotion to those tiers). Set it in the
+> workflow/env at dispatch time; never write it into the YAML.
 
 ### 3b. Encryption (→ profile + secrets)
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `ENCRYPTION` | `none` | `none` \| `age` \| `aes-gcm` (aes-gcm not implemented) |
-| `AGE_RECIPIENT` | — | **required when `ENCRYPTION=age`** (public key, `age1…`); used to encrypt |
-| `AGE_IDENTITY` | — | **required when `ENCRYPTION=age`** (private key); used by the drill + durable-verify to decrypt (and by the backup when `BACKUP_VERIFY=1`) |
+| `encryption` | `none` | `none` \| `age` \| `aes-gcm` (aes-gcm not implemented) |
+| `AGE_RECIPIENT` | — | **required when `encryption: age`** (public key, `age1…`); used to encrypt |
+| `AGE_IDENTITY` | — | **required when `encryption: age`** (private key); used by the drill + durable-verify to decrypt (and by the backup when `integrity.verify-after-upload`) |
 
 ### 3c. Slack status row (→ profile + secrets)
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `SLACK_BOT_TOKEN` | (unset → Slack off) | `xoxb-…`, scope `chat:write` (secret) |
-| `SLACK_CHANNEL` | — | channel id `C…`. **Required if `SLACK_BOT_TOKEN` is set** (else the row silently never posts) |
-| `SLACK_ALERT_MENTION` | `<!here>` | prepended to failure alerts (`<!here>` / `<!channel>`) |
-| `DISPLAY_TZ` | `UTC` | IANA tz for the daily row's date + HH:MM labels (e.g. `Australia/Perth`) |
-| `DASHBOARD_URL` | (unset) | if set, hyperlinks the Slack header's "`<basename> DB backup`" text to the dashboard. See note below on how to obtain it. |
+| `SLACK_BOT_TOKEN` | (unset → Slack off) | `xoxb-…`, scope `chat:write` (secret, env) |
+| `SLACK_CHANNEL` | — | channel id `C…` (non-secret, env — a GitHub Variable). **Required if `SLACK_BOT_TOKEN` is set** (else the row silently never posts) |
+| `slack.alert-mention` | `<!here>` | prepended to failure alerts (`<!here>` / `<!channel>`) — profile |
+| `timezone` | `UTC` | IANA tz for the daily row's date + HH:MM labels (e.g. `Australia/Perth`) |
+| `dashboard.url` | (unset) | if set, hyperlinks the Slack header's "`<basename> DB backup`" text to the dashboard. See note below on how to obtain it. |
 | `ALERT_WEBHOOK_URL` | (unset) | optional **failure** webhook (secret), independent of the bot — a Slack-compatible `{"text":…}` POST on backup/drill/staleness failure. A no-bot alert fallback, or a redundant failure channel into a host app's existing incoming webhook. Fires on failure only (no success spam). |
 
 ### 3d. Public dashboard (→ profile + secrets)
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `DASHBOARD_LABEL` | `FILE_BASENAME` | project label shown on the public page |
-| `DASHBOARD_HIDE_RUN_LINKS` | `false` | also drop run links from the public page |
+| `dashboard.label` | `name` | project label shown on the public page |
+| `dashboard.hide-run-links` | `false` | also drop run links from the public page |
 | `DASHBOARD_R2_BUCKET` | — | the **separate public** bucket the built page is uploaded to (variable) |
 | `DASHBOARD_R2_ACCESS_KEY_ID` / `DASHBOARD_R2_SECRET_ACCESS_KEY` | — | write-only S3 token for the public bucket (secrets) |
 
-> **Getting `DASHBOARD_URL` — fetch it yourself, with permission.** The public hostname is an opaque
+> **Getting `dashboard.url` — fetch it yourself, with permission.** The public hostname is an opaque
 > `pub-<hash>.r2.dev` (or a custom domain) that is **not derivable** from the account id or bucket
 > name, so don't make the user hunt for it — *you* retrieve it by running `wrangler` against the
 > public bucket. That command uses the user's **account-level Cloudflare login** (a privileged
@@ -146,18 +149,18 @@ Everything here has a safe default or is feature-gated. Ask, but offer the defau
 >
 > Parse the hostname from the output, confirm it back to the user, and write it to the profile. It's
 > static for the life of the bucket, so this is a one-time fetch. If the user declines, leave
-> `DASHBOARD_URL` unset (the header just renders unlinked) or let them paste it manually.
+> `dashboard.url` unset (the header just renders unlinked) or let them paste it manually.
 
 ### 3e. Staleness behaviour (→ profile, defaults fine)
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `SELF_HEAL` | `true` | on a missed tick, re-trigger the backup workflow via `gh` (needs `gh` auth + `GITHUB_REPOSITORY`) |
-| `DRY_RUN` | `false` | staleness check evaluates but takes no action |
-| `BACKUP_WORKFLOW` | `pg-backup.yml` | workflow file self-heal triggers |
+| `staleness.self-heal` | `true` | on a missed tick, re-trigger the backup workflow via `gh` (needs `gh` auth + `GITHUB_REPOSITORY`) |
+| `staleness.dry-run` | `false` | staleness check evaluates but takes no action |
+| `staleness.heal-workflow` | `pg-backup.yml` | workflow file self-heal triggers |
 | `HEARTBEAT_URL` | (unset) | optional dead-man's-switch URL pinged on success (e.g. healthchecks.io) |
 
-> `MIN_BYTES` is **also** the staleness floor: a fresh-but-smaller newest object is treated as broken
+> `dump.min-bytes` is **also** the staleness floor: a fresh-but-smaller newest object is treated as broken
 > (pages directly) rather than just stale.
 
 ### 3f. Backup integrity & durable verification (→ profile, defaults fine)
@@ -166,14 +169,14 @@ All default-on and safe — surface them only if the user asks *"how do you know
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `BACKUP_SHA256` | `1` | record a SHA-256 of each uploaded object (the durable hash-verify baseline) |
-| `BACKUP_VALIDATE_STRUCTURE` | `1` | `pg_restore -l` TOC check before declaring a backup good (`ENCRYPTION=none`) |
-| `BACKUP_VERIFY` | `0` | opt-in: re-download + (decrypt) + `pg_restore -l` after upload; the only **backup-time** structural check for age (needs `AGE_IDENTITY` in the backup job) |
-| `DURABLE_PRIMARY` | `1` | daily verify: hash-check each new durable object + restore the freshest `daily` |
-| `DURABLE_SECONDARY` | `1` | daily verify: restore the newest `weekly`/`monthly` ≥ `RETEST_DAYS` old not yet restore-verified |
-| `RETEST_DAYS` | `14` | age at which a weekly/monthly becomes secondary-due (set `13` to re-test inside the 14-day WORM lock) |
-| `DURABLE_VERIFY_MAX_RESTORES` | `2` | cap on full restores per daily verify run (hash-checks uncapped) |
-| `DRILL_DRIFT_MAX_DROP` | `0` (off) | if set (0–1), fail a drill when a table shrank more than this fraction vs the prior passing drill |
+| `integrity.checksum` | `true` | record a SHA-256 of each uploaded object (the durable hash-verify baseline) |
+| `integrity.check-structure` | `true` | `pg_restore -l` TOC check before declaring a backup good (`encryption: none`) |
+| `integrity.verify-after-upload` | `false` | opt-in: re-download + (decrypt) + `pg_restore -l` after upload; the only **backup-time** structural check for age (needs `AGE_IDENTITY` in the backup job) |
+| `verify-durable.fresh` | `true` | daily verify: hash-check each new durable object + restore the freshest `daily` |
+| `verify-durable.aged` | `true` | daily verify: restore the newest `weekly`/`monthly` ≥ `verify-durable.retest-days` old not yet restore-verified |
+| `verify-durable.retest-days` | `14` | age at which a weekly/monthly becomes secondary-due (set `13` to re-test inside the 14-day WORM lock) |
+| `verify-durable.max-restores` | `2` | cap on full restores per daily verify run (hash-checks uncapped) |
+| `drill.max-row-drop` | `0` (off) | if set (0–1), fail a drill when a table shrank more than this fraction vs the prior passing drill |
 
 These power `verify-durable-pg.ts` (the daily `pg-durable-verify.yml` workflow), which guarantees every
 durable file is tested — **weekly/monthly twice, daily once**. See README → **Verifying backups**.
@@ -188,11 +191,12 @@ Keep a living markdown record as you interview: every value provided (redact sec
 placeholder like `‹set›`), every default accepted, and any TODOs (e.g. "bucket not created yet").
 This is your scratchpad and the user's audit trail.
 
-### 4b. Profile — `profiles/<name>.env`
+### 4b. Profile — `profiles/<name>.yaml`
 
-Start from `profiles/example.env` and fill in the **config** values only. Format is bash-sourceable
-`KEY="value"` (also `set -a; source`d by the workflows — don't change the format). **No credentials
-here.** Leave optional vars commented unless the user chose a non-default.
+Start from `profiles/example.yaml` and fill in the **config** values only — a single nested **YAML**
+file (kebab-case keys; e.g. `retention.father`, `dump.client-major`). **No credentials here** — those come
+from the environment (the local secrets file below, or GitHub Secrets in CI). Leave optional keys at
+their defaults unless the user chose otherwise.
 
 ### 4c. Local secrets — `.context/gitfather-secrets.env`
 
@@ -209,7 +213,7 @@ R2_SECRET_ACCESS_KEY="…"
 # drill (if used):
 DRILL_DATABASE_URL="postgres://…"
 PG_LIVE_DATABASE_URL="postgres://…"
-# slack (optional):
+# slack (optional — TOKEN is the secret, CHANNEL is the paired non-secret id; both env):
 SLACK_BOT_TOKEN="xoxb-…"
 SLACK_CHANNEL="C…"
 # failure webhook (optional, independent of the bot):
@@ -222,9 +226,10 @@ DASHBOARD_R2_SECRET_ACCESS_KEY="…"
 GITHUB_REPOSITORY="owner/repo"
 ```
 
-> `R2_BUCKET`, `SLACK_CHANNEL`, and `DASHBOARD_R2_BUCKET` are stored as GitHub **Variables** (not
-> Secrets) in CI; the DB URLs and `*_ACCESS_KEY*`/token values are **Secrets**. For the *local*
-> doctor run they all just go in this one env file.
+> `R2_BUCKET`, `DASHBOARD_R2_BUCKET`, and `SLACK_CHANNEL` are stored as GitHub **Variables** (not Secrets)
+> in CI — they're the non-secret identifiers paired with the R2/Slack credentials; the DB URLs and
+> `*_ACCESS_KEY*`/token values are **Secrets**. For the *local* doctor run the env values all go in this
+> one file, and `PROFILE` points at the YAML for the rest.
 
 ---
 
@@ -239,7 +244,7 @@ Run it with the secrets file sourced and `PROFILE` pointed at the profile:
 
 ```sh
 set -a; source .context/gitfather-secrets.env; set +a
-PROFILE=profiles/<name>.env npm run doctor -- all
+PROFILE=profiles/<name>.yaml npm run doctor -- all
 ```
 
 `-- all` checks `backup`, `drill`, `verify-durable`, `staleness`, and `dashboard`. You can scope to one
@@ -280,11 +285,11 @@ mid-2026; if a UI label has moved, search the provider's docs rather than guessi
     regardless. Choosing the bucket-scoped Object R&W token keeps blast radius small.
 - **`DASHBOARD_R2_BUCKET` / `DASHBOARD_R2_ACCESS_KEY_ID` / `DASHBOARD_R2_SECRET_ACCESS_KEY`** — same
   token flow, but on the **separate public** dashboard bucket (write is all that's needed).
-- **`DASHBOARD_URL`** — the public hostname (`pub-<hash>.r2.dev` or a custom domain) is **not**
+- **`dashboard.url`** — the public hostname (`pub-<hash>.r2.dev` or a custom domain) is **not**
   derivable from the bucket name. **Fetch it yourself after asking permission** (the command uses the
   user's account-level Cloudflare login): `npx wrangler r2 bucket dev-url get <DASHBOARD_R2_BUCKET>`
   (managed URL) or `npx wrangler r2 bucket domain list <DASHBOARD_R2_BUCKET>` (custom domain). See the
-  "Getting `DASHBOARD_URL`" note in §3d for the permission prompt. It's also visible in the bucket's
+  "Getting `dashboard.url`" note in §3d for the permission prompt. It's also visible in the bucket's
   **Settings → Public Access** (R2.dev subdomain / Custom Domains) if the user prefers to read it off.
 
 ### Slack (bot token, channel id)
@@ -315,10 +320,10 @@ mid-2026; if a UI label has moved, search the provider's docs rather than guessi
 
 - **Secrets / Variables** — repo → **Settings → Secrets and variables → Actions**. Put sensitive
   values (DB URLs, `*_ACCESS_KEY*`, `SLACK_BOT_TOKEN`, `HEARTBEAT_URL`, age keys) under the
-  **Secrets** tab; put `R2_BUCKET`, `SLACK_CHANNEL`, `DASHBOARD_R2_BUCKET` under the **Variables** tab.
+  **Secrets** tab; put `R2_BUCKET`, `DASHBOARD_R2_BUCKET`, and `SLACK_CHANNEL` under the **Variables** tab.
 - Pushing the workflow files themselves needs a token with the **`workflow`** scope.
 
-### age encryption (only if `ENCRYPTION=age`)
+### age encryption (only if `encryption: age`)
 
 - `age-keygen -o key.txt` prints the **public key** (`age1…`) → that's **`AGE_RECIPIENT`**; the file's
   `AGE-SECRET-KEY-…` line is **`AGE_IDENTITY`** (keep it secret; the drill needs it to decrypt).
@@ -334,7 +339,7 @@ mid-2026; if a UI label has moved, search the provider's docs rather than guessi
 
 Once doctor is green locally, tell the user the remaining steps the engine can't do for them:
 
-1. Commit `profiles/<name>.env` to their consuming repo (verify no secret leaked in).
+1. Commit `profiles/<name>.yaml` to their consuming repo (verify no secret leaked in).
 2. Move the credentials from `.context/gitfather-secrets.env` into GitHub **Secrets** (and the three
    bucket/channel values into GitHub **Variables**) — see the README secrets/variables table.
 3. Wire the caller workflows (`pg-backup.yml`, `pg-durable-verify.yml` — daily; supersedes the weekly

@@ -14,14 +14,6 @@
 
 export type BackupTier = "2hourly" | "daily" | "weekly" | "monthly";
 
-/** GFS lifecycle expiry per tier, in days (mirrors the R2 lifecycle rules in your profile). */
-export const TIER_RETENTION_DAYS: Record<BackupTier, number> = {
-  "2hourly": 2,
-  daily: 21,
-  weekly: 70,
-  monthly: 400,
-};
-
 /**
  * Display timezone the dashboard + Slack row render in (the profile's DISPLAY_TZ; default UTC).
  * On the Node side (build-dashboard.ts) this reads `process.env.DISPLAY_TZ` at runtime; for the
@@ -33,6 +25,42 @@ export const DISPLAY_TZ = process.env.DISPLAY_TZ || "UTC";
 export const SLOTS_PER_DAY = 12; // 2-hourly
 export const DAYS_PER_WEEK = 7;
 export const COLS_PER_WEEK = SLOTS_PER_DAY * DAYS_PER_WEEK; // 84
+
+// ── GFS retention (configurable per profile; these are the defaults) ──────────
+// The profile's `retention:` block sets these as natural-language durations; the loader parses them
+// to { days, label } and build-dashboard.ts rides them into the PublicPayload, so the browser renders
+// the real, possibly-overridden windows. R2 actually expires objects via lifecycle rules — these values
+// are the source of truth the dashboard displays and the documented wrangler commands should match.
+
+/** One tier's retention: `days` for expiry math, `label` (e.g. "13 weeks") for the dashboard subtitle. */
+export interface TierRetention {
+  days: number;
+  label: string;
+}
+export type RetentionMap = Record<BackupTier, TierRetention>;
+
+export const DEFAULT_RETENTION: RetentionMap = {
+  "2hourly": { days: 2, label: "2 days" },
+  daily: { days: 21, label: "3 weeks" },
+  weekly: { days: 91, label: "13 weeks" },
+  monthly: { days: 730, label: "2 years" },
+};
+
+/** Per-tier GFS name, cadence phrase, and copy-interval (days) — drives the subtitle + max-count math. */
+export const TIER_META: Record<BackupTier, { gfs: string; every: string; cadenceDays: number }> = {
+  "2hourly": { gfs: "grandson", every: "every 2 hours", cadenceDays: 1 / SLOTS_PER_DAY },
+  daily: { gfs: "son", every: "every day", cadenceDays: 1 },
+  weekly: { gfs: "father", every: "every week", cadenceDays: 7 },
+  monthly: { gfs: "grandfather", every: "every month", cadenceDays: 365 / 12 },
+};
+
+/** Maximum number of backup copies alive at once across all tiers (Σ days/cadence, rounded). */
+export function maxRetained(r: RetentionMap): number {
+  return (Object.keys(TIER_META) as BackupTier[]).reduce(
+    (n, t) => n + Math.round(r[t].days / TIER_META[t].cadenceDays),
+    0,
+  );
+}
 
 // ── Private log records (written by runlog.ts) ───────────────────────────────
 
@@ -92,10 +120,12 @@ export interface PublicVerification {
 }
 
 export interface PublicPayload {
-  /** Generic project label, e.g. "mydb" (the profile's FILE_BASENAME / DASHBOARD_LABEL). */
+  /** Generic project label, e.g. "mydb" (the profile's name / dashboard.label). */
   label: string;
   /** ISO-8601 UTC time the payload was built; used as "now" for expiry. */
   generatedAt: string;
+  /** Per-tier retention windows in effect for this build (from the profile; defaults if absent). */
+  retention: RetentionMap;
   runs: PublicRun[];
   verifications: PublicVerification[];
 }

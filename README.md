@@ -7,13 +7,13 @@
   <img src="docs/dashboard.png" alt="the-gitfather backup-history dashboard — GFS heatmap with per-tier retention, storage and R2 cost" width="900">
 </p>
 
-<p align="center"><sub>The static <a href="#backup-history-dashboard">backup-history dashboard</a> — every 2-hourly backup over a 400-day GFS window, with restore-verified drills, storage and estimated R2 cost.</sub></p>
+<p align="center"><sub>The static <a href="#backup-history-dashboard">backup-history dashboard</a> — every 2-hourly backup over a 1-year window, with restore-verified drills, storage and estimated R2 cost.</sub></p>
 
 A small, **profile-driven** tool any project can adopt: point it at a Postgres connection string and an
 R2 bucket and you get the **off-site, immutable, restore-verified** pillars of the **3-2-1-1-0** backup
 pattern (the *1-1-0*) — plus one independent off-site copy toward the *3-2* — with a daily Slack status
 row and a static backup-history dashboard. The engine knows nothing about any one project; everything
-project-specific lives in a `profiles/*.env` file kept in *your* repo, and credentials come from the
+project-specific lives in a `profiles/*.yaml` file kept in *your* repo, and credentials come from the
 environment (GitHub secrets), never from the repo. See [Where this fits: 3-2-1-1-0](#where-this-fits-3-2-1-1-0).
 
 ```
@@ -25,10 +25,10 @@ the-gitfather/
     check-staleness.ts    # alert if no fresh backup landed recently; self-heal a missed tick
     build-dashboard.ts    # render the static backup-history dashboard from the R2 run-logs
     runlog.ts             # append-only run/verification log in R2 (the dashboard's source of truth)
-    lib/                  # slack, proc, config, logStore, pgRestore, profile, schedule, backupTypes, backupHistory (all .ts)
+    lib/                  # config, profile, duration, pgconn, slack, proc, logStore, pgRestore, preflight, bootEnv, schedule, backupTypes, backupHistory (all .ts)
     __tests__/            # unit + bash-parity tests (node:test via tsx)
   dashboard/              # single-file static dashboard (template + SVG heatmap renderer)
-  profiles/example.env    # copy this into YOUR repo and edit
+  profiles/example.yaml    # copy this into YOUR repo and edit
   .github/
     workflows/            # REUSABLE (on: workflow_call): pg-backup, pg-restore-drill,
                           #   pg-durable-verify, pg-staleness-check, pg-dashboard
@@ -80,7 +80,7 @@ repo (for the scripts).
 
 ```
 your-repo                              the-gitfather (this repo, public)
-  pg-backup/myproject.env   ─────►     scripts/ + dashboard/
+  pg-backup/myproject.yaml   ─────►     scripts/ + dashboard/
   .github/workflows/                   .github/workflows/  (reusable)
     pg-backup.yml ───────────uses────────►  pg-backup.yml
     pg-durable-verify.yml ───uses────────►  pg-durable-verify.yml   (daily; supersedes the weekly drill)
@@ -95,18 +95,17 @@ your-repo                              the-gitfather (this repo, public)
 
 ### 1. Add your profile
 
-Copy [`profiles/example.env`](profiles/example.env) into your repo (e.g. `pg-backup/myproject.env`) and
-edit it. It is **non-secret** — `BACKUP_PREFIX`, `FILE_BASENAME`, dump flags, GFS anchor, restore-drill
-sentinel table, Slack display tz, etc. See **Profile reference** below.
+Copy [`profiles/example.yaml`](profiles/example.yaml) into your repo (e.g. `pg-backup/myproject.yaml`) and
+edit it. It is **non-secret** — `name`, `backup-prefix`, dump flags, GFS anchor, `retention:` windows,
+the restore-drill `row-count-table`, timezone, etc. See **Profile reference** below.
 
 ### 2. Add the caller workflows (`.github/workflows/` in your repo)
 
 > **Secrets must be passed explicitly.** This repo is **public and owned by `simonhac`**, so for any
 > consumer in a *different* account/org, GitHub's `secrets: inherit` shortcut **does not work** (it
 > only passes secrets to reusable workflows in the *same* org/enterprise). The examples below therefore
-> pass each secret explicitly and thread non-secret config (bucket names, Slack channel) as inputs —
-> this works from any owner. If your repo happens to be in the same org as this one, you may use
-> `secrets: inherit` instead of the explicit `secrets:` block.
+> pass each secret explicitly and thread the non-secret deployment identifiers (R2 bucket, Slack channel) as
+> inputs — this works from any owner. All project *config* lives in the committed `profiles/*.yaml`. If your repo is in the same org as this one, you may use `secrets: inherit`.
 
 `pg-backup.yml`:
 
@@ -114,7 +113,7 @@ sentinel table, Slack display tz, etc. See **Profile reference** below.
 name: My DB backup → R2          # keep this name — pg-dashboard's workflow_run references it
 on:
   schedule:
-    - cron: "0 */2 * * *"        # every 2 hours (UTC); the ANCHOR_HOUR_UTC run also promotes
+    - cron: "0 */2 * * *"        # every 2 hours (UTC); the anchor-hour-utc run also promotes
   workflow_dispatch:
     inputs:
       reason:
@@ -126,7 +125,7 @@ jobs:
   backup:
     uses: simonhac/the-gitfather/.github/workflows/pg-backup.yml@main
     with:
-      profile: pg-backup/myproject.env
+      profile: pg-backup/myproject.yaml
       r2_bucket: ${{ vars.R2_BUCKET }}
       slack_channel: ${{ vars.SLACK_CHANNEL }}
       trigger: ${{ github.event_name == 'schedule' && 'schedule' || github.event.inputs.reason }}
@@ -153,7 +152,7 @@ jobs:
   drill:
     uses: simonhac/the-gitfather/.github/workflows/pg-restore-drill.yml@main
     with:
-      profile: pg-backup/myproject.env
+      profile: pg-backup/myproject.yaml
       r2_bucket: ${{ vars.R2_BUCKET }}
       slack_channel: ${{ vars.SLACK_CHANNEL }}
     secrets:
@@ -168,11 +167,11 @@ jobs:
 `pg-durable-verify.yml` (runs **daily**) — guarantees *every* durable file is integrity-tested, not just
 the newest. Its **primary** leg hash-checks each new daily/weekly/monthly object against the SHA-256 recorded
 at backup time and full-restores the freshest `daily`; its **secondary** leg re-restores the newest
-weekly/monthly object ≥ `RETEST_DAYS` (14) old not yet restore-verified. Net: weekly/monthly are validated
-twice (hash on write + restore at ~2 weeks), daily once. Because the daily primary restore covers the freshest
-dump more often than the weekly drill, this **supersedes `pg-restore-drill.yml`** — wire this one and drop the
-weekly drill (or keep both). Cadence/limits are profile knobs (`DURABLE_PRIMARY`, `DURABLE_SECONDARY`,
-`RETEST_DAYS`, `DURABLE_VERIFY_MAX_RESTORES`).
+weekly/monthly object ≥ `verify-durable.retest-days` (14) old not yet restore-verified. Net: weekly/monthly
+are validated twice (hash on write + restore at ~2 weeks), daily once. Because the daily primary restore covers
+the freshest dump more often than the weekly drill, this **supersedes `pg-restore-drill.yml`** — wire this one
+and drop the weekly drill (or keep both). Cadence/limits are profile knobs (`verify-durable.fresh`,
+`verify-durable.aged`, `verify-durable.retest-days`, `verify-durable.max-restores`).
 
 ```yaml
 name: My DB durable verify
@@ -185,7 +184,7 @@ jobs:
   verify:
     uses: simonhac/the-gitfather/.github/workflows/pg-durable-verify.yml@main
     with:
-      profile: pg-backup/myproject.env
+      profile: pg-backup/myproject.yaml
       r2_bucket: ${{ vars.R2_BUCKET }}
       slack_channel: ${{ vars.SLACK_CHANNEL }}
     secrets:
@@ -215,8 +214,7 @@ jobs:
       contents: read
     uses: simonhac/the-gitfather/.github/workflows/pg-staleness-check.yml@main
     with:
-      profile: pg-backup/myproject.env
-      backup_workflow: pg-backup.yml   # your backup workflow's file name
+      profile: pg-backup/myproject.yaml
       r2_bucket: ${{ vars.R2_BUCKET }}
       slack_channel: ${{ vars.SLACK_CHANNEL }}
     secrets:
@@ -241,7 +239,7 @@ jobs:
   publish:
     uses: simonhac/the-gitfather/.github/workflows/pg-dashboard.yml@main
     with:
-      profile: pg-backup/myproject.env
+      profile: pg-backup/myproject.yaml
       r2_bucket: ${{ vars.R2_BUCKET }}
       dashboard_r2_bucket: ${{ vars.DASHBOARD_R2_BUCKET }}
     secrets:
@@ -266,10 +264,10 @@ The caller reads these and passes them in (explicit `secrets:` + `with:` inputs,
 | secret | `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | scoped R2 S3 token (Object Read & Write, **no delete**) |
 | **variable** | `R2_BUCKET` | private dump bucket name |
 | secret | `SLACK_BOT_TOKEN` | (optional) `xoxb-…`, scope `chat:write` |
-| **variable** | `SLACK_CHANNEL` | (optional) channel id `C…` |
+| **variable** | `SLACK_CHANNEL` | (optional) channel id `C…` — the non-secret id paired with the bot token |
 | secret | `HEARTBEAT_URL` | (optional) dead-man's-switch ping URL |
 | secret | `ALERT_WEBHOOK_URL` | (optional) generic **failure** webhook (Slack-compatible `{"text":…}` POST) — a no-bot alert fallback, or a redundant failure channel into a host app's existing incoming webhook when the bot is also set |
-| secret | `AGE_RECIPIENT` / `AGE_IDENTITY` | (optional) only when `ENCRYPTION=age` |
+| secret | `AGE_RECIPIENT` / `AGE_IDENTITY` | (optional) only when `encryption: age` |
 | **variable** | `DASHBOARD_R2_BUCKET` | (dashboard) public bucket name |
 | secret | `DASHBOARD_R2_ACCESS_KEY_ID` / `DASHBOARD_R2_SECRET_ACCESS_KEY` | (dashboard) write-only token for the public bucket |
 
@@ -279,34 +277,40 @@ The caller reads these and passes them in (explicit `secrets:` + `with:` inputs,
 
 ## Backup tiers (GFS + a finer "grandson" tier)
 
-| Tier | Label | Cadence | R2 prefix | Lifecycle expiry | Bucket lock |
+| Tier | Label | Cadence | R2 prefix | Lifecycle expiry (default) | Bucket lock |
 |---|---|---|---|---|---|
 | 2-hourly | grandson | every 2 h | `<prefix>/2hourly/` | 2 days | none |
-| daily | Son | anchor hour | `<prefix>/daily/` | 21 days | 14 days |
-| weekly | Father | Sundays @ anchor | `<prefix>/weekly/` | 70 days | 14 days |
-| monthly | Grandfather | 1st @ anchor | `<prefix>/monthly/` | 400 days | 14 days |
+| daily | Son | anchor hour | `<prefix>/daily/` | 3 weeks | 14 days |
+| weekly | Father | Sundays @ anchor | `<prefix>/weekly/` | 13 weeks | 14 days |
+| monthly | Grandfather | 1st @ anchor | `<prefix>/monthly/` | 2 years | 14 days |
+
+The expiry windows are the **profile's `retention:` block** (natural-language durations — see *Profile
+reference*); the values above are the defaults. At most ~82 backups are retained at once. **These windows
+are also what the dashboard renders, but R2 itself does the deleting** via the lifecycle rules below —
+keep the two in sync (changing the profile does not reconfigure R2).
 
 **One dump, promoted to all qualifying tiers.** Each run dumps once and uploads to `2hourly/`. The run
-whose UTC hour equals `ANCHOR_HOUR_UTC` is also **server-side copied** (R2→R2, no re-dump) into `daily/`,
+whose UTC hour equals `anchor-hour-utc` is also **server-side copied** (R2→R2, no re-dump) into `daily/`,
 plus `weekly/` on Sundays, plus `monthly/` on the 1st. Retention and immutability are enforced by **R2
 lifecycle rules + bucket locks per prefix**, not by code.
 
 ### Create the R2 bucket, lifecycle rules, and bucket locks (once)
 
 Run with **account-level** Cloudflare creds (this credential is the one that can weaken locks — **never**
-give it to CI). Replace `<your-bucket>` and `<prefix>` (your profile's `BACKUP_PREFIX`).
+give it to CI). Replace `<your-bucket>` and `<prefix>` (your profile's `backup-prefix`).
 
 ```bash
 npx wrangler r2 bucket create <your-bucket>
 
 # Lifecycle: expire each tier on its own schedule
+# Match these --expire-days to the profile's retention: block (defaults: 2 days / 3 weeks / 13 weeks / 2 years).
 npx wrangler r2 bucket lifecycle add <your-bucket> expire-2hourly <prefix>/2hourly/ --expire-days 2
 npx wrangler r2 bucket lifecycle add <your-bucket> expire-daily   <prefix>/daily/   --expire-days 21
-npx wrangler r2 bucket lifecycle add <your-bucket> expire-weekly  <prefix>/weekly/  --expire-days 70
-npx wrangler r2 bucket lifecycle add <your-bucket> expire-monthly <prefix>/monthly/ --expire-days 400
+npx wrangler r2 bucket lifecycle add <your-bucket> expire-weekly  <prefix>/weekly/  --expire-days 91
+npx wrangler r2 bucket lifecycle add <your-bucket> expire-monthly <prefix>/monthly/ --expire-days 730
 npx wrangler r2 bucket lifecycle add <your-bucket> abort-mpu      <prefix>/         --abort-multipart-days 1
 npx wrangler r2 bucket lifecycle add <your-bucket> expire-status  _status/          --expire-days 14
-npx wrangler r2 bucket lifecycle add <your-bucket> expire-log     _log/             --expire-days 460
+npx wrangler r2 bucket lifecycle add <your-bucket> expire-log     _log/             --expire-days 760
 
 # Bucket locks (WORM): 14-day immutability on the DURABLE tiers only — NOT on 2hourly/ (a lock there
 # would block its 2-day expiry, since locks take precedence over lifecycle).
@@ -331,40 +335,40 @@ bucket gains no web surface).
 
 **1. At backup time** (`backup-pg-to-r2.ts`) — before a dump is declared good:
 
-- **`MIN_BYTES`** floor — a suspiciously small dump is never uploaded.
-- **`BACKUP_VALIDATE_STRUCTURE=1`** (default) — `pg_restore -l` lists the archive's TOC; a corrupt or
-  truncated `>MIN_BYTES` dump can't be listed and is rejected *before* it's reported as a success. (For
-  `ENCRYPTION=none`; age dumps are validated by the drill / by `BACKUP_VERIFY`.)
-- **`BACKUP_SHA256=1`** (default) — a streaming SHA-256 of the exact uploaded bytes (ciphertext for age)
-  is recorded in the run-log; it's the baseline the durable hash-check compares against.
-- **`BACKUP_VERIFY=1`** (opt-in, off by default) — after upload, re-download the object, confirm its
-  SHA-256 matches, and `pg_restore -l` it. This is the only *backup-time* structural check for age
-  (it needs `AGE_IDENTITY` in the backup job to decrypt). Costs a re-download per run, so it's opt-in.
+- **`dump.min-bytes`** floor — a suspiciously small dump is never uploaded.
+- **`integrity.check-structure`** (default on) — `pg_restore -l` lists the archive's TOC; a corrupt or
+  truncated dump above the size floor can't be listed and is rejected *before* it's reported as a success.
+  (For `encryption: none`; age dumps are validated by the drill / by `integrity.verify-after-upload`.)
+- **`integrity.checksum`** (default on) — a streaming SHA-256 of the exact uploaded bytes (ciphertext for
+  age) is recorded in the run-log; it's the baseline the durable hash-check compares against.
+- **`integrity.verify-after-upload`** (opt-in, off by default) — after upload, re-download the object,
+  confirm its SHA-256 matches, and `pg_restore -l` it. This is the only *backup-time* structural check for
+  age (it needs `AGE_IDENTITY` in the backup job to decrypt). Costs a re-download per run, so it's opt-in.
 
 **2. The restore drill** (`restore-drill-pg.ts`) — restores the newest `2hourly` dump into a throwaway
 Postgres and gates on the data, not just a clean exit:
 
-- Sentinel-table row count must be **`MIN_RATIO` ≤ restored/live ≤ `MAX_RATIO`** (catches truncation
-  *and* duplication; live is `n_live_tup`, an estimate).
-- **`DRILL_EXTRA_TABLES`** must be non-empty; **`DRILL_EXPECTED_TABLES`** must each exist *and* be
-  non-empty (catches a partial-schema restore).
+- The `drill.row-count-table` count must be **`drill.min-row-ratio` ≤ restored/live ≤ `drill.max-row-ratio`**
+  (catches truncation *and* duplication; live is `n_live_tup`, an estimate).
+- **`drill.present-tables`** must each exist in the restore; **`drill.nonempty-tables`** must each exist
+  *and* be non-empty (catches a partial-schema restore).
 - `pg_restore` stderr is **classified**: known managed-schema noise (missing roles/extensions, ownership,
   idempotent "already exists") is tolerated; any *unrecognised* error fails the drill.
-- **`DRILL_DRIFT_MAX_DROP`** (optional, off by default) fails the drill if a table shrank more than the
+- **`drill.max-row-drop`** (optional, off by default) fails the drill if a table shrank more than the
   given fraction vs the previous passing drill.
 
 **3. Daily durable verification** (`verify-durable-pg.ts`, the `pg-durable-verify.yml` workflow) —
 guarantees **every** `daily`/`weekly`/`monthly` object is tested, driven by the verifications log so a
 missed run self-corrects:
 
-- **Primary** (`DURABLE_PRIMARY=1`): on first sight, hash-check each durable object against its recorded
-  SHA-256 (proves the server-side copy is byte-intact), and full-restore the freshest `daily`.
-- **Secondary** (`DURABLE_SECONDARY=1`): full-restore the newest `weekly`/`monthly` object **≥
-  `RETEST_DAYS` (14)** old not yet restore-verified (the aged-copy proof, just inside the WORM lock).
-- **`DURABLE_VERIFY_MAX_RESTORES`** caps full restores per run (hash-checks are uncapped — cheap).
+- **`verify-durable.fresh`** (default on): on first sight, hash-check each durable object against its
+  recorded SHA-256 (proves the server-side copy is byte-intact), and full-restore the freshest `daily`.
+- **`verify-durable.aged`** (default on): full-restore the newest `weekly`/`monthly` object **≥
+  `verify-durable.retest-days` (14)** old not yet restore-verified (the aged-copy proof, just inside the WORM lock).
+- **`verify-durable.max-restores`** caps full restores per run (hash-checks are uncapped — cheap).
 
 Net: **weekly/monthly are validated twice** (hash on write + restore at ~2 weeks), **daily once** (it's
-the short-lived 21-day tier). Because the daily primary restore covers the freshest dump every day, this
+the short-lived 3-week tier). Because the daily primary restore covers the freshest dump every day, this
 **supersedes the weekly `pg-restore-drill.yml`** — wire `pg-durable-verify.yml` and drop the weekly drill.
 
 Every drill — pass **or fail** — is recorded to the verifications log, so a failed restore shows up: on
@@ -376,7 +380,7 @@ Slack/`ALERT_WEBHOOK_URL` page. The hash-vs-restore distinction drives the toolt
 ## Slack (optional)
 
 Instead of one message per run (spam), the backup keeps **one message per day** and **updates it in
-place** — a `✅`/`❌` + `HH:MM` tick per 2-hourly run, in `DISPLAY_TZ`. A failed run appends `❌` and
+place** — a `✅`/`❌` + `HH:MM` tick per 2-hourly run, in the profile's `timezone`. A failed run appends `❌` and
 posts a loud, `@here`-mentioning threaded alert. Any **elapsed-but-empty** 2-hourly bucket renders as
 `⬜ HH:00`, so a skipped run shows as a visible gap; the hourly staleness check re-renders the row so a
 just-missed slot surfaces within the hour. This needs a **bot token** (`chat.update`; incoming webhooks
@@ -405,7 +409,7 @@ backup pings it on success, so its absence pages independently of GitHub.
 
 ## Backup-history dashboard
 
-A static, self-contained page visualises **every 2-hourly run over the 400-day window** as a heatmap
+A static, self-contained page visualises **every 2-hourly run over the 1-year window** as a heatmap
 (green = healthy & retained, brighter green = restore-verified, **amber = restore/hash drill failed**,
 grey = aged out of retention, red = failed backup, blank = no run). It reads an **append-only run-log in
 R2** (no server, no DB) that the backup + drill + durable-verify scripts write via `runlog.ts`:
@@ -422,11 +426,11 @@ error text), `esbuild`-bundles the SVG renderer into a single `index.html`, and 
 **separate public** dashboard bucket.
 
 > **Privacy.** The published page includes the project label + sizes + tiers + timestamps + verification
-> ratio + run links; it **drops raw error text** (set `DASHBOARD_HIDE_RUN_LINKS=1` to also drop run
+> ratio + run links; it **drops raw error text** (set `dashboard.hide-run-links: true` to also drop run
 > links). The rich raw logs never leave the private bucket. To make the page itself private, front the
 > public bucket with a custom domain + Cloudflare Access — no code change.
 
-Set **`DASHBOARD_URL`** in the profile to hyperlink the daily Slack header's "`<basename> DB backup`"
+Set **`dashboard.url`** in the profile to hyperlink the daily Slack header's "`<basename> DB backup`"
 to the published page. The public hostname isn't derivable from the bucket name — fetch it once with
 `npx wrangler r2 bucket dev-url get <DASHBOARD_R2_BUCKET>` (managed `r2.dev` URL) or
 `npx wrangler r2 bucket domain list <DASHBOARD_R2_BUCKET>` (custom domain).
@@ -436,7 +440,7 @@ to the published page. The public hostname isn't derivable from the bucket name 
 ```bash
 npm ci
 npx tsx scripts/build-dashboard.ts --sample --out /tmp/dash/index.html   # sample data
-# drop --sample + export the R2 env (+ DISPLAY_TZ) to render from real logs
+# drop --sample + export the R2 env (+ PROFILE=…/your.yaml for the label/timezone) to render real logs
 ```
 
 ---
@@ -447,9 +451,9 @@ npx tsx scripts/build-dashboard.ts --sample --out /tmp/dash/index.html   # sampl
 npm ci                                                   # one-time: installs tsx
 export PG_BACKUP_DATABASE_URL='postgresql://…:5432/…?sslmode=require'
 export R2_ACCOUNT_ID=… R2_BUCKET=<your-bucket> R2_ACCESS_KEY_ID=… R2_SECRET_ACCESS_KEY=…
-export SLACK_BOT_TOKEN=xoxb-… SLACK_CHANNEL=C0…          # optional
+export SLACK_BOT_TOKEN=xoxb-…                            # optional
 # Run twice: the first posts the day's Slack message, the second UPDATES it with a 2nd tick.
-FORCE_TIERS="2hourly daily" PROFILE=profiles/example.env npx tsx scripts/backup-pg-to-r2.ts
+FORCE_TIERS="2hourly daily" PROFILE=profiles/example.yaml npx tsx scripts/backup-pg-to-r2.ts
 ```
 
 Any local dump file lives under a tmp dir and is removed on exit — never commit a dump (it may contain
@@ -459,19 +463,19 @@ PII).
 
 ## Config validation & `doctor`
 
-Every task validates its config (zod) at startup and **fails fast** with one aggregated report if any
-required variable is missing or malformed — before any dump, upload, or trigger. The grammars are
-strict where a typo is genuinely catchable and lenient where they can't prove validity:
+Each task validates the profile (zod) at startup and **fails fast** with one aggregated report if any
+field is missing or malformed — before any dump, upload, or trigger. The report names YAML fields by
+their kebab key and credentials by their ENV name (that's where you set each), never echoing a value.
+The grammars are strict where a typo is genuinely catchable and lenient where they can't prove validity:
 
 | Strict (catches typos) | Lenient (presence + light shape) |
 |---|---|
-| `ENCRYPTION` ∈ {`none`,`age`,`aes-gcm`} · `ANCHOR_HOUR_UTC` 0–23 · `MIN_RATIO` 0–1 · `MAX_RATIO` ≥ 1 · `DRILL_DRIFT_MAX_DROP` 0–1 · `STALE_HOURS` > 0 · `MIN_BYTES`/`RETEST_DAYS`/`DURABLE_VERIFY_MAX_RESTORES` (ints) · `DISPLAY_TZ` (real IANA zone) · `FORCE_TIERS` ⊆ {2hourly,daily,weekly,monthly} · env-booleans `SELF_HEAL`/`DRY_RUN`/`BACKUP_SHA256`/`BACKUP_VALIDATE_STRUCTURE`/`BACKUP_VERIFY`/`DURABLE_PRIMARY`/`DURABLE_SECONDARY` (1/0/true/false/yes/no/on/off) · `*_DATABASE_URL` scheme = `postgres(ql)://` | R2 account id / keys / secrets · bucket names (whitespace-free) · `AGE_RECIPIENT`/`AGE_IDENTITY` · table-name lists (`DRILL_EXTRA_TABLES`/`DRILL_EXPECTED_TABLES`) · Slack token/channel |
+| `encryption` ∈ {`none`,`age`,`aes-gcm`} · `anchor-hour-utc` 0–23 · `drill.min-row-ratio` 0–1 · `drill.max-row-ratio` ≥ 1 · `drill.max-row-drop` 0–1 · `staleness.max-age-hours` > 0 · `dump.min-bytes`/`verify-durable.retest-days`/`verify-durable.max-restores` (ints) · `timezone` (real IANA zone) · `retention.*` (durations like `13 weeks`) · booleans `staleness.self-heal`/`dry-run` · `integrity.checksum`/`check-structure`/`verify-after-upload` · `verify-durable.fresh`/`aged` (YAML `true`/`false` or `1/0/yes/no/on/off`) | credential ENV vars: `*_DATABASE_URL` scheme = `postgres(ql)://` · R2 account id / keys · bucket names (whitespace-free) · `AGE_RECIPIENT`/`AGE_IDENTITY` · `SLACK_BOT_TOKEN` · table-name lists (`drill.present-tables`/`nonempty-tables`) |
 
-Conditional rules are enforced too: `ENCRYPTION=age` ⇒ `AGE_RECIPIENT` (backup) / `AGE_IDENTITY`
-(drill, durable-verify); `BACKUP_VERIFY=1` + `ENCRYPTION=age` ⇒ `AGE_IDENTITY` (backup); `SLACK_BOT_TOKEN`
-set ⇒ `SLACK_CHANNEL`. The report prints variable **names** only — never a value — so nothing secret
-reaches a log. Real credential/endpoint validity isn't guessed from a regex; it's proven by `doctor`'s
-live probes.
+Conditional rules are enforced too: `encryption: age` ⇒ `AGE_RECIPIENT` (backup) / `AGE_IDENTITY`
+(drill, durable-verify); `integrity.verify-after-upload` + `encryption: age` ⇒ `AGE_IDENTITY` (backup);
+`SLACK_BOT_TOKEN` set ⇒ `SLACK_CHANNEL`. Real credential/endpoint validity isn't guessed from a regex;
+it's proven by `doctor`'s live probes.
 
 `doctor` is a **read-only** preflight — *"is this consumer actually wired up?"* — for verifying a
 freshly-configured repo before go-live. It runs the **same** config schema, then probes the external
@@ -482,11 +486,11 @@ upload, no `gh workflow run`, no Slack post — so it's safe against production 
 ```bash
 npm run doctor -- backup           # one task: backup | drill | verify-durable | staleness | dashboard
 npm run doctor -- all              # every task's config + probes
-PROFILE=profiles/example.env npm run doctor -- backup   # ✓/⚠/✗ checklist; exit 0 iff all required pass
+PROFILE=profiles/example.yaml npm run doctor -- backup   # ✓/⚠/✗ checklist; exit 0 iff all required pass
 ```
 
 Optionally add a `doctor all` step to CI before the real task. It complements (doesn't replace)
-`build-dashboard`'s `--sample` and check-staleness's `DRY_RUN` — those exercise one task's dry path;
+`build-dashboard`'s `--sample` and check-staleness's `staleness.dry-run` — those exercise one task's dry path;
 `doctor` is the broader client preflight.
 
 ---
@@ -519,27 +523,34 @@ warn in a vanilla Postgres — restore into a fresh instance of the same platfor
   obvious next steps.
 - **Full Cloudflare-account takeover**: can remove bucket locks (R2 has no COMPLIANCE "even-root-can't-
   delete" mode). Accepted for a DR / leaked-token model.
-- **At rest**: with `ENCRYPTION=none`, dumps sit unencrypted in a **private** bucket (R2 still encrypts at
-  rest). Set `ENCRYPTION=age` for client-side encryption if a full dump contains sensitive data.
+- **At rest**: with `encryption: none`, dumps sit unencrypted in a **private** bucket (R2 still encrypts at
+  rest). Set `encryption: age` for client-side encryption if a full dump contains sensitive data.
 
 ---
 
 ## Profile reference
 
-See [`profiles/example.env`](profiles/example.env): `BACKUP_PREFIX`, `FILE_BASENAME`, `PG_DUMP_FLAGS`,
-`ENCRYPTION`, `PG_CLIENT_MAJOR`, `ANCHOR_HOUR_UTC`, `DRILL_SENTINEL_TABLE`, `DRILL_EXTRA_TABLES`,
-`DRILL_EXPECTED_TABLES`, `MIN_RATIO`, `MAX_RATIO`, `DRILL_DRIFT_MAX_DROP`, `MIN_BYTES`, `STALE_HOURS`,
-`DISPLAY_TZ`, `SLACK_ALERT_MENTION`, `DASHBOARD_LABEL`, `DASHBOARD_URL`.
+The profile is a single **nested YAML** file ([`profiles/example.yaml`](profiles/example.yaml), kebab-case
+keys). Credentials are **never** in it — they come from the environment (GitHub secrets). Top level:
+`name` (db shortname), `backup-prefix`, `timezone`, `encryption`, `anchor-hour-utc`. Groups:
 
-Backup-time integrity: `BACKUP_SHA256`, `BACKUP_VALIDATE_STRUCTURE`, `BACKUP_VERIFY`. Durable
-verification: `DURABLE_PRIMARY`, `DURABLE_SECONDARY`, `RETEST_DAYS`, `DURABLE_VERIFY_MAX_RESTORES`. All
-have safe defaults — see **[Verifying backups](#verifying-backups-integrity)**.
+- **`dump:`** — `flags`, `client-major`, `min-bytes`
+- **`integrity:`** — `checksum`, `check-structure`, `verify-after-upload`
+- **`retention:`** — `grandson` / `son` / `father` / `grandfather` as natural-language durations
+  (e.g. `13 weeks`, `2 years`); defaults `2 days` / `3 weeks` / `13 weeks` / `2 years`
+- **`drill:`** — `row-count-table`, `present-tables` (must exist), `nonempty-tables` (must exist +
+  non-empty), `min-row-ratio`, `max-row-ratio`, `max-row-drop`
+- **`verify-durable:`** — `fresh`, `aged`, `retest-days`, `max-restores`
+- **`staleness:`** — `max-age-hours`, `heal-workflow`, `self-heal`, `dry-run`
+- **`slack:`** — `alert-mention` (the channel id is env: `SLACK_CHANNEL`)  ·  **`dashboard:`** — `label`, `hide-run-links`, `url`
+
+All have safe defaults — see **[Verifying backups](#verifying-backups-integrity)**.
 
 ---
 
 ## Troubleshooting
 
-### Every run fails instantly with `✗ config validation failed` (e.g. `expected string, received undefined → at PG_BACKUP_DATABASE_URL`)
+### Every run fails instantly with `✗ config validation failed` (e.g. `✗ PG_BACKUP_DATABASE_URL — must be set`)
 
 The secrets are arriving **empty** — the task aborts at its zod config pre-flight (see
 [Config validation & `doctor`](#config-validation--doctor)). The usual cause is using
@@ -573,12 +584,12 @@ as "the wiring/secrets/runner is broken," and check the Actions run logs.
 A drill restored a dump but the **data gate** didn't pass — this is *not* a failed backup (those are
 red). The Slack/webhook message names the reason. Common ones:
 
-- *"`<table>` is empty/zero"* or *"< `MIN_RATIO`× live"* — a genuinely truncated dump, **or** a sentinel
-  table whose live `n_live_tup` estimate is stale (run `ANALYZE`, or widen `MIN_RATIO`).
+- *"`<table>` is empty/zero"* or *"< `drill.min-row-ratio`× live"* — a genuinely truncated dump, **or** a sentinel
+  table whose live `n_live_tup` estimate is stale (run `ANALYZE`, or widen `drill.min-row-ratio`).
 - *"N unrecognised error(s): …"* — `pg_restore` emitted an error not in the benign managed-schema
   allow-list (`scripts/lib/pgRestore.ts`). If it's actually harmless for your provider, that file is the
   one place to add the pattern.
-- *"`<table>` dropped X% vs prior drill"* — only with `DRILL_DRIFT_MAX_DROP` set; a real shrink or an
+- *"`<table>` dropped X% vs prior drill"* — only with `drill.max-row-drop` set; a real shrink or an
   over-tight threshold.
 
 A failed **durable** verify (`verify-durable-pg.ts`) on an *aged* copy uses a non-empty gate (it can't

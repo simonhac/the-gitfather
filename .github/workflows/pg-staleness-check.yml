@@ -1,25 +1,20 @@
 name: pg-staleness-check (reusable)
 
 # Reusable hourly assertion that a fresh backup landed in R2. Alerts 🔴 if the newest 2hourly/ object
-# is older than STALE_HOURS, and self-heals a *missed* tick by re-triggering the backup workflow.
+# is older than staleness.max-age-hours, and self-heals a *missed* tick by re-triggering the backup workflow.
 # Complements the backup's dead-man's-switch ping (object-landed vs run-succeeded). See README.
 
 on:
   workflow_call:
     inputs:
       profile:
-        description: "Path (within the CALLER repo) to the profile .env."
+        description: "Path (within the CALLER repo) to the profile .yaml."
         type: string
         required: true
       gitfather_ref:
         type: string
         required: false
         default: main
-      backup_workflow:
-        description: "Caller's backup workflow file name, re-triggered on a missed tick."
-        type: string
-        required: false
-        default: pg-backup.yml
       r2_bucket:
         description: "Private R2 dump bucket name (caller passes vars.R2_BUCKET)."
         type: string
@@ -87,7 +82,6 @@ jobs:
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL: ${{ inputs.slack_channel }}
-          BACKUP_WORKFLOW: ${{ inputs.backup_workflow }}
           ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
-          GH_TOKEN: ${{ github.token }}   # self-heal: `gh workflow run <backup_workflow>` on a missed tick
+          GH_TOKEN: ${{ github.token }}   # self-heal: `gh workflow run <staleness.heal-workflow>` on a missed tick
         run: npx tsx scripts/check-staleness.ts

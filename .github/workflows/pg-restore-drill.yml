@@ -8,7 +8,7 @@ on:
   workflow_call:
     inputs:
       profile:
-        description: "Path (within the CALLER repo) to the profile .env."
+        description: "Path (within the CALLER repo) to the profile .yaml."
         type: string
         required: true
       gitfather_ref:
@@ -69,16 +69,6 @@ jobs:
           ref: ${{ inputs.gitfather_ref }}
           path: engine
 
-      - name: Read profile (PG_CLIENT_MAJOR for the client install)
-        run: |
-          set -euo pipefail
-          set -a; source "$GITHUB_WORKSPACE/caller/${{ inputs.profile }}"; set +a
-          echo "PG_CLIENT_MAJOR=${PG_CLIENT_MAJOR:-17}" >> "$GITHUB_ENV"
-
-      - uses: ./engine/.github/actions/setup-tools
-        with:
-          pg-client-major: ${{ env.PG_CLIENT_MAJOR }}
-
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -88,6 +78,16 @@ jobs:
       - name: Install engine deps
         run: npm ci
         working-directory: engine
+
+      - name: Read profile (PG_CLIENT_MAJOR for the client install)
+        working-directory: engine
+        env:
+          PROFILE: ${{ github.workspace }}/caller/${{ inputs.profile }}
+        run: npx tsx scripts/profile-export.ts >> "$GITHUB_ENV"
+
+      - uses: ./engine/.github/actions/setup-tools
+        with:
+          pg-client-major: ${{ env.PG_CLIENT_MAJOR }}
 
       - name: Restore drill
         working-directory: engine
