@@ -1,7 +1,8 @@
 name: pg-staleness-check (reusable)
 
-# Reusable hourly assertion that a fresh backup landed in R2. Alerts 🔴 if the newest 2hourly/ object
-# is older than staleness.max-age-hours, and self-heals a *missed* tick by re-triggering the backup workflow.
+# Reusable assertion (run frequently, e.g. every 10 min) that a fresh backup landed in R2. Alerts 🔴 when
+# the current backup slot is overdue (staleness.slot-minutes + grace-minutes; max-age-hours is a backstop),
+# and self-heals a *missed* tick by re-triggering the backup workflow.
 # Complements the backup's dead-man's-switch ping (object-landed vs run-succeeded). See README.
 
 on:

@@ -43,3 +43,25 @@ export function stampToEpochMs(stamp: string): number {
     Number(stamp.slice(13, 15)),
   );
 }
+
+/**
+ * Is the current cadence slot's backup overdue? `slotMs` is aligned to the Unix epoch, so a
+ * 120-minute slot puts the boundaries on even UTC hours — matching a two-hourly backup cron. A slot
+ * is "satisfied" once an object stamped at-or-after its boundary exists; it counts as "overdue" only
+ * once the boundary has passed AND the grace window has elapsed AND nothing has landed for it. This
+ * decouples self-heal recovery time (≈ grace) from the backup interval — see check-staleness.ts.
+ * Pure + UTC, like the rest of this module (unit-tested in schedule.test.ts).
+ */
+export function slotState(
+  nowMs: number,
+  newestEpochMs: number,
+  slotMinutes: number,
+  graceMinutes: number,
+): { overdue: boolean; landed: boolean; slotStartMs: number; dueMs: number } {
+  const slotMs = slotMinutes * 60_000;
+  const slotStartMs = Math.floor(nowMs / slotMs) * slotMs;
+  const dueMs = slotStartMs + graceMinutes * 60_000;
+  const landed = newestEpochMs >= slotStartMs; // this slot already has a backup
+  const overdue = !landed && nowMs >= dueMs; // boundary + grace passed, still nothing landed
+  return { overdue, landed, slotStartMs, dueMs };
+}

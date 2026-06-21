@@ -35,6 +35,10 @@ import { appendRun } from "./runlog.js";
 import { slackEnabled, slackPost, slackDailyRecord, dailyLabel, alertWebhook } from "./lib/slack.js";
 import type { BackupTier } from "./lib/backupTypes.js";
 
+// Captured at module load (≈ process start) so both recordConfigFailure() and main() can stamp the
+// run-log with the whole-script wall time — see the appendRun({ durationMs }) call sites below.
+const SCRIPT_START_MS = Date.now();
+
 function pad2(n: number): string {
   return String(n).padStart(2, "0");
 }
@@ -98,7 +102,9 @@ async function recordConfigFailure(): Promise<void> {
     }),
   );
   await bestEffort("alert webhook", () => alertWebhook(`🔴 ${basename} backup FAILED at ${label} — ${msg}`));
-  await bestEffort("runlog config-fail", () => appendRun({ ts: runTsIso, ok: false, tiers: [], error: msg }));
+  await bestEffort("runlog config-fail", () =>
+    appendRun({ ts: runTsIso, ok: false, tiers: [], error: msg, durationMs: Date.now() - SCRIPT_START_MS }),
+  );
 }
 
 async function main(): Promise<void> {
@@ -191,7 +197,9 @@ async function main(): Promise<void> {
       );
     }
     await bestEffort("alert webhook", () => alertWebhook(`🔴 ${fileBasename} backup FAILED at ${label} — ${msg}`));
-    await bestEffort("runlog fail", () => appendRun({ ts: runTsIso, ok: false, tiers: [], error: msg }));
+    await bestEffort("runlog fail", () =>
+      appendRun({ ts: runTsIso, ok: false, tiers: [], error: msg, durationMs: Date.now() - SCRIPT_START_MS }),
+    );
     cleanup();
     process.exit(1);
   };
@@ -340,7 +348,15 @@ async function main(): Promise<void> {
   console.log(`✓ Backup complete: ${filename} (${Math.floor(size / 1024 / 1024)} MB) → tiers: ${tiers.join(" ")}`);
   await bestEffort("slack ok tick", () => slackDailyRecord(true, label, marker, origin, now));
   await bestEffort("runlog ok", () =>
-    appendRun({ ts: runTsIso, ok: true, tiers: tiers as BackupTier[], bytes: size, key: firstKey, sha256 }),
+    appendRun({
+      ts: runTsIso,
+      ok: true,
+      tiers: tiers as BackupTier[],
+      bytes: size,
+      key: firstKey,
+      sha256,
+      durationMs: Date.now() - SCRIPT_START_MS,
+    }),
   );
 
   // Dead-man's-switch ping (success only) — its absence is the staleness signal.

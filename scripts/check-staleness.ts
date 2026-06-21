@@ -7,9 +7,12 @@ import "./lib/bootEnv.js"; // MUST be first — loads $PROFILE before backupType
 //
 // Lists the newest object under $backup-prefix/2hourly/ and derives its age from the timestamped key.
 // Each run it also refreshes today's Slack row (renders ⬜ for elapsed-but-empty 2-hourly buckets).
-// If the newest object is older than staleness.max-age-hours it calls onStale(): GitHub Actions cron is
-// best-effort, so the default assumption is a *missed* tick and it re-triggers the backup once — but
-// only when the last run succeeded (a *broken* backup is paged, not retried, to avoid a trigger loop).
+// Freshness is slot-based: if the CURRENT cadence slot (staleness.slot-minutes) still has no backup once
+// staleness.grace-minutes past its boundary, it calls onStale() — so a missed tick is caught ~grace minutes
+// later, not after the multi-hour max-age wait. staleness.max-age-hours is only a backstop (pages if the
+// slot math is misconfigured). GitHub Actions cron is best-effort, so the default assumption is a *missed*
+// tick and it re-triggers the backup once — but only when the last run succeeded (a *broken* backup is
+// paged, not retried, to avoid a trigger loop).
 //
 // Usage:
 //   PROFILE=profiles/example.yaml npx tsx scripts/check-staleness.ts
@@ -21,7 +24,7 @@ import "./lib/bootEnv.js"; // MUST be first — loads $PROFILE before backupType
 
 import { loadStalenessConfig } from "./lib/config.js";
 import { run, capture, commandExists } from "./lib/proc.js";
-import { stampToEpochMs } from "./lib/schedule.js";
+import { slotState, stampToEpochMs } from "./lib/schedule.js";
 import { slackOneoff, slackDailyRefresh, alertWebhook } from "./lib/slack.js";
 
 async function main(): Promise<void> {
@@ -35,6 +38,8 @@ async function main(): Promise<void> {
   const r2Key = cfg.credentials.r2.accessKeyId!;
   const r2Secret = cfg.credentials.r2.secretAccessKey!;
   const staleHours = cfg.staleness.maxAgeHours;
+  const slotMinutes = cfg.staleness.slotMinutes;
+  const graceMinutes = cfg.staleness.graceMinutes;
   const minBytes = cfg.dump.minBytes;
   const backupWorkflow = cfg.staleness.healWorkflow;
 
@@ -184,12 +189,25 @@ async function main(): Promise<void> {
   // elapsed-but-empty 2-hourly buckets. No-op when today has no message yet.
   await slackDailyRefresh().catch(() => {});
 
-  console.log(`Newest 2hourly object: ${newest} — ${ageH}h ${ageM}m old (threshold ${staleHours}h)`);
-  if (ageH < staleHours) {
-    console.log(`✓ Fresh: newest backup is ${ageM}m old (< ${staleHours}h)`);
+  // Slot-based freshness: did THIS cadence slot's backup land? A missed slot is caught ~grace minutes
+  // past its boundary, so recovery tracks the grace window — not the (necessarily large) max-age
+  // backstop, which a healthy 2-hourly system reaches by design. maxAgeHours is retained as a backstop:
+  // if slot-minutes is misconfigured (or the slot math drifts), a truly ancient object still pages.
+  const { overdue, slotStartMs } = slotState(nowMs, epochMs, slotMinutes, graceMinutes);
+  const slotIso = new Date(slotStartMs).toISOString();
+  console.log(
+    `Newest 2hourly object: ${newest} — ${ageH}h ${ageM}m old ` +
+      `(slot ${slotIso}, grace ${graceMinutes}m, backstop ${staleHours}h)`,
+  );
+  if (!overdue && ageH < staleHours) {
+    console.log(`✓ Fresh: newest backup is ${ageM}m old; current slot (${slotIso}) satisfied`);
     return;
   }
-  await onStale(`newest backup ${newest} is ${ageH}h old (> ${staleHours}h)`);
+  await onStale(
+    overdue
+      ? `slot ${slotIso} backup is overdue (>${graceMinutes}m past the boundary; newest ${newest} is ${ageM}m old)`
+      : `newest backup ${newest} is ${ageH}h old (> ${staleHours}h backstop)`,
+  );
 }
 
 main().catch((e) => {

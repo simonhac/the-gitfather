@@ -94,7 +94,7 @@ Everything here has a safe default or is feature-gated. Ask, but offer the defau
 |---|---|---|
 | `anchor-hour-utc` | `16` | the UTC hour whose run is also promoted to daily/weekly/monthly tiers |
 | `dump.min-bytes` | `1048576` (1 MB) | abort the upload if the dump is smaller (catches a truncated dump) |
-| `staleness.max-age-hours` | `3` (example.yaml suggests `5`) | staleness alert if newest 2-hourly object is older than this |
+| `staleness.max-age-hours` | `3` (example.yaml suggests `5`) | backstop: alert if the newest 2-hourly object is older than this (the **primary** trigger is the slot-based overdue check — see 3e) |
 | `drill.min-row-ratio` | `0.95` | restored/live row-count floor for the drill sentinel table |
 | `drill.max-row-ratio` | `2.0` | restored/live row-count ceiling — catches duplicated/double-restored rows |
 | `dump.flags` | `-Fc --no-owner --no-privileges` | pg_dump flags; tune per database (e.g. `--exclude-schema=…`) |
@@ -155,6 +155,8 @@ Everything here has a safe default or is feature-gated. Ask, but offer the defau
 
 | Variable | Default | Meaning |
 |---|---|---|
+| `staleness.slot-minutes` | `120` | backup cadence in minutes — **must match your backup cron interval** (`0 */2` = 120). The primary freshness trigger: a slot with no backup past its grace window is "overdue" |
+| `staleness.grace-minutes` | `25` | minutes past a slot boundary before it counts as overdue (**must be < slot-minutes**). Trades faster recovery against redundant heals on scheduler jitter |
 | `staleness.self-heal` | `true` | on a missed tick, re-trigger the backup workflow via `gh` (needs `gh` auth + `GITHUB_REPOSITORY`) |
 | `staleness.dry-run` | `false` | staleness check evaluates but takes no action |
 | `staleness.heal-workflow` | `pg-backup.yml` | workflow file self-heal triggers |

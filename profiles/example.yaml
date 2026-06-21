@@ -67,8 +67,11 @@ verify-durable:                # daily durable-tier verification (verify-durable
   max-restores: 2              # cap full restores per run (hash-checks uncapped)
 
 staleness:                     # check-staleness.ts
-  max-age-hours: 5             # alert if the newest 2hourly object is older than this
-  heal-workflow: pg-backup.yml # the workflow self-heal re-triggers on a missed tick
+  slot-minutes: 120            # backup cadence in minutes — MUST match the backup cron interval (0 */2 = 120)
+  grace-minutes: 25            # minutes past a slot boundary before it's "overdue" — trades faster recovery
+                               #   (≈ grace + check interval) against redundant heals on scheduler jitter
+  max-age-hours: 5             # backstop: page if the newest 2hourly object is older than this (slot logic is primary)
+  heal-workflow: pg-backup.yml # the workflow self-heal re-triggers on a missed slot
   self-heal: true              # false = alert only (never auto-retry)
   dry-run: false               # true = log the trigger, don't fire
 

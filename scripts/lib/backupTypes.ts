@@ -79,6 +79,9 @@ export interface LogRun {
   runUrl: string | null;
   /** Raw failure reason — PRIVATE only, never published. */
   error: string | null;
+  /** Whole backup-script wall time in ms (process start → run-log append). null on records
+   * predating this field. PRIVATE — a dump-time trend signal, not published. */
+  durationMs: number | null;
 }
 
 export interface LogVerification {

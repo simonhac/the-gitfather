@@ -163,7 +163,11 @@ const verifyDurableGroup = z
 
 const stalenessGroup = z
   .object({
-    maxAgeHours: intIn(3, 1, Number.MAX_SAFE_INTEGER), // alert if newest 2hourly object is older than this
+    // Primary trigger is slot-based (slotMinutes/graceMinutes); maxAgeHours is a backstop that still
+    // pages if the slot math is misconfigured and a truly ancient object slips through.
+    maxAgeHours: intIn(3, 1, Number.MAX_SAFE_INTEGER), // backstop: page if newest 2hourly object is older than this
+    slotMinutes: intIn(120, 1, 1440), // backup cadence in minutes — MUST match the caller's cron interval
+    graceMinutes: intIn(25, 0, 720), // minutes past a slot boundary before the slot counts as overdue
     healWorkflow: strDefault("pg-backup.yml"), // workflow self-heal re-triggers
     selfHeal: boolIn(true),
     dryRun: boolIn(false),
@@ -287,10 +291,25 @@ function requireDrillCreds(v: Profile, ctx: Ctx): void {
 export const drillSchema = profileSchema.superRefine(requireDrillCreds);
 export const verifyDurableSchema = profileSchema.superRefine(requireDrillCreds);
 
+function requireValidStalenessSlot(v: Profile, ctx: Ctx): void {
+  // grace must sit strictly inside the slot: if grace ≥ slot, dueMs always lands in a LATER slot than the
+  // one `now` is in, so the current slot can never be flagged overdue — slot-based self-heal silently never
+  // fires and recovery falls back to the slow max-age-hours backstop. See lib/schedule.ts slotState().
+  if (v.staleness.graceMinutes >= v.staleness.slotMinutes) {
+    miss(
+      ctx,
+      ["staleness", "graceMinutes"],
+      `must be less than staleness.slot-minutes (${v.staleness.slotMinutes}); otherwise the current slot can ` +
+        `never be flagged overdue and slot-based self-heal silently falls back to the max-age-hours backstop`,
+    );
+  }
+}
+
 export const stalenessSchema = profileSchema
   .superRefine(requireNameAndPrefix)
   .superRefine(requireR2)
-  .superRefine(requireSlackChannel);
+  .superRefine(requireSlackChannel)
+  .superRefine(requireValidStalenessSlot);
 
 /**
  * Dashboard config. R2_BUCKET / name requirements depend on RUNTIME flags (reading logs from R2 vs
