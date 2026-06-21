@@ -154,7 +154,7 @@ function makeSample(now: Date): { runs: LogRun[]; verifications: LogVerification
       const error = inOutage
         ? "pg_dump: could not connect to server: Connection refused"
         : "pg_dump: server closed the connection unexpectedly";
-      runs.push({ ts, ok: false, tiers: [], bytes: null, key: null, sha256: null, runId: null, runUrl: ghRun(t), error });
+      runs.push({ ts, ok: false, tiers: [], bytes: null, key: null, sha256: null, runId: null, runUrl: ghRun(t), error, durationMs: 26_000 });
       continue;
     }
 
@@ -170,7 +170,7 @@ function makeSample(now: Date): { runs: LogRun[]; verifications: LogVerification
     const jitter = 1 + (rand() - 0.5) * 0.02; // ±1% intraday
     const bytes = Math.round(trend * dayWobble * jitter);
 
-    runs.push({ ts, ok: true, tiers, bytes, key: null, sha256: null, runId: null, runUrl: ghRun(t), error: null });
+    runs.push({ ts, ok: true, tiers, bytes, key: null, sha256: null, runId: null, runUrl: ghRun(t), error: null, durationMs: 92_000 });
   }
 
   // A couple of slots with more than one run, to exercise the multi-run rendering: when two
@@ -183,11 +183,11 @@ function makeSample(now: Date): { runs: LogRun[]; verifications: LogVerification
   // (a) Mixed slot: the scheduled run (already added by the loop, OK) plus a manual rerun ~40 min
   //     later that failed → diagonal split (green/red) + notch.
   const mixed = bucket(20) + 40 * 60_000;
-  runs.push({ ts: iso(mixed), ok: false, tiers: [], bytes: null, key: null, sha256: null, runId: null, runUrl: ghRun(mixed), error: "pg_dump: canceled statement due to lock_timeout" });
+  runs.push({ ts: iso(mixed), ok: false, tiers: [], bytes: null, key: null, sha256: null, runId: null, runUrl: ghRun(mixed), error: "pg_dump: canceled statement due to lock_timeout", durationMs: 31_000 });
 
   // (b) Multi-success slot: the scheduled run plus a successful manual rerun ~50 min later → notch.
   const rerun = bucket(40) + 50 * 60_000;
-  runs.push({ ts: iso(rerun), ok: true, tiers: ["2hourly"], bytes: 4_840_000_000, key: null, sha256: null, runId: null, runUrl: ghRun(rerun), error: null });
+  runs.push({ ts: iso(rerun), ok: true, tiers: ["2hourly"], bytes: 4_840_000_000, key: null, sha256: null, runId: null, runUrl: ghRun(rerun), error: null, durationMs: 88_000 });
 
   // One restore drill per weekly anchor (Sunday daily backup), run ~30 h later. ~97% pass.
   const weekly = runs.filter((r) => r.ok && r.tiers.includes("weekly")).map((r) => r.ts);

@@ -99,10 +99,21 @@ test("drill: min-row-ratio in 0..1; max-row-ratio default 2 (>=1); max-row-drop 
   assert.ok(!drillSchema.safeParse({ ...drillBase, drill: { ...drillBase.drill, maxRowRatio: 0.5 } }).success);
 });
 
-test("staleness: max-age-hours positive; min-bytes default + coercion", () => {
-  assert.equal(stalenessSchema.safeParse(stalenessBase).data?.staleness.maxAgeHours, 3);
+test("staleness: max-age-hours positive; slot/grace defaults; min-bytes default + coercion", () => {
+  const s = stalenessSchema.safeParse(stalenessBase).data?.staleness;
+  assert.equal(s?.maxAgeHours, 3);
+  assert.equal(s?.slotMinutes, 120);
+  assert.equal(s?.graceMinutes, 25);
   assert.ok(!stalenessSchema.safeParse({ ...stalenessBase, staleness: { maxAgeHours: 0 } }).success);
   assert.equal(stalenessSchema.safeParse({ ...stalenessBase, dump: { minBytes: 2048 } }).data?.dump.minBytes, 2048);
+});
+
+test("staleness: grace-minutes must be < slot-minutes (else the slot can never go overdue)", () => {
+  assert.ok(stalenessSchema.safeParse({ ...stalenessBase, staleness: { graceMinutes: 119 } }).success); // < 120 default slot
+  assert.ok(!stalenessSchema.safeParse({ ...stalenessBase, staleness: { graceMinutes: 120 } }).success); // == slot
+  assert.ok(!stalenessSchema.safeParse({ ...stalenessBase, staleness: { graceMinutes: 200 } }).success); // > slot
+  assert.ok(!stalenessSchema.safeParse({ ...stalenessBase, staleness: { slotMinutes: 20, graceMinutes: 25 } }).success); // grace ≥ short slot
+  assert.ok(stalenessSchema.safeParse({ ...stalenessBase, staleness: { slotMinutes: 60, graceMinutes: 25 } }).success); // 25 < 60
 });
 
 // ── table-list split ─────────────────────────────────────────────────────────

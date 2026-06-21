@@ -203,8 +203,9 @@ jobs:
 name: My DB staleness check
 on:
   schedule:
-    - cron: "20 * * * *"         # twice hourly, off the top of the hour, so one dropped
-    - cron: "50 * * * *"         # scheduler tick doesn't blind the watchdog for an hour+
+    - cron: "*/10 * * * *"       # every 10 min — GitHub drops cron ticks in correlated clusters
+                                 # (backup + watchdog together), so 6 chances/hour keeps the watchdog
+                                 # live. It only ACTS when the current backup slot is overdue (grace-minutes).
   workflow_dispatch: {}
 concurrency: { group: pg-staleness-check, cancel-in-progress: false }
 jobs:
@@ -382,8 +383,8 @@ Slack/`ALERT_WEBHOOK_URL` page. The hash-vs-restore distinction drives the toolt
 Instead of one message per run (spam), the backup keeps **one message per day** and **updates it in
 place** — a `✅`/`❌` + `HH:MM` tick per 2-hourly run, in the profile's `timezone`. A failed run appends `❌` and
 posts a loud, `@here`-mentioning threaded alert. Any **elapsed-but-empty** 2-hourly bucket renders as
-`⬜ HH:00`, so a skipped run shows as a visible gap; the hourly staleness check re-renders the row so a
-just-missed slot surfaces within the hour. This needs a **bot token** (`chat.update`; incoming webhooks
+`⬜ HH:00`, so a skipped run shows as a visible gap; the staleness check (every ~10 min) re-renders the row so a
+just-missed slot surfaces within minutes. This needs a **bot token** (`chat.update`; incoming webhooks
 can't update). "Today's message" is persisted as a tiny JSON object at `_status/<basename>/<date>.json`
 in R2. If `SLACK_BOT_TOKEN`/`SLACK_CHANNEL` are unset, all Slack output is silently skipped.
 
@@ -470,7 +471,7 @@ The grammars are strict where a typo is genuinely catchable and lenient where th
 
 | Strict (catches typos) | Lenient (presence + light shape) |
 |---|---|
-| `encryption` ∈ {`none`,`age`,`aes-gcm`} · `anchor-hour-utc` 0–23 · `drill.min-row-ratio` 0–1 · `drill.max-row-ratio` ≥ 1 · `drill.max-row-drop` 0–1 · `staleness.max-age-hours` > 0 · `dump.min-bytes`/`verify-durable.retest-days`/`verify-durable.max-restores` (ints) · `timezone` (real IANA zone) · `retention.*` (durations like `13 weeks`) · booleans `staleness.self-heal`/`dry-run` · `integrity.checksum`/`check-structure`/`verify-after-upload` · `verify-durable.fresh`/`aged` (YAML `true`/`false` or `1/0/yes/no/on/off`) | credential ENV vars: `*_DATABASE_URL` scheme = `postgres(ql)://` · R2 account id / keys · bucket names (whitespace-free) · `AGE_RECIPIENT`/`AGE_IDENTITY` · `SLACK_BOT_TOKEN` · table-name lists (`drill.present-tables`/`nonempty-tables`) |
+| `encryption` ∈ {`none`,`age`,`aes-gcm`} · `anchor-hour-utc` 0–23 · `drill.min-row-ratio` 0–1 · `drill.max-row-ratio` ≥ 1 · `drill.max-row-drop` 0–1 · `staleness.max-age-hours` > 0 · `staleness.slot-minutes` 1–1440 · `staleness.grace-minutes` 0–720 · `dump.min-bytes`/`verify-durable.retest-days`/`verify-durable.max-restores` (ints) · `timezone` (real IANA zone) · `retention.*` (durations like `13 weeks`) · booleans `staleness.self-heal`/`dry-run` · `integrity.checksum`/`check-structure`/`verify-after-upload` · `verify-durable.fresh`/`aged` (YAML `true`/`false` or `1/0/yes/no/on/off`) | credential ENV vars: `*_DATABASE_URL` scheme = `postgres(ql)://` · R2 account id / keys · bucket names (whitespace-free) · `AGE_RECIPIENT`/`AGE_IDENTITY` · `SLACK_BOT_TOKEN` · table-name lists (`drill.present-tables`/`nonempty-tables`) |
 
 Conditional rules are enforced too: `encryption: age` ⇒ `AGE_RECIPIENT` (backup) / `AGE_IDENTITY`
 (drill, durable-verify); `integrity.verify-after-upload` + `encryption: age` ⇒ `AGE_IDENTITY` (backup);
@@ -541,7 +542,7 @@ keys). Credentials are **never** in it — they come from the environment (GitHu
 - **`drill:`** — `row-count-table`, `present-tables` (must exist), `nonempty-tables` (must exist +
   non-empty), `min-row-ratio`, `max-row-ratio`, `max-row-drop`
 - **`verify-durable:`** — `fresh`, `aged`, `retest-days`, `max-restores`
-- **`staleness:`** — `max-age-hours`, `heal-workflow`, `self-heal`, `dry-run`
+- **`staleness:`** — `slot-minutes`, `grace-minutes`, `max-age-hours`, `heal-workflow`, `self-heal`, `dry-run`
 - **`slack:`** — `alert-mention` (the channel id is env: `SLACK_CHANNEL`)  ·  **`dashboard:`** — `label`, `hide-run-links`, `url`
 
 All have safe defaults — see **[Verifying backups](#verifying-backups-integrity)**.

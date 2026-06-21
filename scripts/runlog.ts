@@ -6,7 +6,7 @@
 //   appendVerify({ ts, verifiedTs, ok, ratio? })
 //
 // CLI (kept for back-compat / direct use):
-//   tsx runlog.ts run    --ts ISO --ok true|false [--tiers "2hourly daily"] [--bytes N] [--key K] [--error MSG]
+//   tsx runlog.ts run    --ts ISO --ok true|false [--tiers "2hourly daily"] [--bytes N] [--key K] [--error MSG] [--duration MS]
 //   tsx runlog.ts verify --ts ISO --verified-ts ISO --ok true|false [--ratio R]
 //
 // Records land in _log/<name>/{runs,verifications}-YYYY-MM.jsonl in R2.
@@ -129,6 +129,8 @@ export interface RunRecordInput {
   sha256?: string | null;
   /** Raw failure reason — PRIVATE only, never published. */
   error?: string | null;
+  /** Whole backup-script wall time in ms (process start → this append). */
+  durationMs?: number | null;
 }
 
 /** Append a run record to the private R2 run-log. Best-effort (never throws). */
@@ -144,6 +146,7 @@ export function appendRun(input: RunRecordInput): void {
     runId,
     runUrl,
     error: input.error ?? null,
+    durationMs: input.durationMs ?? null,
   };
   appendRecord("runs", input.ts, record);
 }
@@ -201,6 +204,7 @@ function main(): void {
       bytes: flags.bytes ? Number(flags.bytes) : null,
       key: flags.key || null,
       error: flags.error || null,
+      durationMs: flags.duration ? Number(flags.duration) : null,
     });
   } else if (kind === "verify") {
     appendVerify({
