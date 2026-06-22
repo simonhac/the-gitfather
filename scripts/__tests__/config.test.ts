@@ -7,6 +7,7 @@ import {
   stalenessSchema,
   dashboardSchema,
   reportConfigError,
+  joinObjectKey,
 } from "../lib/config.js";
 
 // Minimal valid nested profiles (config from YAML + credentials from env). Tests mutate one field at a time.
@@ -189,6 +190,21 @@ test("dashboard: --upload requires DASHBOARD_R2_BUCKET; reading R2 requires R2_B
   assert.ok(!dashboardSchema({ upload: true }).safeParse({}).success);
   assert.ok(dashboardSchema({ upload: true }).safeParse({ credentials: { dashboardR2: { bucket: "d" } } }).success);
   assert.ok(dashboardSchema().safeParse({}).success); // no flags → no required buckets (e.g. --sample)
+});
+
+test("dashboard: path-prefix defaults to '' and accepts a value (shared-bucket key prefix)", () => {
+  assert.equal(dashboardSchema().safeParse({}).data?.dashboard.pathPrefix, "");
+  assert.equal(dashboardSchema().safeParse({ dashboard: { pathPrefix: "backups" } }).data?.dashboard.pathPrefix, "backups");
+});
+
+test("joinObjectKey: slash-clean — empty prefix, set prefix, and stray slashes never yield '//'", () => {
+  assert.equal(joinObjectKey("", "boost", "index.html"), "boost/index.html");
+  assert.equal(joinObjectKey("backups", "boost", "index.html"), "backups/boost/index.html");
+  assert.equal(joinObjectKey("/backups/", "boost", "index.html"), "backups/boost/index.html");
+  assert.equal(joinObjectKey("backups/sub", "boost", "index.html"), "backups/sub/boost/index.html");
+  for (const k of [joinObjectKey("", "boost", "index.html"), joinObjectKey("/backups/", "boost", "index.html")]) {
+    assert.ok(!k.includes("//") && !k.startsWith("/") && !k.endsWith("/"), `clean key: ${k}`);
+  }
 });
 
 // ── Error reporting: secret-safe; kebab YAML keys + ENV names for credentials ──

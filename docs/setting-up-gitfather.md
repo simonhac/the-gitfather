@@ -131,7 +131,8 @@ Everything here has a safe default or is feature-gated. Ask, but offer the defau
 |---|---|---|
 | `dashboard.label` | `name` | project label shown on the public page |
 | `dashboard.hide-run-links` | `false` | also drop run links from the public page |
-| `DASHBOARD_R2_BUCKET` | — | the **separate public** bucket the built page is uploaded to (variable) |
+| `dashboard.path-prefix` | `""` | object-key prefix in the dashboard bucket: `<path-prefix>/<name>/index.html` (`""` → `<name>/index.html`). Set it (e.g. `backups`) to share **one** dashboard bucket + custom domain across projects — e.g. `https://ops.example.com/backups/<name>/index.html`. Keep `dashboard.url` consistent with it. |
+| `DASHBOARD_R2_BUCKET` | — | the **separate public** bucket the built page is uploaded to (variable) — may be **shared** across projects when `path-prefix`/`name` keep their keys distinct |
 | `DASHBOARD_R2_ACCESS_KEY_ID` / `DASHBOARD_R2_SECRET_ACCESS_KEY` | — | write-only S3 token for the public bucket (secrets) |
 
 > **Getting `dashboard.url` — fetch it yourself, with permission.** The public hostname is an opaque

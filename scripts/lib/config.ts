@@ -187,8 +187,22 @@ const dashboardGroup = z
     label: opt(nonEmpty()),
     hideRunLinks: boolIn(false),
     url: opt(z.url()),
+    // YAML: path-prefix. Object-key prefix under the (possibly shared) dashboard bucket, so several
+    // projects can live behind one custom domain: <path-prefix>/<name>/index.html. Default "" → no
+    // prefix (<name>/index.html). Leading/trailing slashes are tolerated (see joinObjectKey).
+    pathPrefix: strDefault(""),
   })
   .strict().prefault({} as never);
+
+/**
+ * Join object-key segments into a clean R2 key: split each on "/", drop blanks, rejoin with "/".
+ * Guarantees no "//" and no leading/trailing slash, and tolerates a path-prefix written as
+ * "backups", "/backups", or "backups/". e.g. ("", "boost", "index.html") → "boost/index.html";
+ * ("/backups/", "boost", "index.html") → "backups/boost/index.html".
+ */
+export function joinObjectKey(...segments: string[]): string {
+  return segments.flatMap((s) => s.split("/")).filter(Boolean).join("/");
+}
 
 // ── Credentials (from env/secrets; all optional here — per-task refinements require them) ──
 

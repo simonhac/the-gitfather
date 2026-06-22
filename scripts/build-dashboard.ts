@@ -19,7 +19,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadDashboardConfig, retentionFromConfig } from "./lib/config.js";
+import { loadDashboardConfig, retentionFromConfig, joinObjectKey } from "./lib/config.js";
 import { readLogDir, downloadLogsFromR2 } from "./lib/logStore.js";
 import type { LogRun, LogVerification, PublicPayload, BackupTier } from "./lib/backupTypes.js";
 
@@ -100,12 +100,15 @@ async function main(): Promise<void> {
   if (upload) {
     const dbucket = cfg.credentials.dashboardR2.bucket; // schema-required with --upload; guard kept for the type
     if (!dbucket) throw new Error("DASHBOARD_R2_BUCKET must be set to --upload");
+    // Object key under the (possibly shared) dashboard bucket: <path-prefix>/<name>/index.html.
+    // joinObjectKey keeps it slash-clean so an empty prefix or stray slashes never yield "//".
+    const objectKey = joinObjectKey(cfg.dashboard.pathPrefix, cfg.name ?? "", "index.html");
     execFileSync(
       "rclone",
-      ["copyto", outPath, `r2dash:${dbucket}/index.html`, "--s3-no-check-bucket", "--header-upload", "Content-Type: text/html; charset=utf-8"],
+      ["copyto", outPath, `r2dash:${dbucket}/${objectKey}`, "--s3-no-check-bucket", "--header-upload", "Content-Type: text/html; charset=utf-8"],
       { stdio: "inherit" },
     );
-    console.log(`dashboard: uploaded → r2dash:${dbucket}/index.html`);
+    console.log(`dashboard: uploaded → r2dash:${dbucket}/${objectKey}`);
   }
 }
 
