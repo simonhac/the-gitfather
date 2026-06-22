@@ -24,6 +24,11 @@ on:
         type: string
         required: false
         default: ""
+      pg_service_image:
+        description: "Postgres image the drill restores INTO — must be >= your server's major (e.g. postgres:18). Restoring a dump into an OLDER server is unsupported."
+        type: string
+        required: false
+        default: "postgres:17"
     # Secrets passed EXPLICITLY by the caller (inherit only works same-org/enterprise; this repo is
     # owned by a different account than its consumers). Non-secret config is threaded via inputs.
     secrets:
@@ -48,7 +53,7 @@ jobs:
     timeout-minutes: 30
     services:
       pg:
-        image: postgres:17
+        image: ${{ inputs.pg_service_image }}
         env:
           POSTGRES_PASSWORD: drill
         ports:
