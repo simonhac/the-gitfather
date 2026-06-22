@@ -16,6 +16,11 @@ row and a static backup-history dashboard. The engine knows nothing about any on
 project-specific lives in a `profiles/*.yaml` file kept in *your* repo, and credentials come from the
 environment (GitHub secrets), never from the repo. See [Where this fits: 3-2-1-1-0](#where-this-fits-3-2-1-1-0).
 
+> **Setting up?** The fastest path is to hand [`docs/setting-up-gitfather.md`](docs/setting-up-gitfather.md)
+> to an AI coding agent — a guided walkthrough that interviews you for each value, writes the profile +
+> secrets, and finishes with a green `doctor` check. Prefer to wire it by hand? See
+> [Wiring a consuming repo](#wiring-a-consuming-repo) below.
+
 ```
 the-gitfather/
   scripts/
@@ -92,6 +97,9 @@ your-repo                              the-gitfather (this repo, public)
 ---
 
 ## Wiring a consuming repo
+
+> 💡 Want this done for you? [`docs/setting-up-gitfather.md`](docs/setting-up-gitfather.md) is an
+> LLM-guided walkthrough of every step below.
 
 ### 1. Add your profile
 
