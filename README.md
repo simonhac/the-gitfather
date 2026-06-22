@@ -424,7 +424,9 @@ _log/<basename>/verifications-YYYY-MM.jsonl   # {ts, verifiedTs, ok, ratio, tier
 published). Monthly files roll over by name; an R2 lifecycle rule trims old months. `build-dashboard.ts`
 reads the logs, **scrubs** them to a public payload (drops `sha256`, `key`, `counts`, `reason`, and raw
 error text), `esbuild`-bundles the SVG renderer into a single `index.html`, and uploads it to the
-**separate public** dashboard bucket.
+**separate public** dashboard bucket at `<path-prefix>/<name>/index.html` (`dashboard.path-prefix`,
+default `""` → `<name>/index.html`). Setting `path-prefix` lets several projects share one dashboard
+bucket + custom domain, e.g. `https://ops.example.com/backups/<name>/index.html`.
 
 > **Privacy.** The published page includes the project label + sizes + tiers + timestamps + verification
 > ratio + run links; it **drops raw error text** (set `dashboard.hide-run-links: true` to also drop run
@@ -543,7 +545,7 @@ keys). Credentials are **never** in it — they come from the environment (GitHu
   non-empty), `min-row-ratio`, `max-row-ratio`, `max-row-drop`
 - **`verify-durable:`** — `fresh`, `aged`, `retest-days`, `max-restores`
 - **`staleness:`** — `slot-minutes`, `grace-minutes`, `max-age-hours`, `heal-workflow`, `self-heal`, `dry-run`
-- **`slack:`** — `alert-mention` (the channel id is env: `SLACK_CHANNEL`)  ·  **`dashboard:`** — `label`, `hide-run-links`, `url`
+- **`slack:`** — `alert-mention` (the channel id is env: `SLACK_CHANNEL`)  ·  **`dashboard:`** — `label`, `hide-run-links`, `url`, `path-prefix`
 
 All have safe defaults — see **[Verifying backups](#verifying-backups-integrity)**.
 

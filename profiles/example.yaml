@@ -83,3 +83,6 @@ dashboard:                     # optional public backup-history dashboard
   label: ""                    # display label; defaults to `name`
   hide-run-links: false        # true = drop GitHub run links from the public page
   url: ""                      # if set, the Slack header's "<name> DB backup" links here
+  path-prefix: ""              # object-key prefix in the dashboard bucket: <path-prefix>/<name>/index.html.
+                               # "" → <name>/index.html. Set it (e.g. "backups") to share ONE bucket +
+                               # custom domain across projects, e.g. https://ops.example.com/backups/<name>/index.html
