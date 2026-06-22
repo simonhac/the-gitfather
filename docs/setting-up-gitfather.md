@@ -10,19 +10,66 @@ know, and only move on once a section is complete.
 
 ---
 
+## Architecture & the critical path (read first)
+
+the-gitfather is an **engine** repo. You don't fork it or run backups *from* it — you **call its
+reusable workflows from the operator's own repo**. Their repo holds three things only: a **profile**,
+thin **caller workflows**, and **secrets/variables**. Each reusable workflow checks out *two* repos at
+run time: the caller repo (for the profile) and this one (for the scripts). Establish this with the user
+up front — it's the single fact that makes everything below make sense.
+
+```
+their-repo                          the-gitfather (engine, public)
+  pg-backup/<name>.yaml   ──┐         scripts/  +  dashboard/
+  .github/workflows/        └─uses─►   .github/workflows/  (reusable: workflow_call)
+    pg-backup.yml ────────────────►     pg-backup.yml
+    pg-durable-verify.yml ────────►     pg-durable-verify.yml   (daily; supersedes the weekly drill)
+    pg-staleness-check.yml ───────►     pg-staleness-check.yml
+    pg-dashboard.yml ─────────────►     pg-dashboard.yml
+```
+
+**The critical path — drive it in this order:**
+
+1. **Create the R2 bucket(s), lifecycle rules, WORM locks, and a scoped no-delete S3 token** (§1 +
+   README "Create the buckets"; account-level Cloudflare creds). For the dashboard, also create a
+   **separate public** bucket + a write-only token. **`doctor` cannot pass until these exist.**
+2. **Get a direct Postgres connection string** — not a transaction-mode pooler (§2b).
+3. **Write the profile** (`pg-backup/<name>.yaml`, committed to their repo) and the local
+   `.context/gitfather-secrets.env` (§4).
+4. **Clone this engine repo, `npm ci`, and run `doctor`** against that profile (§5) — `npm run doctor`
+   lives *here*, not in their repo.
+5. **Move credentials into GitHub Secrets** (and `R2_BUCKET` / `DASHBOARD_R2_BUCKET` / `SLACK_CHANNEL`
+   into **Variables**), then **add the caller workflows** (README "Wiring a consuming repo"), pointing
+   `profile:` at the new file. Pushing workflow files needs a token with the **`workflow`** scope.
+6. **Prove it:** trigger `pg-backup` via `workflow_dispatch` and confirm an object lands in R2.
+
+**Three things `doctor` cannot catch — a green checklist is *not* a proven backup:**
+
+- a **transaction-mode pooler** that answers `select 1` but breaks `pg_dump` (§2b);
+- a **lifecycle / bucket-lock** misconfiguration — `doctor` only probes that the bucket is *reachable*,
+  not that retention/immutability are correct;
+- **`secrets: inherit` across owners** — it silently passes *nothing* when the caller repo is owned by a
+  different account than this one, so every secret reads empty (see the README "Troubleshooting"). The
+  caller workflows must pass each secret explicitly.
+
+Only a real backup run (a `workflow_dispatch` of `pg-backup`, or a local `backup-pg-to-r2.ts`) proves
+the end-to-end path.
+
+---
+
 ## 0. The shape of the task
 
 There are **two kinds of input**, and they live in **two different files**:
 
 | Kind | What | Where it goes | Committed? |
 |---|---|---|---|
-| **Config** | project choices (prefix, basename, schedule, thresholds, tz…) | `profiles/<name>.yaml` | ✅ yes — checked into the consuming repo |
+| **Config** | project choices (prefix, basename, schedule, thresholds, tz…) | `pg-backup/<name>.yaml` (in the consuming repo) | ✅ yes — checked into the consuming repo |
 | **Credentials** | DB URLs, R2 keys, Slack token… | environment / GitHub Secrets; locally a **gitignored** file under `.context/` | ❌ **never** committed |
 
 Your job is to produce three things, in order:
 
 1. `.context/gitfather-setup.md` — the running interview record (what the user told you, decisions, open questions).
-2. `profiles/<name>.yaml` — the committed config profile (copy of `profiles/example.yaml`, filled in).
+2. `pg-backup/<name>.yaml` — the committed config profile **in the consuming repo** (copied *out of* the engine's `profiles/example.yaml`, then filled in; don't edit the engine's copy in place).
 3. `.context/gitfather-secrets.env` — a gitignored credentials file used **only** to run `doctor` locally. It mirrors what the user will later store as GitHub Secrets/Variables.
 
 Then you run `npm run doctor -- all` with both files in scope and interpret the result.
@@ -40,7 +87,7 @@ Then you run `npm run doctor -- all` with both files in scope and interpret the 
 
 - `node` + `npm ci` already run (installs `tsx`, `zod`, `esbuild`).
 - CLI tools on PATH: `rclone`, `pg_dump`, `pg_restore`, `psql`. Plus `age` **only if** they choose `encryption: age`, and `gh` **only if** staleness self-heal is on (the default).
-- The Cloudflare R2 buckets already exist with lifecycle + lock rules applied. This is a **one-time manual step** done with account-level Cloudflare creds — see the README "Create the buckets" / wrangler section. The engine does **not** create buckets; `doctor` only probes that they're reachable.
+- The Cloudflare R2 buckets already exist with lifecycle + lock rules applied. This is a **one-time manual step** done with account-level Cloudflare creds — see the README "Create the buckets" / wrangler section. The engine does **not** create buckets; `doctor` only probes that they're reachable. This is **critical-path step 1** (see the Architecture section) — nothing else can be validated until it's done. If you're enabling the dashboard, also create a **separate public** bucket + a **write-only** S3 token for it.
 
 If buckets don't exist yet, pause the setup and walk the user through the README's `wrangler r2 bucket create / lifecycle add / lock add` commands first.
 
@@ -62,7 +109,7 @@ column is what you tell a user who doesn't already know the value.
 
 | Variable | Meaning | How to get it |
 |---|---|---|
-| `PG_BACKUP_DATABASE_URL` | source DB to dump | `postgres://USER:PW@HOST:5432/DB?sslmode=require`. From the DB provider's connection-string panel. If the provider has a pooler, use the **session** pooler. |
+| `PG_BACKUP_DATABASE_URL` | source DB to dump | `postgres://USER:PW@HOST:5432/DB?sslmode=require`. From the DB provider's connection-string panel. Use a **direct** (or session-*mode*) endpoint — **never a transaction-mode pooler**. Many providers' copy-paste string defaults to a PgBouncer pooler on **port 6432** (e.g. PlanetScale, Supabase); `pg_dump` needs the **direct** endpoint (often port **5432**) or it can fail/stall. doctor's `select 1` passes over a pooler, so confirm with a real `pg_dump`. |
 
 For the **restore drill** (only if they want automated restore verification — recommended):
 
@@ -98,7 +145,7 @@ Everything here has a safe default or is feature-gated. Ask, but offer the defau
 | `drill.min-row-ratio` | `0.95` | restored/live row-count floor for the drill sentinel table |
 | `drill.max-row-ratio` | `2.0` | restored/live row-count ceiling — catches duplicated/double-restored rows |
 | `dump.flags` | `-Fc --no-owner --no-privileges` | pg_dump flags; tune per database (e.g. `--exclude-schema=…`) |
-| `dump.client-major` | (unset) | if set, `doctor` checks your `pg_dump`/`pg_restore` major version ≥ this. Recommended — set it to your server's major version. |
+| `dump.client-major` | (unset) | **Ask the operator their Postgres *server* major and set this.** `doctor` then checks your `pg_dump`/`pg_restore` major ≥ this; the client major must be **≥ the server major**, and the drill / durable-verify `postgres:NN` service image must be **≥** it too (bump both together). |
 | `drill.present-tables` | (none) | space-separated tables that must each **exist** after restore (rows optional) |
 | `drill.nonempty-tables` | (none) | space-separated tables that must each exist **and** have ≥1 row after restore |
 
@@ -174,7 +221,7 @@ All default-on and safe — surface them only if the user asks *"how do you know
 |---|---|---|
 | `integrity.checksum` | `true` | record a SHA-256 of each uploaded object (the durable hash-verify baseline) |
 | `integrity.check-structure` | `true` | `pg_restore -l` TOC check before declaring a backup good (`encryption: none`) |
-| `integrity.verify-after-upload` | `false` | opt-in: re-download + (decrypt) + `pg_restore -l` after upload; the only **backup-time** structural check for age (needs `AGE_IDENTITY` in the backup job) |
+| `integrity.verify-after-upload` | `false` | opt-in: re-download + (decrypt) + `pg_restore -l` after upload; the only **backup-time** structural check for age (needs `AGE_IDENTITY` in the backup job). **Caveat:** the reusable `pg-backup.yml` does not currently accept an `AGE_IDENTITY` secret, so this is effectively unavailable for `encryption: age` until that secret is wired into the backup workflow. |
 | `verify-durable.fresh` | `true` | daily verify: hash-check each new durable object + restore the freshest `daily` |
 | `verify-durable.aged` | `true` | daily verify: restore the newest `weekly`/`monthly` ≥ `verify-durable.retest-days` old not yet restore-verified |
 | `verify-durable.retest-days` | `14` | age at which a weekly/monthly becomes secondary-due (set `13` to re-test inside the 14-day WORM lock) |
@@ -194,9 +241,10 @@ Keep a living markdown record as you interview: every value provided (redact sec
 placeholder like `‹set›`), every default accepted, and any TODOs (e.g. "bucket not created yet").
 This is your scratchpad and the user's audit trail.
 
-### 4b. Profile — `profiles/<name>.yaml`
+### 4b. Profile — `pg-backup/<name>.yaml` (in the consuming repo)
 
-Start from `profiles/example.yaml` and fill in the **config** values only — a single nested **YAML**
+Start from the engine's `profiles/example.yaml` — copy it **out** into the consuming repo (e.g.
+`pg-backup/<name>.yaml`), don't edit it in place — and fill in the **config** values only — a single nested **YAML**
 file (kebab-case keys; e.g. `retention.father`, `dump.client-major`). **No credentials here** — those come
 from the environment (the local secrets file below, or GitHub Secrets in CI). Leave optional keys at
 their defaults unless the user chose otherwise.
@@ -243,12 +291,21 @@ Postgres connect, Slack `auth.test`, `gh` auth, binary + pg-client-version check
 read-only — no dump, no upload, no workflow trigger, no Slack post — so it's safe against production
 credentials.
 
-Run it with the secrets file sourced and `PROFILE` pointed at the profile:
+> **Where doctor runs.** `npm run doctor` is a script of *this* (engine) repo, not the consuming repo.
+> Run it from a checkout of the-gitfather, with `$PROFILE` pointed at the consuming repo's profile and
+> the secrets file sourced:
+>
+> ```sh
+> git clone https://github.com/simonhac/the-gitfather && cd the-gitfather && npm ci
+> set -a; source /path/to/your-repo/.context/gitfather-secrets.env; set +a
+> PROFILE=/path/to/your-repo/pg-backup/<name>.yaml npm run doctor -- all
+> ```
 
-```sh
-set -a; source .context/gitfather-secrets.env; set +a
-PROFILE=profiles/<name>.yaml npm run doctor -- all
-```
+> **A green doctor is *not* a proven backup.** doctor checks *wiring* — it runs no dump, upload,
+> promotion, or restore. It can't catch a transaction-mode pooler that breaks `pg_dump` (§2b), a
+> lifecycle/lock misconfig, or `secrets: inherit` failing across owners. Treat the real go-live gate as a
+> manual `workflow_dispatch` of `pg-backup` (or a local `backup-pg-to-r2.ts` run) that lands an object in
+> R2.
 
 `-- all` checks `backup`, `drill`, `verify-durable`, `staleness`, and `dashboard`. You can scope to one
 task: `npm run doctor -- backup`.
@@ -313,8 +370,10 @@ mid-2026; if a UI label has moved, search the provider's docs rather than guessi
 ### Postgres (connection URLs)
 
 - **`PG_BACKUP_DATABASE_URL`** — from the DB provider's **Connect / Connection string** panel:
-  `postgres://USER:PW@HOST:5432/DB?sslmode=require`. If the provider offers a pooler, use the
-  **session** pooler.
+  `postgres://USER:PW@HOST:5432/DB?sslmode=require`. Use a **direct** (or session-*mode*) endpoint,
+  **never a transaction-mode pooler**: many providers default the copy-paste string to a PgBouncer
+  pooler on **port 6432** (e.g. PlanetScale, Supabase), but `pg_dump` needs the **direct** endpoint
+  (often port **5432**). doctor's `select 1` succeeds over a pooler, so verify with a real `pg_dump`.
 - **`PG_LIVE_DATABASE_URL`** — usually the same as the backup URL (read-only row counts).
 - **`DRILL_DATABASE_URL`** — a **separate, throwaway** database you provision specifically for the
   drill; its contents get replaced on each restore.
@@ -342,10 +401,13 @@ mid-2026; if a UI label has moved, search the provider's docs rather than guessi
 
 Once doctor is green locally, tell the user the remaining steps the engine can't do for them:
 
-1. Commit `profiles/<name>.yaml` to their consuming repo (verify no secret leaked in).
+1. Commit `pg-backup/<name>.yaml` to their consuming repo (verify no secret leaked in).
 2. Move the credentials from `.context/gitfather-secrets.env` into GitHub **Secrets** (and the three
    bucket/channel values into GitHub **Variables**) — see the README secrets/variables table.
 3. Wire the caller workflows (`pg-backup.yml`, `pg-durable-verify.yml` — daily; supersedes the weekly
    `pg-restore-drill.yml` — `pg-staleness-check.yml`, `pg-dashboard.yml`) per the README "Wiring a
-   consuming repo" section, pointing `profile:` at the new profile.
+   consuming repo" section, pointing `profile:` at the new profile. **Pass every secret explicitly** —
+   `secrets: inherit` silently passes nothing when the caller repo is owned by a different account than
+   this one (the #1 first-run failure; see the README "Troubleshooting"). Pushing the workflow files
+   needs a token with the **`workflow`** scope.
 4. Delete `.context/gitfather-secrets.env` (or keep it knowing it's gitignored) once secrets are in GitHub.

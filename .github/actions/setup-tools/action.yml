@@ -1,9 +1,13 @@
 name: Set up backup tools
-description: Install a pinned rclone, and (optionally) the PostgreSQL client of a given major version.
+description: Install a pinned rclone, and (optionally) the PostgreSQL client of a given major version and the age CLI.
 
 inputs:
   pg-client-major:
     description: "PostgreSQL client major version to install (e.g. 17). Leave empty to skip pg client install."
+    required: false
+    default: ""
+  install-age:
+    description: "Set 'true' to install the age CLI (required when encryption: age — used to encrypt/decrypt dumps). Not preinstalled on GitHub runners."
     required: false
     default: ""
   rclone-version:
@@ -14,6 +18,17 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Install age (encryption=age)
+      if: inputs.install-age == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        # age is NOT preinstalled on ubuntu-latest; the backup/drill/durable-verify scripts shell out to
+        # it and hard-fail when missing. It's in the Ubuntu universe repo, so apt is enough.
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq age
+        age --version
+
     - name: Install rclone (+ optional pg client)
       shell: bash
       run: |

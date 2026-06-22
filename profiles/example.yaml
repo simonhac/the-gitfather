@@ -18,7 +18,8 @@
 #
 # Credentials expected in the environment (NOT set here):
 #   PG_BACKUP_DATABASE_URL   postgres://USER:PW@HOST:5432/DB?sslmode=require
-#                            (if your provider has a pooler, use the SESSION pooler)
+#                            (use a DIRECT / session-mode endpoint — NOT a transaction-mode pooler like
+#                             PgBouncer on :6432; pg_dump needs the direct endpoint, usually :5432)
 #   R2_ACCOUNT_ID / R2_BUCKET / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY
 #   DRILL_DATABASE_URL / PG_LIVE_DATABASE_URL   (restore-drill / durable-verify)
 #   SLACK_BOT_TOKEN          (optional) xoxb-… (scope chat:write) — enables the daily Slack row
