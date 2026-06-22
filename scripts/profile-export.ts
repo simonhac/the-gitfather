@@ -6,13 +6,16 @@
 //
 //   PROFILE=…/profile.yaml npx tsx scripts/profile-export.ts >> "$GITHUB_ENV"
 //
-// Currently just PG_CLIENT_MAJOR (for the pg-client install in setup-tools).
+// Emits PG_CLIENT_MAJOR (for the pg-client install in setup-tools) and ENCRYPTION
+// (so setup-tools can install the `age` CLI only when it's actually needed).
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { buildRawProfile } from "./lib/profile.js";
 
-const raw = buildRawProfile() as { dump?: { clientMajor?: unknown } };
+const raw = buildRawProfile() as { dump?: { clientMajor?: unknown }; encryption?: unknown };
 const clientMajor = raw.dump?.clientMajor;
 const pgClientMajor = typeof clientMajor === "number" || typeof clientMajor === "string" ? clientMajor : 17;
+const encryption = typeof raw.encryption === "string" ? raw.encryption : "none";
 
 process.stdout.write(`PG_CLIENT_MAJOR=${pgClientMajor}\n`);
+process.stdout.write(`ENCRYPTION=${encryption}\n`);

@@ -91,6 +91,7 @@ jobs:
       - uses: ./engine/.github/actions/setup-tools
         with:
           pg-client-major: ${{ env.PG_CLIENT_MAJOR }}
+          install-age: ${{ env.ENCRYPTION == 'age' }}
 
       - name: Durable verify
         working-directory: engine
