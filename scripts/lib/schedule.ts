@@ -65,3 +65,24 @@ export function slotState(
   const overdue = !landed && nowMs >= dueMs; // boundary + grace passed, still nothing landed
   return { overdue, landed, slotStartMs, dueMs };
 }
+
+/** Completed-run conclusions that count as a backup *not* succeeding (matches the staleness self-heal). */
+export const FAILED_CONCLUSIONS = ["failure", "cancelled", "timed_out", "startup_failure"];
+
+/**
+ * Does the backup look *persistently* broken (→ page, don't self-heal) rather than just a missed tick
+ * (→ retry)? `runs` is `gh run list … --json status,conclusion` output, newest-first. In-flight runs
+ * (in_progress/queued, null conclusion) carry no verdict and are ignored; we judge by the most recent
+ * COMPLETED runs and call it broken only when the two newest both failed.
+ *
+ * Why two, not one: a single failure can be a transient (a momentary DB/network blip) or an
+ * eventually-consistent / out-of-order API read — re-triggering once usually clears it. Refusing to retry
+ * on the *first* failure (the old behaviour) let one noisy run suppress self-heal until a backup landed by
+ * other means. With two-consecutive, a lone failure still self-heals; a genuinely broken backup pages
+ * after one wasted retry (the catch-up failure becomes the second consecutive failure). Pure + unit-tested.
+ */
+export function backupLooksBroken(runs: { status?: string; conclusion?: string | null }[]): boolean {
+  const completed = runs.filter((r) => r.status === "completed").map((r) => r.conclusion ?? "");
+  if (completed.length < 2) return false; // need two consecutive failures to call it broken
+  return FAILED_CONCLUSIONS.includes(completed[0]) && FAILED_CONCLUSIONS.includes(completed[1]);
+}
