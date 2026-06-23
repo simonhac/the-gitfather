@@ -24,7 +24,7 @@ import "./lib/bootEnv.js"; // MUST be first — loads $PROFILE before backupType
 
 import { loadStalenessConfig } from "./lib/config.js";
 import { run, capture, commandExists } from "./lib/proc.js";
-import { slotState, stampToEpochMs } from "./lib/schedule.js";
+import { backupLooksBroken, slotState, stampToEpochMs } from "./lib/schedule.js";
 import { slackOneoff, slackDailyRefresh, alertWebhook } from "./lib/slack.js";
 
 async function main(): Promise<void> {
@@ -57,14 +57,14 @@ async function main(): Promise<void> {
   };
 
   // onStale — handle a stale newest backup. Default assumption: a tick was MISSED → self-heal by
-  // re-triggering the backup. The one thing we must NOT do is hammer a genuinely BROKEN backup — so
-  // we only auto-retry when the last run succeeded (or none ran). Loop-safety, in order:
+  // re-triggering the backup. The one thing we must NOT do is hammer a *persistently* BROKEN backup — so
+  // we refuse to retry only when the backup is failing repeatedly, not on a single noisy run. In order:
   //   1. no gh / repo context / staleness.self-heal off → can't self-heal, page loudly.
   //   2. a backup already queued/running → let it finish, don't pile up.
-  //   3. last run failed/cancelled/timed-out → broken, not missed → page loudly, do NOT retry.
-  //   4. otherwise (last ok or none) → trigger ONE catch-up backup, post a quiet note.
-  // No persistent state: if the catch-up itself fails, the *next* hourly check sees last-run=failure
-  // and takes path 3 (loud). At most one trigger per invocation.
+  //   3. the two most recent COMPLETED runs both failed → broken, not missed → page loudly, do NOT retry.
+  //   4. otherwise (last completed ok, a single failure, or none) → trigger ONE catch-up backup, quiet note.
+  // No persistent state: a single failure still self-heals; if the catch-up also fails, the *next* check
+  // sees two consecutive failures and takes path 3 (loud). At most one trigger per invocation.
   const onStale = async (msg: string): Promise<never> => {
     process.stderr.write(`STALE: ${msg}\n`);
 
@@ -72,34 +72,31 @@ async function main(): Promise<void> {
       return fail(msg);
     }
 
-    let inflight = 0;
-    const inflRes = capture("gh", ["run", "list", `--workflow=${backupWorkflow}`, "--limit", "10", "--json", "status"]);
-    if (inflRes.ok) {
+    // One query feeds both checks: recent runs with status (for in-flight) + conclusion (broken vs missed).
+    let runs: { status?: string; conclusion?: string | null }[] = [];
+    const runsRes = capture("gh", ["run", "list", `--workflow=${backupWorkflow}`, "--limit", "10", "--json", "status,conclusion"]);
+    if (runsRes.ok) {
       try {
-        inflight = (JSON.parse(inflRes.out) as { status: string }[]).filter(
-          (r) => r.status === "in_progress" || r.status === "queued",
-        ).length;
+        runs = JSON.parse(runsRes.out) as { status?: string; conclusion?: string | null }[];
       } catch {
-        /* gh output unparseable → treat as none in-flight, like the bash empty-string path */
+        /* gh output unparseable → [] (none in-flight, retry-eligible), like the bash empty-string path */
       }
     }
+
+    const inflight = runs.filter((r) => r.status === "in_progress" || r.status === "queued").length;
     if (inflight !== 0) {
       await note(`🟡 PG backup STALE (${fileBasename}): ${msg} — a backup is already running; waiting it out.`);
       process.exit(0);
     }
 
-    let last = "";
-    const lastRes = capture("gh", ["run", "list", `--workflow=${backupWorkflow}`, "--limit", "1", "--json", "conclusion"]);
-    if (lastRes.ok) {
-      try {
-        last = (JSON.parse(lastRes.out) as { conclusion: string }[])[0]?.conclusion || "";
-      } catch {
-        /* unparseable → "" (retry-eligible), matching bash `// ""` */
-      }
+    // Broken vs missed: refuse to retry only when the backup is *persistently* failing (two most recent
+    // COMPLETED runs both failed). A single failure is a transient miss → still self-heal; if the catch-up
+    // also fails, the next check sees two consecutive failures and pages here. See backupLooksBroken().
+    if (backupLooksBroken(runs)) {
+      const failed = runs.find((r) => r.status === "completed")?.conclusion || "failure";
+      return fail(`${msg} — backup failing repeatedly (latest \`${failed}\`); not auto-retrying (broken, not missed).`);
     }
-    if (["failure", "cancelled", "timed_out", "startup_failure"].includes(last)) {
-      return fail(`${msg} — last backup run \`${last}\`; not auto-retrying (backup looks broken, not missed).`);
-    }
+    const last = runs.find((r) => r.status === "completed")?.conclusion || ""; // newest completed verdict, for the notes below
 
     if (cfg.staleness.dryRun) {
       await note(

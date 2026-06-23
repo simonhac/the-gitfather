@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { computeTiers, runOrigin, slotState, stampToEpochMs } from "../lib/schedule.js";
+import { backupLooksBroken, computeTiers, runOrigin, slotState, stampToEpochMs } from "../lib/schedule.js";
 
 test("runOrigin: schedule → schedule; dispatch/local → manual unless reason=self-heal", () => {
   assert.equal(runOrigin("schedule", undefined), "schedule");
@@ -86,4 +86,40 @@ test("slotState: 120-min slots align to even UTC hours (epoch-aligned)", () => {
 test("slotState: grace=0 → overdue the instant the boundary passes with nothing landed", () => {
   const s = slotState(H(4, 0) + 1, H(2, 50), 120, 0); // 1 ms past 04:00, no backup yet
   assert.equal(s.overdue, true);
+});
+
+const ok = { status: "completed", conclusion: "success" };
+const bad = { status: "completed", conclusion: "failure" };
+const timedOut = { status: "completed", conclusion: "timed_out" };
+const running = { status: "in_progress", conclusion: null };
+const queued = { status: "queued", conclusion: null };
+
+test("backupLooksBroken: newest completed run succeeded → missed tick, retry-eligible", () => {
+  assert.equal(backupLooksBroken([ok]), false);
+  assert.equal(backupLooksBroken([ok, bad]), false);
+});
+
+test("backupLooksBroken: a single completed failure (success before it) → transient, still retry", () => {
+  assert.equal(backupLooksBroken([bad, ok]), false);
+});
+
+test("backupLooksBroken: two consecutive completed failures → broken, do NOT retry", () => {
+  assert.equal(backupLooksBroken([bad, timedOut, ok]), true);
+});
+
+test("backupLooksBroken: in-flight runs carry no verdict and are ignored", () => {
+  // newest two are still running; completed history is one failure then success → not broken
+  assert.equal(backupLooksBroken([running, queued, bad, ok]), false);
+  // ...but two completed failures underneath in-flight runs still reads as broken
+  assert.equal(backupLooksBroken([running, bad, bad]), true);
+});
+
+test("backupLooksBroken: fewer than two completed runs → benefit of the doubt (retry)", () => {
+  assert.equal(backupLooksBroken([]), false);
+  assert.equal(backupLooksBroken([bad]), false);
+  assert.equal(backupLooksBroken([running]), false);
+});
+
+test("backupLooksBroken: a recent success between failures means it's recovering, not broken", () => {
+  assert.equal(backupLooksBroken([bad, ok, bad]), false);
 });
