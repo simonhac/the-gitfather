@@ -1,0 +1,25 @@
+{
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Template — copy to wrangler.jsonc (gitignored) and fill in the real bucket name.
+  //   cp wrangler.example.jsonc wrangler.jsonc
+  // Everything secret (GitHub token, client roster, trigger secret) is set OUT of band with
+  // `wrangler secret put …` — see README.md. The only per-deployment value here is the R2 bucket name.
+  // ─────────────────────────────────────────────────────────────────────────────
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "gitfather-scheduler",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-06-01",
+  "observability": { "enabled": true }, // retains invocation logs in the Cloudflare dashboard (free)
+
+  // ONE cron trigger — 1 of the free plan's 5. The handler decides which cadences are due per tick.
+  "triggers": { "crons": ["*/10 * * * *"] },
+
+  // The SHARED dashboard bucket. The Worker writes its state/log under the _scheduler/ prefix.
+  // Native binding = free, in-network (no S3 token, no egress). Replace with your real bucket name.
+  "r2_buckets": [{ "binding": "STATE", "bucket_name": "YOUR_SHARED_DASHBOARD_BUCKET" }]
+
+  // Secrets (NEVER committed — set with `wrangler secret put`):
+  //   GH_TOKEN        fine-grained PAT, Actions: Read and write, scoped to the client repos
+  //   CLIENTS         JSON roster: [{ "id","owner","repo","workflows": { cadence: "file.yml" } }]
+  //   TRIGGER_SECRET  random string gating the manual /trigger and /state endpoints
+}
