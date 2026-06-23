@@ -1,6 +1,8 @@
 node_modules/
 dashboard/dist/
 dist/
+scheduler/node_modules/
+scheduler/wrangler.jsonc
 *.dump
 *.dump.age
 *.dump.enc

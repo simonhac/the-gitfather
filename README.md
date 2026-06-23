@@ -94,6 +94,15 @@ your-repo                              the-gitfather (this repo, public)
     pg-dashboard.yml ────────uses────────►  pg-dashboard.yml
 ```
 
+> **Scheduling — GitHub cron *or* the Cloudflare scheduler.** The caller workflows below carry their own
+> `schedule:` cron, which is the simplest setup. GitHub's cron is best-effort, though — it delays and
+> occasionally drops ticks (the staleness watchdog exists to self-heal exactly that). If you run several
+> backups and want a single, more punctual, **free** scheduler, [`scheduler/`](scheduler/) is a one-Worker
+> Cloudflare alternative: it fires each caller's `workflow_dispatch` on a Cron Trigger and logs its state
+> to the shared dashboard bucket. To use it, **delete the `schedule:` blocks** from your callers (keep
+> `workflow_dispatch:`) and then deploy the Worker as the sole scheduler. See
+> [`scheduler/README.md`](scheduler/README.md).
+
 ---
 
 ## Wiring a consuming repo
