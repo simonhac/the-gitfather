@@ -40,30 +40,62 @@ see `runOrigin()` in `../scripts/lib/schedule.ts`. The other callers take no inp
 - **`wrangler.jsonc`** (gitignored) — copy from `wrangler.example.jsonc` and set the real shared
   dashboard bucket name. Nothing else here is secret.
 - **Secrets** (`wrangler secret put …`, never committed):
-  - `GH_TOKEN` — fine-grained PAT, **Actions: Read and write**, scoped to exactly your client repos.
-    (Hardening: a GitHub App minting short-lived installation tokens avoids a long-lived secret.)
-  - `CLIENTS` — the roster JSON (below). Keeps repo names out of the public source.
+  - `GH_APP_ID` — the GitHub App's id (the JWT `iss`). See [GitHub App setup](#github-app-setup).
+  - `GH_APP_PRIVATE_KEY` — the App private key as a **PKCS#8** PEM (`-----BEGIN PRIVATE KEY-----`). GitHub
+    issues PKCS#1; convert it **once** with `openssl pkcs8 -topk8 -nocrypt` (see below). The Worker signs a
+    short-lived JWT with it and mints per-repo, 1h `actions:write` installation tokens — there is **no
+    long-lived token to expire** (no silent-stop failure mode) and the blast radius is `actions:write` on the
+    installed repos only.
+  - `CLIENTS` — the roster JSON (below). Keeps repo names + installation ids out of the public source.
   - `TRIGGER_SECRET` — a random string gating `/trigger` and `/state`.
 
 ### `CLIENTS` roster
 
 The caller-workflow filenames are identical across consuming repos by convention, so they're **defaults**
-in the Worker (`DEFAULT_WORKFLOWS` in `src/index.ts`) — you don't repeat them per client. A client is just
-its `id` + `owner` + `repo`:
+in the Worker (`DEFAULT_WORKFLOWS` in `src/index.ts`) — you don't repeat them per client. A client is its
+`id` + `owner` + `repo` + the App's `installationId` on that owner:
 
 ```json
 [
-  { "id": "alpha", "owner": "your-org", "repo": "alpha-app" },
-  { "id": "beta",  "owner": "your-org", "repo": "beta-app", "cadences": ["backup", "staleness"] },
-  { "id": "gamma", "owner": "your-org", "repo": "gamma-app" }
+  { "id": "alpha", "owner": "your-org", "repo": "alpha-app", "installationId": 11111111 },
+  { "id": "beta",  "owner": "your-org", "repo": "beta-app",  "installationId": 22222222, "cadences": ["backup", "staleness"] },
+  { "id": "gamma", "owner": "other-org","repo": "gamma-app", "installationId": 33333333 }
 ]
 ```
 
 - `id` — opaque label; the **only** client identifier that ever reaches the logs (the shared bucket is public).
+- `installationId` — the App's installation id on this owner's account (see setup step 4). Not secret, but it
+  rides in `CLIENTS` so the public source carries no owner/repo/install identifiers.
 - `cadences` (optional) — restrict which cadences a client runs. Omit to run them all (the default).
   `beta` above opts out of `durableVerify`.
 - `workflows` (optional) — per-client filename overrides, only if a client named a caller file differently,
   e.g. `"workflows": { "backup": "pg-backup-eu.yml" }`.
+
+## GitHub App setup
+
+The Worker authenticates as a **GitHub App** rather than a personal access token: least privilege
+(`actions:write` on only the installed repos), short-lived auto-minted tokens (nothing to rotate, no
+silent-expiry outage), and one App can serve repos under **different owners** (a single fine-grained PAT
+cannot — it's scoped to one owner). One-time GitHub-side setup:
+
+1. **Create the App** — Settings → Developer settings → GitHub Apps → New. Repository permission
+   **Actions → Read and write** (everything else "No access"); **uncheck Webhook → Active**; "Where can
+   this be installed" → **Any account** (so it can be installed on other owners/orgs). Note the **App ID**.
+2. **Generate a private key** — on the App's page, "Generate a private key" (downloads a PKCS#1 PEM). Convert
+   it once to the PKCS#8 form WebCrypto needs, then **delete both local copies** after step 3:
+   ```sh
+   openssl pkcs8 -topk8 -nocrypt -in app.private-key.pem -out app.pkcs8.pem   # output starts BEGIN PRIVATE KEY
+   ```
+   Never commit either file (the repo is public).
+3. **Install** the App on each owner, selecting **only** that owner's one client repo. Installing on a single
+   repo (not "all repositories") is the real scope wall — even an un-down-scoped token can't reach others. For
+   orgs, an org owner may need to approve.
+4. **Record the installation ids** — from the install URL (`…/installations/<id>`) or with the App JWT:
+   ```sh
+   curl -s -H "Authorization: Bearer $APP_JWT" -H "Accept: application/vnd.github+json" \
+     https://api.github.com/repos/<owner>/<repo>/installation | jq .id
+   ```
+   Put each into its `CLIENTS` entry as `installationId`.
 
 ## Deploy
 
@@ -72,8 +104,9 @@ cd scheduler
 npm install
 cp wrangler.example.jsonc wrangler.jsonc      # then set the real bucket_name
 wrangler login                                 # or export CLOUDFLARE_API_TOKEN
-wrangler secret put GH_TOKEN                    # paste the PAT
-wrangler secret put CLIENTS                     # paste the roster JSON
+wrangler secret put GH_APP_ID                   # the App ID (setup step 1)
+wrangler secret put GH_APP_PRIVATE_KEY          # paste the full PKCS#8 PEM incl. BEGIN/END (setup step 2)
+wrangler secret put CLIENTS                     # paste the roster JSON (with installationIds)
 wrangler secret put TRIGGER_SECRET             # paste a random string
 npm run deploy
 ```

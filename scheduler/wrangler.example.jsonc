@@ -19,7 +19,9 @@
   "r2_buckets": [{ "binding": "STATE", "bucket_name": "YOUR_SHARED_DASHBOARD_BUCKET" }]
 
   // Secrets (NEVER committed — set with `wrangler secret put`):
-  //   GH_TOKEN        fine-grained PAT, Actions: Read and write, scoped to the client repos
-  //   CLIENTS         JSON roster: [{ "id","owner","repo","workflows": { cadence: "file.yml" } }]
-  //   TRIGGER_SECRET  random string gating the manual /trigger and /state endpoints
+  //   GH_APP_ID           GitHub App id (the JWT `iss`)
+  //   GH_APP_PRIVATE_KEY  the App private key as a PKCS#8 PEM ("BEGIN PRIVATE KEY") — convert GitHub's PKCS#1
+  //                       once with `openssl pkcs8 -topk8 -nocrypt`. See README "GitHub App setup".
+  //   CLIENTS             JSON roster: [{ "id","owner","repo","installationId", "workflows": { cadence: "file.yml" } }]
+  //   TRIGGER_SECRET      random string gating the manual /trigger and /state endpoints
 }
