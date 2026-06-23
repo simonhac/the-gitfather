@@ -97,6 +97,17 @@ cannot — it's scoped to one owner). One-time GitHub-side setup:
    ```
    Put each into its `CLIENTS` entry as `installationId`.
 
+**Rotating the key** — the App private key is the one long-lived secret, so rotation is the main ongoing
+task. An App holds up to 25 keys at once, so it's zero-downtime: generate a new private key on the App →
+`openssl pkcs8 -topk8 -nocrypt` it → `wrangler secret put GH_APP_PRIVATE_KEY < app.pkcs8.pem` →
+`npm run deploy` → validate via `/trigger` → **then** delete the old key in the App settings. Never delete
+the old key before the new one is deployed and validated.
+
+**If a dispatch fails** (a non-204 in the `/trigger` response or `wrangler tail`): `401` = bad/expired JWT
+(usually local clock skew, or the key isn't the PKCS#8 form); `404` = wrong `installationId` or the App
+isn't installed on that repo; `403` = the installation lacks `actions:write`; `422` = bad workflow input.
+A token-mint failure (vs. a dispatch rejection) is logged as a dispatch `status -1`.
+
 ## Deploy
 
 ```sh
@@ -105,7 +116,7 @@ npm install
 cp wrangler.example.jsonc wrangler.jsonc      # then set the real bucket_name
 wrangler login                                 # or export CLOUDFLARE_API_TOKEN
 wrangler secret put GH_APP_ID                   # the App ID (setup step 1)
-wrangler secret put GH_APP_PRIVATE_KEY          # paste the full PKCS#8 PEM incl. BEGIN/END (setup step 2)
+wrangler secret put GH_APP_PRIVATE_KEY < app.pkcs8.pem  # multi-line: pipe the file in (the prompt only reads one line)
 wrangler secret put CLIENTS                     # paste the roster JSON (with installationIds)
 wrangler secret put TRIGGER_SECRET             # paste a random string
 npm run deploy
@@ -167,8 +178,9 @@ and cron resumes within a tick.
 ## Free-tier math
 
 Workers Free: 100k req/day · 5 cron triggers/account · 10 ms CPU/invocation · 50 subrequests/request.
-This Worker uses **1** cron trigger, **144** invocations/day (~0.15%), ≤ ~6 subrequests on the busiest
-tick, and sub-millisecond CPU. R2 binding reads/writes are in-network/free. Dispatch uses the same GitHub
-Actions minutes cron did. **Zero new charges.**
+This Worker uses **1** cron trigger, **144** invocations/day (~0.15%), **≤ ~12 subrequests on a cold
+busiest tick** (6 `workflow_dispatch` + up to 6 installation-token mints, dropping to ~6 once the
+per-isolate token cache is warm), and sub-millisecond CPU (one RS256 sign per cold mint). R2 binding
+reads/writes are in-network/free. Dispatch uses the same GitHub Actions minutes cron did. **Zero new charges.**
 
 [dispatch]: https://docs.github.com/en/rest/actions/workflows#create-a-workflow-dispatch-event
