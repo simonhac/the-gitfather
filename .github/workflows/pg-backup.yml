@@ -57,6 +57,11 @@ jobs:
   backup:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # actions:read lets a failure alert resolve THIS job's log-page URL (jobs REST API); contents:read
+    # keeps checkout working. Capped by the caller's grant — falls back to the run-page link otherwise.
+    permissions:
+      contents: read
+      actions: read
     steps:
       - name: Checkout caller repo (holds the profile)
         uses: actions/checkout@v4
@@ -109,4 +114,5 @@ jobs:
           HEARTBEAT_URL: ${{ secrets.HEARTBEAT_URL }}
           AGE_RECIPIENT: ${{ secrets.AGE_RECIPIENT }}
           ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+          GITHUB_TOKEN: ${{ github.token }}   # read-only: lets a failure alert link to THIS job's log page (jobs API)
         run: npx tsx scripts/backup-pg-to-r2.ts

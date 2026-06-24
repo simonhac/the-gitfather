@@ -26,7 +26,8 @@ import { stampToEpochMs } from "./lib/schedule.js";
 import { loadLog, stampFromKey, type LogStore } from "./lib/logStore.js";
 import { drillObject, drillCoreFromProfile, extForEncryption, stampToIso, type DrillGate } from "./restore-drill-pg.js";
 import { appendVerify } from "./runlog.js";
-import { slackOneoff, alertWebhook } from "./lib/slack.js";
+import { slackOneoff, alertWebhook, failAlertText } from "./lib/slack.js";
+import { githubLogUrl } from "./lib/github.js";
 import type { BackupTier, LogVerification } from "./lib/backupTypes.js";
 
 function isoSeconds(d: Date): string {
@@ -80,7 +81,7 @@ async function main(): Promise<void> {
   const page = async (msg: string): Promise<void> => {
     process.stderr.write(`ERROR: ${msg}\n`);
     failures++;
-    await slackOneoff(`🔴 PG durable-verify FAILED (${fileBasename}): ${msg}`, true).catch(() => {});
+    await slackOneoff(failAlertText("durable-verify FAILED", msg, await githubLogUrl()), true).catch(() => {});
     await alertWebhook(`🔴 PG durable-verify FAILED (${fileBasename}): ${msg}`).catch(() => {});
   };
   const fatal = async (msg: string): Promise<never> => {

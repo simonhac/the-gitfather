@@ -51,6 +51,11 @@ jobs:
   drill:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # actions:read lets a failure alert resolve THIS job's log-page URL (jobs REST API); contents:read
+    # keeps checkout working. Capped by the caller's grant — falls back to the run-page link otherwise.
+    permissions:
+      contents: read
+      actions: read
     services:
       pg:
         image: ${{ inputs.pg_service_image }}
@@ -109,4 +114,5 @@ jobs:
           SLACK_CHANNEL: ${{ inputs.slack_channel }}
           AGE_IDENTITY: ${{ secrets.AGE_IDENTITY }}
           ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+          GITHUB_TOKEN: ${{ github.token }}   # read-only: lets a failure alert link to THIS job's log page (jobs API)
         run: npx tsx scripts/restore-drill-pg.ts

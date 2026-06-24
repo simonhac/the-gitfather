@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { renderDailyText, dailyLabel, dashboardLink, dailyHeader, type DailyState } from "../lib/slack.js";
+import { renderDailyText, dailyLabel, dashboardLink, dailyHeader, link, failAlertText, type DailyState } from "../lib/slack.js";
+import { githubRunInfo } from "../lib/github.js";
 import { setProfileForTest, profileSchema } from "../lib/config.js";
 import type { RunOrigin } from "../lib/backupTypes.js";
 
@@ -103,4 +104,65 @@ test("renderDailyText: legacy manual:true (no origin) still renders 🖐️", ()
     entries: [{ label: "02:00", ok: true, marker: "", manual: true }],
   };
   assert.match(renderDailyText(s, new Date(Date.UTC(2026, 5, 19, 5, 30, 0))), /🖐️ ✅ 02:00/);
+});
+
+test("link wraps text in a Slack mrkdwn link only when a url is given", () => {
+  assert.equal(link("", "pg_dump failed"), "pg_dump failed");
+  assert.equal(link("https://x/", "pg_dump failed"), "<https://x/|pg_dump failed>");
+});
+
+test("failAlertText degrades to plain text with no dashboard url and no log url", () => {
+  try {
+    setProfileForTest(profileSchema.parse({ name: "boost" }));
+    assert.equal(
+      failAlertText("FAILED at 07:46", "pg_dump failed"),
+      "🔴 *boost DB backup* FAILED at 07:46 — pg_dump failed",
+    );
+  } finally {
+    setProfileForTest(null);
+  }
+});
+
+test("failAlertText links the title to the dashboard and the reason to the job log", () => {
+  try {
+    setProfileForTest(profileSchema.parse({ name: "boost", dashboard: { url: "https://dash.example.com/" } }));
+    assert.equal(
+      failAlertText("FAILED at 07:46", "pg_dump failed", "https://github.com/o/r/actions/runs/1/job/2"),
+      "🔴 *<https://dash.example.com/|boost DB backup>* FAILED at 07:46 — " +
+        "<https://github.com/o/r/actions/runs/1/job/2|pg_dump failed>",
+    );
+  } finally {
+    setProfileForTest(null);
+  }
+});
+
+test("failAlertText: `what` is the caller-supplied middle clause (sibling alerts)", () => {
+  try {
+    setProfileForTest(profileSchema.parse({ name: "boost" }));
+    assert.equal(failAlertText("STALE", "no fresh object"), "🔴 *boost DB backup* STALE — no fresh object");
+    assert.equal(
+      failAlertText("durable-verify FAILED", "hash mismatch"),
+      "🔴 *boost DB backup* durable-verify FAILED — hash mismatch",
+    );
+  } finally {
+    setProfileForTest(null);
+  }
+});
+
+test("githubRunInfo builds the run URL from the default env vars (null when any is unset)", () => {
+  const keys = ["GITHUB_RUN_ID", "GITHUB_SERVER_URL", "GITHUB_REPOSITORY"] as const;
+  const orig = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+  try {
+    process.env.GITHUB_RUN_ID = "123";
+    process.env.GITHUB_SERVER_URL = "https://github.com";
+    process.env.GITHUB_REPOSITORY = "o/r";
+    assert.deepEqual(githubRunInfo(), { runId: "123", runUrl: "https://github.com/o/r/actions/runs/123" });
+    delete process.env.GITHUB_REPOSITORY; // any var missing → no run URL
+    assert.deepEqual(githubRunInfo(), { runId: "123", runUrl: null });
+  } finally {
+    for (const k of keys) {
+      if (orig[k] === undefined) delete process.env[k];
+      else process.env[k] = orig[k];
+    }
+  }
 });

@@ -399,7 +399,10 @@ Slack/`ALERT_WEBHOOK_URL` page. The hash-vs-restore distinction drives the toolt
 
 Instead of one message per run (spam), the backup keeps **one message per day** and **updates it in
 place** — a `✅`/`❌` + `HH:MM` tick per 2-hourly run, in the profile's `timezone`. A failed run appends `❌` and
-posts a loud, `@here`-mentioning threaded alert. Any **elapsed-but-empty** 2-hourly bucket renders as
+posts a loud, `@here`-mentioning threaded alert whose `<basename> DB backup` title links to the dashboard
+(`dashboard.url`) and whose error reason links to that run's GitHub Actions **job log** (falling back to the
+run page, or plain text off-Actions). The staleness, restore-drill, and durable-verify failure pages share
+this format. Any **elapsed-but-empty** 2-hourly bucket renders as
 `⬜ HH:00`, so a skipped run shows as a visible gap; the staleness check (every ~10 min) re-renders the row so a
 just-missed slot surfaces within minutes. This needs a **bot token** (`chat.update`; incoming webhooks
 can't update). "Today's message" is persisted as a tiny JSON object at `_status/<basename>/<date>.json`
@@ -413,6 +416,13 @@ spam). Unset → no-op.
 
 Setup: create a Slack app → **Bot Token Scopes**: `chat:write` → install → copy the `xoxb-…` token →
 **invite the bot to the channel** (`/invite @your-app`) → set `SLACK_BOT_TOKEN` + `SLACK_CHANNEL`.
+
+> **Job-log link.** The error-reason link resolves *this* run's per-job log page via the jobs REST API,
+> which needs the workflow's `GITHUB_TOKEN` to have **`actions: read`**. The reusable workflows pass the
+> token and request that scope, but a reusable workflow can't grant more than its caller — GitHub's
+> *permissive* default token already includes `actions: read`; on a repo whose default is *restricted*,
+> add `permissions: { contents: read, actions: read }` to the caller job. Without it the alert simply
+> links to the **run** page instead.
 
 ### Dead-man's-switch (optional, recommended)
 
@@ -450,8 +460,8 @@ bucket + custom domain, e.g. `https://ops.example.com/backups/<name>/index.html`
 > links). The rich raw logs never leave the private bucket. To make the page itself private, front the
 > public bucket with a custom domain + Cloudflare Access — no code change.
 
-Set **`dashboard.url`** in the profile to hyperlink the daily Slack header's "`<basename> DB backup`"
-to the published page. The public hostname isn't derivable from the bucket name — fetch it once with
+Set **`dashboard.url`** in the profile to hyperlink the "`<basename> DB backup`" title — in the daily
+Slack header **and in every failure alert** — to the published page. The public hostname isn't derivable from the bucket name — fetch it once with
 `npx wrangler r2 bucket dev-url get <DASHBOARD_R2_BUCKET>` (managed `r2.dev` URL) or
 `npx wrangler r2 bucket domain list <DASHBOARD_R2_BUCKET>` (custom domain).
 
