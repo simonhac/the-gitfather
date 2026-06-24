@@ -140,6 +140,7 @@ on:
 concurrency: { group: pg-backup, cancel-in-progress: false }
 jobs:
   backup:
+    permissions: { contents: read, actions: read }   # optional — precise job-log link in failure alerts; see "Job-log link"
     uses: simonhac/the-gitfather/.github/workflows/pg-backup.yml@main
     with:
       profile: pg-backup/myproject.yaml
@@ -167,6 +168,7 @@ on:
 concurrency: { group: pg-restore-drill, cancel-in-progress: false }
 jobs:
   drill:
+    permissions: { contents: read, actions: read }   # optional — precise job-log link in failure alerts; see "Job-log link"
     uses: simonhac/the-gitfather/.github/workflows/pg-restore-drill.yml@main
     with:
       profile: pg-backup/myproject.yaml
@@ -199,6 +201,7 @@ on:
 concurrency: { group: pg-durable-verify, cancel-in-progress: false }
 jobs:
   verify:
+    permissions: { contents: read, actions: read }   # optional — precise job-log link in failure alerts; see "Job-log link"
     uses: simonhac/the-gitfather/.github/workflows/pg-durable-verify.yml@main
     with:
       profile: pg-backup/myproject.yaml
@@ -417,12 +420,14 @@ spam). Unset → no-op.
 Setup: create a Slack app → **Bot Token Scopes**: `chat:write` → install → copy the `xoxb-…` token →
 **invite the bot to the channel** (`/invite @your-app`) → set `SLACK_BOT_TOKEN` + `SLACK_CHANNEL`.
 
-> **Job-log link.** The error-reason link resolves *this* run's per-job log page via the jobs REST API,
-> which needs the workflow's `GITHUB_TOKEN` to have **`actions: read`**. The reusable workflows pass the
-> token and request that scope, but a reusable workflow can't grant more than its caller — GitHub's
-> *permissive* default token already includes `actions: read`; on a repo whose default is *restricted*,
-> add `permissions: { contents: read, actions: read }` to the caller job. Without it the alert simply
-> links to the **run** page instead.
+> **Job-log link (optional).** The error-reason link resolves *this* run's per-job log page via the jobs
+> REST API, which needs the run's `GITHUB_TOKEN` to have **`actions: read`**. The reusable workflows pass
+> the token but **don't** request that scope themselves — a reusable workflow's `permissions:` is a *hard
+> requirement* on every caller, so requesting a scope the caller doesn't grant fails the run at startup
+> (`startup_failure`). The link is therefore best-effort: it resolves when the caller's token already has
+> `actions: read` (GitHub's *permissive* default) and otherwise falls back to the **run** page. On a
+> *restricted*-default repo, add `permissions: { contents: read, actions: read }` to the caller job (as
+> shown in the examples above) to get the precise job-log link.
 
 ### Dead-man's-switch (optional, recommended)
 
