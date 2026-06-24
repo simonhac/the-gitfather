@@ -341,9 +341,11 @@ async function main(): Promise<void> {
     }
   }
 
-  // Marker for the Slack row: which durable tiers this run was promoted to.
-  const promoted = tiers.filter((t) => t !== "2hourly").join(",");
-  const marker = promoted ? `📅(${promoted})` : "";
+  // Marker for the Slack row: 📅 + backticked codes for the durable tiers this run was promoted to
+  // (D=daily, W=weekly, M=monthly), e.g. 📅`DWM` on a 1st-of-month Sunday. Plain 2hourly → no marker.
+  const TIER_CODE: Record<string, string> = { daily: "D", weekly: "W", monthly: "M" };
+  const codes = tiers.filter((t) => t !== "2hourly").map((t) => TIER_CODE[t] ?? "").join("");
+  const marker = codes ? `📅\`${codes}\`` : "";
 
   console.log(`✓ Backup complete: ${filename} (${Math.floor(size / 1024 / 1024)} MB) → tiers: ${tiers.join(" ")}`);
   await bestEffort("slack ok tick", () => slackDailyRecord(true, label, marker, origin, now));

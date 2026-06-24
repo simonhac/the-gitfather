@@ -2,9 +2,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { backupLooksBroken, computeTiers, runOrigin, slotState, stampToEpochMs } from "../lib/schedule.js";
 
-test("runOrigin: schedule → schedule; dispatch/local → manual unless reason=self-heal", () => {
-  assert.equal(runOrigin("schedule", undefined), "schedule");
+test("runOrigin: schedule (cron OR reason=schedule) → schedule; dispatch/local → manual unless reason=self-heal", () => {
+  assert.equal(runOrigin("schedule", undefined), "schedule"); // legacy GitHub cron
+  assert.equal(runOrigin("workflow_dispatch", "schedule"), "schedule"); // Cloudflare automatic dispatch
   assert.equal(runOrigin("workflow_dispatch", undefined), "manual");
+  assert.equal(runOrigin("workflow_dispatch", ""), "manual"); // manual UI run (reason input left blank)
   assert.equal(runOrigin("workflow_dispatch", "self-heal"), "self-heal");
   assert.equal(runOrigin(undefined, undefined), "manual"); // local run
   assert.equal(runOrigin("", "self-heal"), "self-heal");
