@@ -7,13 +7,18 @@ import type { RunOrigin } from "./backupTypes.js";
 
 /**
  * Classify a run's origin for the Slack-row marker. `eventName` = GITHUB_EVENT_NAME; `reason` =
- * BACKUP_TRIGGER (threaded from the caller's workflow_dispatch `reason` input). A scheduled cron run →
- * "schedule" (no marker). Anything else (workflow_dispatch / local) → "manual", unless the self-heal
- * tagged it `reason=self-heal` → "self-heal". Supersedes the old isManualRun boolean.
+ * BACKUP_TRIGGER (threaded from the caller's workflow_dispatch `reason` input).
+ *   - reason="self-heal"   → "self-heal" (🩹): the staleness watchdog's catch-up.
+ *   - reason="schedule"    → "schedule" (no marker): a Cloudflare-dispatched automatic backup. It
+ *     arrives as workflow_dispatch (NOT the legacy cron `schedule` event), so we key off the reason.
+ *   - eventName="schedule" → "schedule" (no marker): a legacy GitHub cron run (back-compat).
+ *   - anything else (workflow_dispatch with no reason / a local run) → "manual" (🖐️).
+ * Supersedes the old isManualRun boolean.
  */
 export function runOrigin(eventName: string | undefined, reason: string | undefined): RunOrigin {
-  if (eventName === "schedule") return "schedule";
-  return reason === "self-heal" ? "self-heal" : "manual";
+  if (reason === "self-heal") return "self-heal";
+  if (reason === "schedule" || eventName === "schedule") return "schedule";
+  return "manual"; // GitHub-UI "Run workflow" (reason empty) or a local run → 🖐️
 }
 
 /**
