@@ -69,13 +69,17 @@ async function main(): Promise<void> {
   const onStale = async (msg: string): Promise<never> => {
     process.stderr.write(`STALE: ${msg}\n`);
 
-    if (!cfg.staleness.selfHeal || !commandExists("gh") || !process.env.GITHUB_REPOSITORY) {
+    // gh resolves the target repo from the cwd's git remote — which in CI is the engine/ checkout
+    // (the-gitfather), NOT the caller repo. Every gh call below MUST pass `-R $GITHUB_REPOSITORY`, or
+    // the dispatch lands on the-gitfather (where pg-backup.yml is workflow_call-only, no dispatch) and fails.
+    const repo = process.env.GITHUB_REPOSITORY;
+    if (!cfg.staleness.selfHeal || !commandExists("gh") || !repo) {
       return fail(msg);
     }
 
     // One query feeds both checks: recent runs with status (for in-flight) + conclusion (broken vs missed).
     let runs: { status?: string; conclusion?: string | null }[] = [];
-    const runsRes = capture("gh", ["run", "list", `--workflow=${backupWorkflow}`, "--limit", "10", "--json", "status,conclusion"]);
+    const runsRes = capture("gh", ["run", "list", "-R", repo, `--workflow=${backupWorkflow}`, "--limit", "10", "--json", "status,conclusion"]);
     if (runsRes.ok) {
       try {
         runs = JSON.parse(runsRes.out) as { status?: string; conclusion?: string | null }[];
@@ -109,7 +113,7 @@ async function main(): Promise<void> {
     // Tag the catch-up as a self-heal so the Slack row shows 🩹 (not 🖐️). Tolerant of a caller that
     // hasn't yet declared the `reason` workflow_dispatch input (cross-repo rollout): on a non-zero exit
     // (e.g. HTTP 422 "Unexpected inputs"), retry once without -f — self-heal still fires, marked 🖐️.
-    let code = await run("gh", ["workflow", "run", backupWorkflow, "-f", "reason=self-heal"], { stdio: "ignore" });
+    let code = await run("gh", ["workflow", "run", backupWorkflow, "-R", repo, "-f", "reason=self-heal"], { stdio: "ignore" });
     if (code !== 0) {
       // stdio:"ignore" swallowed gh's own error; surface a hint so a half-rolled-out caller (one missing
       // the `reason` input) is diagnosable rather than silently degrading to a 🖐️ catch-up indefinitely.
@@ -117,7 +121,7 @@ async function main(): Promise<void> {
         `note: \`gh workflow run ${backupWorkflow} -f reason=self-heal\` failed; retrying without -f ` +
           `(caller may not yet declare the \`reason\` workflow_dispatch input — catch-up will show 🖐️, not 🩹).\n`,
       );
-      code = await run("gh", ["workflow", "run", backupWorkflow], { stdio: "ignore" });
+      code = await run("gh", ["workflow", "run", backupWorkflow, "-R", repo], { stdio: "ignore" });
     }
     if (code === 0) {
       await note(
