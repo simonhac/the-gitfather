@@ -32,7 +32,8 @@ import { pgConn } from "./lib/pgconn.js";
 import { classifyPgRestoreStderr } from "./lib/pgRestore.js";
 import { loadLog } from "./lib/logStore.js";
 import { appendVerify } from "./runlog.js";
-import { slackOneoff, alertWebhook } from "./lib/slack.js";
+import { slackOneoff, alertWebhook, failAlertText } from "./lib/slack.js";
+import { githubLogUrl } from "./lib/github.js";
 import type { BackupTier } from "./lib/backupTypes.js";
 
 /** ISO-8601 UTC to seconds precision (matches bash `date -u +%Y-%m-%dT%H:%M:%SZ`). */
@@ -323,7 +324,7 @@ async function main(): Promise<void> {
 
   const fail = async (msg: string): Promise<never> => {
     process.stderr.write(`ERROR: ${msg}\n`);
-    await slackOneoff(`🔴 PG restore-drill FAILED (${fileBasename}): ${msg}`, true).catch(() => {});
+    await slackOneoff(failAlertText("restore-drill FAILED", msg, await githubLogUrl()), true).catch(() => {});
     await alertWebhook(`🔴 PG restore-drill FAILED (${fileBasename}): ${msg}`).catch(() => {});
     cleanup();
     process.exit(1);

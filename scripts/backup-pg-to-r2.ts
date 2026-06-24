@@ -32,7 +32,8 @@ import { pgConn } from "./lib/pgconn.js";
 import { run, runToFile, pipeToFile, commandExists, bestEffort, sha256File, capture } from "./lib/proc.js";
 import { computeTiers, runOrigin } from "./lib/schedule.js";
 import { appendRun } from "./runlog.js";
-import { slackEnabled, slackPost, slackDailyRecord, dailyLabel, alertWebhook } from "./lib/slack.js";
+import { githubLogUrl } from "./lib/github.js";
+import { slackEnabled, slackPost, slackDailyRecord, dailyLabel, alertWebhook, failAlertText } from "./lib/slack.js";
 import type { BackupTier } from "./lib/backupTypes.js";
 
 // Captured at module load (≈ process start) so both recordConfigFailure() and main() can stamp the
@@ -95,8 +96,9 @@ async function recordConfigFailure(): Promise<void> {
   const msg = "config validation failed"; // GENERIC — never include the offending value (secret-safe)
   const dayts = (await bestEffort("slack config-fail tick", () => slackDailyRecord(false, label, "", origin, now))) ?? "";
   const mention = peekProfile()?.slack.alertMention || "<!here>";
+  const logUrl = await githubLogUrl();
   await bestEffort("slack config-fail alert", () =>
-    slackPost(`${mention} 🔴 *${basename}* backup FAILED at ${label} — ${msg}`, {
+    slackPost(`${mention} ${failAlertText(`FAILED at ${label}`, msg, logUrl)}`, {
       thread: dayts,
       broadcast: true,
     }),
@@ -189,11 +191,12 @@ async function main(): Promise<void> {
     process.stderr.write(`ERROR: ${msg}\n`);
     if (slackEnabled()) {
       const dayts = (await bestEffort("slack fail tick", () => slackDailyRecord(false, label, "", origin, now))) ?? "";
+      const logUrl = await githubLogUrl();
       await bestEffort("slack fail alert", () =>
-        slackPost(
-          `${cfg.slack.alertMention || "<!here>"} 🔴 *${fileBasename}* backup FAILED at ${label} — ${msg}`,
-          { thread: dayts, broadcast: true },
-        ),
+        slackPost(`${cfg.slack.alertMention || "<!here>"} ${failAlertText(`FAILED at ${label}`, msg, logUrl)}`, {
+          thread: dayts,
+          broadcast: true,
+        }),
       );
     }
     await bestEffort("alert webhook", () => alertWebhook(`🔴 ${fileBasename} backup FAILED at ${label} — ${msg}`));

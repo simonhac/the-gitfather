@@ -25,7 +25,8 @@ import "./lib/bootEnv.js"; // MUST be first — loads $PROFILE before backupType
 import { loadStalenessConfig } from "./lib/config.js";
 import { run, capture, commandExists } from "./lib/proc.js";
 import { backupLooksBroken, slotState, stampToEpochMs } from "./lib/schedule.js";
-import { slackOneoff, slackDailyRefresh, alertWebhook } from "./lib/slack.js";
+import { slackOneoff, slackDailyRefresh, alertWebhook, failAlertText } from "./lib/slack.js";
+import { githubLogUrl } from "./lib/github.js";
 
 async function main(): Promise<void> {
   // Validate + type all config up front (zod); fails fast with one aggregated report. See lib/config.ts.
@@ -47,7 +48,7 @@ async function main(): Promise<void> {
 
   const fail = async (msg: string): Promise<never> => {
     process.stderr.write(`ERROR: ${msg}\n`);
-    await slackOneoff(`🔴 PG backup STALE (${fileBasename}): ${msg}`, true).catch(() => {});
+    await slackOneoff(failAlertText("STALE", msg, await githubLogUrl()), true).catch(() => {});
     await alertWebhook(`🔴 PG backup STALE (${fileBasename}): ${msg}`).catch(() => {});
     process.exit(1);
   };

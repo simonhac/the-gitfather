@@ -214,10 +214,27 @@ export function dailyLabel(now: Date = new Date()): string {
   return `${hh}:${get("minute")}`;
 }
 
+/** Generic Slack mrkdwn link: `<url|text>` when `url` is set, otherwise the plain text. */
+export function link(url: string, text: string): string {
+  return url ? `<${url}|${text}>` : text;
+}
+
 /** Wrap `text` in a Slack mrkdwn link to the dashboard URL when set; otherwise return it unchanged. */
 export function dashboardLink(text: string): string {
-  const url = peekProfile()?.dashboard.url ?? "";
-  return url ? `<${url}|${text}>` : text;
+  return link(peekProfile()?.dashboard.url ?? "", text);
+}
+
+/**
+ * Body of a loud failure alert (MENTION-FREE — callers add the mention: slackOneoff(…, true) prepends
+ * it; the backup prepends it inline then threads, so baking it in here would double-mention). Bolds the
+ * dashboard-linked "<name> DB backup" title and hyperlinks `reason` to `logUrl` (the GitHub Actions job
+ * log). `what` is the middle clause, e.g. "FAILED at 07:46", "STALE", "durable-verify FAILED". Both
+ * links degrade to plain text when their source URL is "" (no dashboard.url / not in Actions). The
+ * link-inside-bold construct mirrors dailyHeader().
+ *   🔴 *<name> DB backup* <what> — <reason>
+ */
+export function failAlertText(what: string, reason: string, logUrl = ""): string {
+  return `🔴 *${dashboardLink(`${fileBasename()} DB backup`)}* ${what} — ${link(logUrl, reason)}`;
 }
 
 /**

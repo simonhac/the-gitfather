@@ -27,6 +27,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildRawProfile } from "./lib/profile.js";
+import { githubRunInfo } from "./lib/github.js";
 import type { LogRun, LogVerification, BackupTier } from "./lib/backupTypes.js";
 
 function warn(msg: string): void {
@@ -40,15 +41,6 @@ function rclone(args: string[]): { ok: boolean; out: string } {
     const err = e as { stdout?: Buffer | string };
     return { ok: false, out: err.stdout ? err.stdout.toString() : "" };
   }
-}
-
-function githubRunInfo(): { runId: string | null; runUrl: string | null } {
-  const runId = process.env.GITHUB_RUN_ID || null;
-  const runUrl =
-    runId && process.env.GITHUB_SERVER_URL && process.env.GITHUB_REPOSITORY
-      ? `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${runId}`
-      : null;
-  return { runId, runUrl };
 }
 
 /**
