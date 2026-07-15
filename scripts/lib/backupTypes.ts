@@ -22,9 +22,10 @@ export type BackupTier = "2hourly" | "daily" | "weekly" | "monthly";
  */
 export const DISPLAY_TZ = process.env.DISPLAY_TZ || "UTC";
 
-export const SLOTS_PER_DAY = 12; // 2-hourly
+export const SLOTS_PER_DAY = 3; // 8-hourly (backups at 00:00 / 08:00 / 16:00 UTC)
+export const HOURS_PER_SLOT = 24 / SLOTS_PER_DAY; // 8 — display-slot width; keep in sync with the scheduler cadence
 export const DAYS_PER_WEEK = 7;
-export const COLS_PER_WEEK = SLOTS_PER_DAY * DAYS_PER_WEEK; // 84
+export const COLS_PER_WEEK = SLOTS_PER_DAY * DAYS_PER_WEEK; // 21
 
 // ── GFS retention (configurable per profile; these are the defaults) ──────────
 // The profile's `retention:` block sets these as natural-language durations; the loader parses them
@@ -48,7 +49,7 @@ export const DEFAULT_RETENTION: RetentionMap = {
 
 /** Per-tier GFS name, cadence phrase, and copy-interval (days) — drives the subtitle + max-count math. */
 export const TIER_META: Record<BackupTier, { gfs: string; every: string; cadenceDays: number }> = {
-  "2hourly": { gfs: "grandson", every: "every 2 hours", cadenceDays: 1 / SLOTS_PER_DAY },
+  "2hourly": { gfs: "grandson", every: "every 8 hours", cadenceDays: 1 / SLOTS_PER_DAY },
   daily: { gfs: "son", every: "every day", cadenceDays: 1 },
   weekly: { gfs: "father", every: "every week", cadenceDays: 7 },
   monthly: { gfs: "grandfather", every: "every month", cadenceDays: 365 / 12 },
@@ -151,9 +152,9 @@ export interface SlotRun {
 
 export interface BackupCell {
   row: number; // 0 = most-recent week (top)
-  col: number; // 0..83
+  col: number; // 0..COLS_PER_WEEK-1
   weekday: number; // 0=Mon … 6=Sun
-  slot: number; // 0..11
+  slot: number; // 0..SLOTS_PER_DAY-1
   /** All runs that fell in this slot, time-sorted (length >= 1). */
   runs: SlotRun[];
   /** Headline state — the best success among the runs, else "failed". Drives summary/legend. */

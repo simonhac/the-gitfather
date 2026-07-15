@@ -21,6 +21,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadDashboardConfig, retentionFromConfig, joinObjectKey } from "./lib/config.js";
 import { readLogDir, downloadLogsFromR2 } from "./lib/logStore.js";
+import { HOURS_PER_SLOT } from "./lib/backupTypes.js";
 import type { LogRun, LogVerification, PublicPayload, BackupTier } from "./lib/backupTypes.js";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
@@ -113,7 +114,7 @@ async function main(): Promise<void> {
 }
 
 // ── Sample data (local preview only) ─────────────────────────────────────────
-// A deterministic history that exercises the full GFS picture: a 2-hourly grandson run on
+// A deterministic history that exercises the full GFS picture: an 8-hourly grandson run on
 // every slot, promoted to daily/weekly/monthly on the 16:00-UTC anchors (so the heatmap shows
 // the green lifespan "staircase"), an organically growing dump size, a sprinkle of isolated
 // failures, and one believable outage. Spans a bit more than the 52-week grid so daily/weekly
@@ -131,7 +132,8 @@ function makeSample(now: Date): { runs: LogRun[]; verifications: LogVerification
   const verifications: LogVerification[] = [];
   const end = now.getTime();
   const start = end - SAMPLE_DAYS * 86_400_000;
-  const first = Math.ceil(start / (2 * 3_600_000)) * 2 * 3_600_000;
+  const slotMs = HOURS_PER_SLOT * 3_600_000;
+  const first = Math.ceil(start / slotMs) * slotMs;
 
   // Dump size grows toward the present: a mid-size production DB ~2.2 GB at the window
   // start, compounding ~0.2%/day to ~4.9 GB now, with a steady per-day wobble and a
@@ -145,7 +147,7 @@ function makeSample(now: Date): { runs: LogRun[]; verifications: LogVerification
   const outageStart = end - 5.4 * 86_400_000;
   const outageEnd = end - 5.0 * 86_400_000;
 
-  for (let t = first; t <= end; t += 2 * 3_600_000) {
+  for (let t = first; t <= end; t += slotMs) {
     const d = new Date(t);
     const ts = d.toISOString().replace(".000", "");
     const daysSinceStart = (t - start) / 86_400_000;
@@ -177,11 +179,11 @@ function makeSample(now: Date): { runs: LogRun[]; verifications: LogVerification
   }
 
   // A couple of slots with more than one run, to exercise the multi-run rendering: when two
-  // runs land in the same 2-hour display bucket (a manual rerun, or a failure that's retried),
+  // runs land in the same display slot (a manual rerun, or a failure that's retried),
   // the cell gets a corner notch — and a mix of success + failure splits it diagonally. Placed
   // in the last ~2 days so the 2hourly copies are still retained (green), not aged-out grey.
   const iso = (ms: number) => new Date(ms).toISOString().replace(".000", "");
-  const bucket = (hoursAgo: number) => Math.floor((end - hoursAgo * 3_600_000) / (2 * 3_600_000)) * 2 * 3_600_000;
+  const bucket = (hoursAgo: number) => Math.floor((end - hoursAgo * 3_600_000) / slotMs) * slotMs;
 
   // (a) Mixed slot: the scheduled run (already added by the loop, OK) plus a manual rerun ~40 min
   //     later that failed → diagonal split (green/red) + notch.

@@ -69,7 +69,7 @@ function dueCadences(t: Date): Cadence[] {
   const due: Cadence[] = ["staleness"]; // every tick (the 10-min watchdog)
   const m = t.getUTCMinutes();
   const h = t.getUTCHours();
-  if (m === 0 && h % 2 === 0) due.push("backup"); // every 2h (== the old "0 */2 * * *")
+  if (m === 0 && h % 8 === 0) due.push("backup"); // every 8h at 00/08/16 UTC (16 = the profiles' anchor-hour → daily/weekly/monthly still promote)
   if (h === 18 && m === 30) due.push("durableVerify"); // daily ~18:30 UTC — must be after the latest anchor hour
   // restoreDrill is superseded by durableVerify; dispatch it only via the manual /trigger endpoint if needed.
   return due;

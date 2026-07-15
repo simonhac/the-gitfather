@@ -31,6 +31,6 @@ test("parseDuration: rejects malformed input", () => {
   }
 });
 
-test("maxRetained(DEFAULT_RETENTION) === 82 (24 grandson + 21 son + 13 father + 24 grandfather)", () => {
-  assert.equal(maxRetained(DEFAULT_RETENTION), 82);
+test("maxRetained(DEFAULT_RETENTION) === 64 (6 grandson + 21 son + 13 father + 24 grandfather)", () => {
+  assert.equal(maxRetained(DEFAULT_RETENTION), 64);
 });
