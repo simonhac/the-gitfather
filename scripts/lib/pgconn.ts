@@ -72,3 +72,14 @@ export function pgConn(url: string, dir?: string): PgConn {
 
   return { safeUrl, env: { ...process.env, PGPASSFILE: passFile }, cleanup };
 }
+
+/**
+ * Return `url` with its database (the URL path) replaced by `db`, preserving user/host/port/query.
+ * Used by the restore drill to derive a maintenance connection (→ `postgres`) and a scratch-DB
+ * connection from one configured drill URL. Feed the result to pgConn() to keep the password off argv.
+ */
+export function withDatabase(url: string, db: string): string {
+  const u = new URL(url);
+  u.pathname = `/${db}`;
+  return u.toString();
+}

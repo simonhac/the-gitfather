@@ -28,13 +28,16 @@ import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadDrillConfig, type Profile } from "./lib/config.js";
 import { run, runToFile, capture, captureStderr, commandExists } from "./lib/proc.js";
-import { pgConn } from "./lib/pgconn.js";
+import { pgConn, withDatabase } from "./lib/pgconn.js";
 import { classifyPgRestoreStderr } from "./lib/pgRestore.js";
 import { loadLog } from "./lib/logStore.js";
 import { appendVerify } from "./runlog.js";
 import { slackOneoff, alertWebhook, failAlertText } from "./lib/slack.js";
 import { githubLogUrl } from "./lib/github.js";
 import type { BackupTier } from "./lib/backupTypes.js";
+
+/** Throwaway database every restore is (re)created into — see drillObject()'s "Pristine restore target". */
+const SCRATCH_DB = "gitfather_drill";
 
 /** ISO-8601 UTC to seconds precision (matches bash `date -u +%Y-%m-%dT%H:%M:%SZ`). */
 function isoSeconds(d: Date): string {
@@ -160,8 +163,8 @@ export interface DrillObjectResult {
 export async function drillObject(opts: DrillObjectOpts): Promise<DrillObjectResult> {
   const { key, gate, cfg, tmp } = opts;
   // Keep the DB passwords off pg_restore/psql argv — they ride in 0600 PGPASSFILEs under `tmp`
-  // (removed wholesale when the caller tears `tmp` down, so no per-call cleanup needed here).
-  const drill = pgConn(cfg.drillDatabaseUrl, tmp);
+  // (removed wholesale when the caller tears `tmp` down, so no per-call cleanup needed here). The
+  // `drill` connection is built below, AFTER the scratch DB is (re)created, so it targets a fresh DB.
   const live = pgConn(cfg.liveDatabaseUrl, tmp);
   const counts: Record<string, number> = {};
   const done = (ok: boolean, ratio: number | null, reason: string | null): DrillObjectResult => ({ ok, ratio, counts, reason });
@@ -200,6 +203,24 @@ export async function drillObject(opts: DrillObjectOpts): Promise<DrillObjectRes
   } else {
     copyFileSync(obj, dump);
   }
+
+  // ── Pristine restore target ────────────────────────────────────────────────
+  // Every restore MUST start against an EMPTY database. A verify-durable job runs several restores
+  // per invocation (freshest daily, then aged weekly/monthly) sharing ONE drill server; if the target
+  // isn't reset, the 2nd+ restore lands on the previous restore's data → every relation "already
+  // exists" and every COPY collides on its primary key ("duplicate key…", "multiple primary keys…").
+  // Those are real pg_restore errors, but an artefact of the reused target, NOT the dump — so drop and
+  // recreate a scratch DB from the maintenance DB first. (DROP … WITH (FORCE) needs PG13+; the drill
+  // target is modern Postgres.)
+  const drillAdmin = pgConn(withDatabase(cfg.drillDatabaseUrl, "postgres"), tmp);
+  console.log(`Resetting the scratch drill database ${SCRATCH_DB} …`);
+  const resetCode = await run(
+    "psql",
+    [drillAdmin.safeUrl, "-v", "ON_ERROR_STOP=1", "-c", `DROP DATABASE IF EXISTS ${SCRATCH_DB} WITH (FORCE)`, "-c", `CREATE DATABASE ${SCRATCH_DB}`],
+    { env: drillAdmin.env },
+  );
+  if (resetCode !== 0) return done(false, null, `could not reset the scratch drill database ${SCRATCH_DB}`);
+  const drill = pgConn(withDatabase(cfg.drillDatabaseUrl, SCRATCH_DB), tmp);
 
   // ── Restore into the throwaway target ──────────────────────────────────────
   // Restoring provider-managed schemas into vanilla Postgres emits benign errors (missing
