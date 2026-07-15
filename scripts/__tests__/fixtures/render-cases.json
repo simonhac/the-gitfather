@@ -34,7 +34,7 @@
         }
       ]
     },
-    "expected": "*example DB backup — Wed 1 Jan 2020 (UTC)*\n✅ 00:00  ·  ❌ 02:00  ·  ⬜ 04:00  ·  ⬜ 06:00  ·  ⬜ 08:00  ·  ⬜ 10:00  ·  ⬜ 12:00  ·  ⬜ 14:00  ·  ✅ 16:00 📅`DW`  ·  🖐️ ✅ 16:05  ·  ⬜ 18:00  ·  ⬜ 20:00  ·  ⬜ 22:00"
+    "expected": "*example DB backup — Wed 1 Jan 2020 (UTC)*\n✅ 00:00  ·  ❌ 02:00  ·  ⬜ 08:00  ·  ✅ 16:00 📅`DW`  ·  🖐️ ✅ 16:05"
   },
   {
     "name": "empty",
@@ -46,7 +46,7 @@
       "header": "*example DB backup — Wed 1 Jan 2020 (UTC)*",
       "entries": []
     },
-    "expected": "*example DB backup — Wed 1 Jan 2020 (UTC)*\n⬜ 00:00  ·  ⬜ 02:00  ·  ⬜ 04:00  ·  ⬜ 06:00  ·  ⬜ 08:00  ·  ⬜ 10:00  ·  ⬜ 12:00  ·  ⬜ 14:00  ·  ⬜ 16:00  ·  ⬜ 18:00  ·  ⬜ 20:00  ·  ⬜ 22:00"
+    "expected": "*example DB backup — Wed 1 Jan 2020 (UTC)*\n⬜ 00:00  ·  ⬜ 08:00  ·  ⬜ 16:00"
   },
   {
     "name": "manual_fail",
@@ -71,6 +71,6 @@
         }
       ]
     },
-    "expected": "*db DB backup — Wed 1 Jan 2020 (UTC)*\n⬜ 00:00  ·  ⬜ 02:00  ·  ⬜ 04:00  ·  ⬜ 06:00  ·  🖐️ ❌ 08:00  ·  ⬜ 10:00  ·  ⬜ 12:00  ·  ⬜ 14:00  ·  ⬜ 16:00  ·  ✅ 18:00 📅`D`  ·  ⬜ 20:00  ·  ⬜ 22:00"
+    "expected": "*db DB backup — Wed 1 Jan 2020 (UTC)*\n⬜ 00:00  ·  🖐️ ❌ 08:00  ·  ✅ 18:00 📅`D`"
   }
 ]

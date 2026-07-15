@@ -24,7 +24,7 @@ missed backup) plus the external `HEARTBEAT_URL` dead-man's-switch (pages if bac
 | Cadence         | When (UTC)        | Dispatches                | Input               |
 | --------------- | ----------------- | ------------------------- | ------------------- |
 | `staleness`     | every 10 min      | `pg-staleness-check.yml`  | —                   |
-| `backup`        | every 2h (`:00`)  | `pg-backup.yml`           | `reason: schedule`  |
+| `backup`        | every 8h (`00/08/16` UTC) | `pg-backup.yml`       | `reason: schedule`  |
 | `durableVerify` | daily `18:30`     | `pg-durable-verify.yml`   | —                   |
 | `restoreDrill`  | manual only       | `pg-restore-drill.yml`    | —                   |
 

@@ -7,7 +7,7 @@
   <img src="docs/dashboard.png" alt="the-gitfather backup-history dashboard — GFS heatmap with per-tier retention, storage and R2 cost" width="900">
 </p>
 
-<p align="center"><sub>The static <a href="#backup-history-dashboard">backup-history dashboard</a> — every 2-hourly backup over a 1-year window, with restore-verified drills, storage and estimated R2 cost.</sub></p>
+<p align="center"><sub>The static <a href="#backup-history-dashboard">backup-history dashboard</a> — every 8-hourly backup over a 1-year window, with restore-verified drills, storage and estimated R2 cost.</sub></p>
 
 A small, **profile-driven** tool any project can adopt: point it at a Postgres connection string and an
 R2 bucket and you get the **off-site, immutable, restore-verified** pillars of the **3-2-1-1-0** backup
@@ -130,7 +130,7 @@ the restore-drill `row-count-table`, timezone, etc. See **Profile reference** be
 name: My DB backup → R2          # keep this name — pg-dashboard's workflow_run references it
 on:
   schedule:
-    - cron: "0 */2 * * *"        # every 2 hours (UTC); the anchor-hour-utc run also promotes
+    - cron: "0 0,8,16 * * *"     # 00/08/16 UTC (8-hourly); the anchor-hour-utc (16) run also promotes
   workflow_dispatch:
     inputs:
       reason:
@@ -300,7 +300,7 @@ The caller reads these and passes them in (explicit `secrets:` + `with:` inputs,
 
 | Tier | Label | Cadence | R2 prefix | Lifecycle expiry (default) | Bucket lock |
 |---|---|---|---|---|---|
-| 2-hourly | grandson | every 2 h | `<prefix>/2hourly/` | 2 days | none |
+| 8-hourly | grandson | every 8 h | `<prefix>/2hourly/` | 2 days | none |
 | daily | Son | anchor hour | `<prefix>/daily/` | 3 weeks | 14 days |
 | weekly | Father | Sundays @ anchor | `<prefix>/weekly/` | 13 weeks | 14 days |
 | monthly | Grandfather | 1st @ anchor | `<prefix>/monthly/` | 2 years | 14 days |
@@ -401,11 +401,11 @@ Slack/`ALERT_WEBHOOK_URL` page. The hash-vs-restore distinction drives the toolt
 ## Slack (optional)
 
 Instead of one message per run (spam), the backup keeps **one message per day** and **updates it in
-place** — a `✅`/`❌` + `HH:MM` tick per 2-hourly run, in the profile's `timezone`. A failed run appends `❌` and
+place** — a `✅`/`❌` + `HH:MM` tick per run, in the profile's `timezone`. A failed run appends `❌` and
 posts a loud, `@here`-mentioning threaded alert whose `<basename> DB backup` title links to the dashboard
 (`dashboard.url`) and whose error reason links to that run's GitHub Actions **job log** (falling back to the
 run page, or plain text off-Actions). The staleness, restore-drill, and durable-verify failure pages share
-this format. Any **elapsed-but-empty** 2-hourly bucket renders as
+this format. Any **elapsed-but-empty** slot renders as
 `⬜ HH:00`, so a skipped run shows as a visible gap; the staleness check (every ~10 min) re-renders the row so a
 just-missed slot surfaces within minutes. This needs a **bot token** (`chat.update`; incoming webhooks
 can't update). "Today's message" is persisted as a tiny JSON object at `_status/<basename>/<date>.json`
@@ -442,7 +442,7 @@ backup pings it on success, so its absence pages independently of GitHub.
 
 ## Backup-history dashboard
 
-A static, self-contained page visualises **every 2-hourly run over the 1-year window** as a heatmap
+A static, self-contained page visualises **every 8-hourly run over the 1-year window** as a heatmap
 (green = healthy & retained, brighter green = restore-verified, **amber = restore/hash drill failed**,
 grey = aged out of retention, red = failed backup, blank = no run). It reads an **append-only run-log in
 R2** (no server, no DB) that the backup + drill + durable-verify scripts write via `runlog.ts`:

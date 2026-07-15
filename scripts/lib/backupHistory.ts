@@ -8,6 +8,7 @@ import {
   DEFAULT_RETENTION,
   DISPLAY_TZ,
   SLOTS_PER_DAY,
+  HOURS_PER_SLOT,
   DAYS_PER_WEEK,
   type RetentionMap,
   type PublicRun,
@@ -105,7 +106,7 @@ function tzOffsetMs(d: Date): number {
 export function slotApproxDate(weekStartOrdinal: number, weekday: number, slot: number): Date {
   const { y, mo, day } = ordinalToDate(weekStartOrdinal + weekday);
   // Treat the wall-clock as UTC, then correct by the tz offset at that instant.
-  const guessUtc = Date.UTC(y, mo - 1, day, slot * 2, 0);
+  const guessUtc = Date.UTC(y, mo - 1, day, slot * HOURS_PER_SLOT, 0);
   return new Date(guessUtc - tzOffsetMs(new Date(guessUtc)));
 }
 
@@ -189,14 +190,14 @@ export function buildBackupGrid(payload: PublicPayload, now: Date, weeks = 52): 
   }
 
   // Gather every run into its slot — a slot can hold several (a manual rerun landing in the same
-  // 2-hour display-timezone bucket as the scheduled run, or the DST "fall back" hour once a year).
+  // display-timezone slot as the scheduled run, or the DST "fall back" hour once a year).
   const slotRuns = new Map<number, Map<number, SlotRun[]>>(); // row → col → runs
   for (const run of payload.runs) {
     const d = new Date(run.t);
     const sp = tzParts(d);
     const ord = dateOrdinal(sp.y, sp.mo, sp.day);
     const wd = weekdayMon0(ord);
-    const slot = Math.floor(sp.hour / 2);
+    const slot = Math.floor(sp.hour / HOURS_PER_SLOT);
     const row = (currentWeekStart - (ord - wd)) / DAYS_PER_WEEK;
     if (row < 0 || row >= weeks) continue;
     const col = wd * SLOTS_PER_DAY + slot;

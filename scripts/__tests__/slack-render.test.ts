@@ -8,9 +8,8 @@ import { githubRunInfo } from "../lib/github.js";
 import { setProfileForTest, profileSchema } from "../lib/config.js";
 import type { RunOrigin } from "../lib/backupTypes.js";
 
-// Parity fixtures captured from the original bash _slack_daily_text (lib/slack.sh) — see
-// fixtures/render-cases.json. States are PAST-dated so every 2-hourly bucket is "due"
-// (date < today), making the bash output clock-independent and safe to freeze.
+// Golden fixtures for renderDailyText — see fixtures/render-cases.json. States are PAST-dated so
+// every slot is "due" (date < today), making the output clock-independent and safe to freeze.
 const here = dirname(fileURLToPath(import.meta.url));
 const cases = JSON.parse(readFileSync(join(here, "fixtures/render-cases.json"), "utf8")) as {
   name: string;
@@ -32,11 +31,12 @@ test("dailyLabel renders HH:MM in DISPLAY_TZ (UTC)", () => {
   assert.equal(dailyLabel(new Date(Date.UTC(2026, 5, 19, 9, 0, 0))), "09:00"); // base-10, not octal
 });
 
-test("renderDailyText today: +1h grace gates which empty buckets show ⬜", () => {
-  // now = 05:30 UTC, today. Due buckets need 2*s+1 <= 5 → s ∈ {0,1,2} (01,03,05 ≤ 5; s=3 → 07 > 5).
-  const now = new Date(Date.UTC(2026, 5, 19, 5, 30, 0));
+test("renderDailyText today: only WHOLLY-elapsed slots show ⬜", () => {
+  // now = 16:30 UTC, today. A slot is due once it has fully elapsed: 8*(s+1) <= 16 → s ∈ {0,1}
+  // (slots 0 [00:00) and 1 [08:00) closed; slot 2 [16:00) still open → no premature ⬜).
+  const now = new Date(Date.UTC(2026, 5, 19, 16, 30, 0));
   const state: DailyState = { channel: "", ts: "T", date: "2026-06-19", header: "*H*", entries: [] };
-  assert.equal(renderDailyText(state, now), "*H*\n⬜ 00:00  ·  ⬜ 02:00  ·  ⬜ 04:00");
+  assert.equal(renderDailyText(state, now), "*H*\n⬜ 00:00  ·  ⬜ 08:00");
 });
 
 test("dashboardLink wraps text in a Slack link only when the dashboard url is set", () => {
@@ -70,29 +70,31 @@ test("dailyHeader recomputes the link from current config — relinks a frozen p
   }
 });
 
-test("renderDailyText today: a filled bucket suppresses its ⬜", () => {
-  const now = new Date(Date.UTC(2026, 5, 19, 5, 30, 0));
+test("renderDailyText today: a filled slot suppresses its ⬜", () => {
+  const now = new Date(Date.UTC(2026, 5, 19, 16, 30, 0));
   const state: DailyState = {
     channel: "",
     ts: "T",
     date: "2026-06-19",
     header: "*H*",
-    entries: [{ label: "02:00", ok: true, marker: "", manual: false }],
+    entries: [{ label: "08:00", ok: true, marker: "", manual: false }],
   };
-  // bucket 1 (02:00) is filled → only 00:00 and 04:00 remain as due-empty placeholders.
-  assert.equal(renderDailyText(state, now), "*H*\n⬜ 00:00  ·  ✅ 02:00  ·  ⬜ 04:00");
+  // slot 1 (floor(8/8)=1) is filled → of the wholly-elapsed slots {0,1}, only slot 0 (00:00) is a
+  // due-empty placeholder; slot 2 [16:00) is still open so it shows nothing.
+  assert.equal(renderDailyText(state, now), "*H*\n⬜ 00:00  ·  ✅ 08:00");
 });
 
 test("renderDailyText: origin drives the marker", () => {
   const base = { channel: "", ts: "T", date: "2026-06-19", header: "*H*" };
+  // Entry in slot 1 (10:00), now 16:30 → slot 0 (00:00) is a due-empty ⬜ that precedes the tick.
   const at = (o: RunOrigin): string =>
     renderDailyText(
-      { ...base, entries: [{ label: "02:00", ok: true, marker: "", origin: o }] },
-      new Date(Date.UTC(2026, 5, 19, 5, 30, 0)),
+      { ...base, entries: [{ label: "10:00", ok: true, marker: "", origin: o }] },
+      new Date(Date.UTC(2026, 5, 19, 16, 30, 0)),
     );
-  assert.match(at("schedule"), /· {2}✅ 02:00/);
-  assert.match(at("manual"), /· {2}🖐️ ✅ 02:00/);
-  assert.match(at("self-heal"), /· {2}🩹 ✅ 02:00/);
+  assert.match(at("schedule"), /· {2}✅ 10:00/);
+  assert.match(at("manual"), /· {2}🖐️ ✅ 10:00/);
+  assert.match(at("self-heal"), /· {2}🩹 ✅ 10:00/);
 });
 
 test("renderDailyText: legacy manual:true (no origin) still renders 🖐️", () => {

@@ -32,7 +32,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { capture } from "./proc.js";
 import { peekProfile } from "./config.js";
-import { DISPLAY_TZ, SLOTS_PER_DAY } from "./backupTypes.js";
+import { DISPLAY_TZ, SLOTS_PER_DAY, HOURS_PER_SLOT } from "./backupTypes.js";
 import type { RunOrigin } from "./backupTypes.js";
 import { tzParts } from "./backupHistory.js";
 
@@ -167,9 +167,9 @@ async function rcloneTry(args: string[]): Promise<{ ok: boolean; out: string }> 
 
 // ── Daily status row ─────────────────────────────────────────────────────────
 // One Slack message per DISPLAY_TZ day, persisted as _status/<basename>/<date>.json in R2
-// and updated in place. Each 2-hourly run records a ✅/❌ + HH:MM tick; the renderer also
-// injects a ⬜ placeholder for every *elapsed but empty* 2-hourly bucket (SLOTS_PER_DAY
-// buckets/day, slot = floor(hour/2) — shared with the dashboard heatmap).
+// and updated in place. Each run records a ✅/❌ + HH:MM tick; the renderer also injects a ⬜
+// placeholder for every *elapsed but empty* slot (SLOTS_PER_DAY buckets/day, slot =
+// floor(hour / HOURS_PER_SLOT) — shared with the dashboard heatmap).
 
 export interface DailyEntry {
   label: string;
@@ -262,8 +262,8 @@ function dailyKeys(now: Date = new Date()): { dateKey: string; header: string; o
 
 /**
  * Render the message text: header + real ticks (✅/❌, 🖐️-prefixed for manual) interleaved
- * with ⬜ placeholders for elapsed-but-empty 2-hourly buckets, sorted by label.
- * Pure — `now` drives which buckets are "due". Mirrors _slack_daily_text in slack.sh.
+ * with ⬜ placeholders for elapsed-but-empty slots, sorted by label.
+ * Pure — `now` drives which buckets are "due".
  */
 export function renderDailyText(state: DailyState, now: Date = new Date()): string {
   const today = (() => {
@@ -272,17 +272,19 @@ export function renderDailyText(state: DailyState, now: Date = new Date()): stri
   })();
   const curH = tzParts(now).hour;
 
-  // Buckets (0..SLOTS_PER_DAY-1) already covered by a real run — slot = floor(HH/2).
-  const filled = new Set(state.entries.map((e) => Math.floor(Number(e.label.slice(0, 2)) / 2)));
+  // Buckets (0..SLOTS_PER_DAY-1) already covered by a real run — slot = floor(HH / HOURS_PER_SLOT).
+  const filled = new Set(state.entries.map((e) => Math.floor(Number(e.label.slice(0, 2)) / HOURS_PER_SLOT)));
 
-  // "HH:00" labels for buckets that are DUE (elapsed) yet EMPTY. The +1 grace (2*s+1 <= curH)
-  // waits an hour into a bucket before calling a tardy GitHub run "missing".
+  // "HH:00" labels for buckets that are DUE yet EMPTY. A backup can land ANYWHERE inside its slot —
+  // the schedule is UTC-anchored but DISPLAY_TZ may be phase-shifted, so the tick isn't at the slot
+  // start. To avoid a false ⬜ before a late-in-slot backup lands, a slot only counts as "missing"
+  // once it has WHOLLY elapsed (HOURS_PER_SLOT*(s+1) <= curH), never mid-slot.
   const placeholders: string[] = [];
   for (let s = 0; s < SLOTS_PER_DAY; s++) {
-    const due = state.date < today || (state.date === today && 2 * s + 1 <= curH);
+    const due = state.date < today || (state.date === today && HOURS_PER_SLOT * (s + 1) <= curH);
     if (!due) continue;
     if (filled.has(s)) continue;
-    placeholders.push(`${pad2(2 * s)}:00`);
+    placeholders.push(`${pad2(s * HOURS_PER_SLOT)}:00`);
   }
 
   const syms: { label: string; sym: string }[] = [];
