@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, existsSync, statSync } from "node:fs";
-import { pgConn } from "../lib/pgconn.js";
+import { pgConn, withDatabase } from "../lib/pgconn.js";
 
 test("pgConn: strips the password from the URL but keeps user/host/port/db/sslmode", () => {
   const c = pgConn("postgres://u:s3cr3t@db.example.com:5432/app?sslmode=require");
@@ -56,6 +56,15 @@ test("pgConn: a URL with no password is returned unchanged and adds no PGPASSFIL
     if (prev === undefined) delete process.env.PGPASSFILE;
     else process.env.PGPASSFILE = prev;
   }
+});
+
+test("withDatabase: swaps the database, preserving user/host/port/query", () => {
+  assert.equal(
+    withDatabase("postgres://u:pw@localhost:5432/postgres?sslmode=disable", "gitfather_drill"),
+    "postgres://u:pw@localhost:5432/gitfather_drill?sslmode=disable",
+  );
+  // no prior path, no query → still yields a clean single-segment path
+  assert.equal(withDatabase("postgres://u:pw@h:5432/app", "postgres"), "postgres://u:pw@h:5432/postgres");
 });
 
 test("pgConn: a literal '%' in the password does not throw (URIError) and round-trips raw", () => {
