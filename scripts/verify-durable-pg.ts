@@ -148,7 +148,12 @@ async function main(): Promise<void> {
   const recordRestore = async (o: DurableObj, gate: DrillGate): Promise<void> => {
     restoresLeft--;
     console.log(`Restore-verifying ${o.key} (gate=${gate}) …`);
-    const res = await drillObject({ key: o.key, tier: o.tier, gate, cfg: core, tmp, priorCounts });
+    // For the fresh-daily live-ratio gate, use the sentinel count recorded at DUMP time (matched by stamp)
+    // as the reference, so an active table that grew between the dump and this verify can't false-trip the
+    // floor. The aged "nonempty" gate takes no ratio. null when the run predates the recorded count → the
+    // gate falls back to the live estimate.
+    const refCount = gate === "live-ratio" ? (log.runByStamp.get(o.stamp)?.counts?.[core.rowCountTable] ?? null) : null;
+    const res = await drillObject({ key: o.key, tier: o.tier, gate, cfg: core, tmp, priorCounts, refCount });
     appendVerify({
       ts: isoSeconds(new Date()),
       verifiedTs: stampToIso(o.key) ?? "",

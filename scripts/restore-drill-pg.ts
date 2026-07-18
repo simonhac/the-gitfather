@@ -30,7 +30,7 @@ import { loadDrillConfig, type Profile } from "./lib/config.js";
 import { run, runToFile, capture, captureStderr, commandExists } from "./lib/proc.js";
 import { pgConn, withDatabase } from "./lib/pgconn.js";
 import { classifyPgRestoreStderr } from "./lib/pgRestore.js";
-import { loadLog } from "./lib/logStore.js";
+import { loadLog, stampFromKey } from "./lib/logStore.js";
 import { appendVerify } from "./runlog.js";
 import { slackOneoff, alertWebhook, failAlertText } from "./lib/slack.js";
 import { githubLogUrl } from "./lib/github.js";
@@ -137,6 +137,33 @@ export function checkRestoredTables(
   return { ok: true, reason: null, counts };
 }
 
+/**
+ * Pure restored/reference row-ratio gate. `ref` is what the restored count is measured against:
+ *   - "dump-time" — the sentinel's count recorded AT BACKUP TIME (preferred): restored ≈ ref regardless
+ *      of how the live table has grown since the dump, so an active table can't false-trip the floor.
+ *   - "live"      — an n_live_tup estimate read from the live DB NOW (fallback for dumps predating the
+ *      recorded dump-time count): tolerant of rows added since the backup, but drifts for fast-growing tables.
+ * Floor (min-row-ratio) catches truncation/stale; ceiling (max-row-ratio) catches duplication. The breach
+ * message names which reference was used so a "live" false-positive is distinguishable from a real one.
+ */
+export function evalRowRatio(
+  sentinel: string,
+  restored: number,
+  ref: number,
+  minRowRatio: number,
+  maxRowRatio: number,
+  refKind: "dump-time" | "live",
+): { ok: boolean; ratio: number; reason: string | null } {
+  const ratio = Number((restored / ref).toFixed(4));
+  if (!(restored >= ref * minRowRatio)) {
+    return { ok: false, ratio, reason: `restored ${sentinel} ${restored} < ${minRowRatio}× ${refKind} ${ref} — truncated or stale` };
+  }
+  if (!(restored <= ref * maxRowRatio)) {
+    return { ok: false, ratio, reason: `restored ${sentinel} ${restored} > ${maxRowRatio}× ${refKind} ${ref} — duplicated?` };
+  }
+  return { ok: true, ratio, reason: null };
+}
+
 export interface DrillObjectOpts {
   /** Key UNDER backup-prefix, e.g. "2hourly/<file>" or "daily/<file>". */
   key: string;
@@ -146,6 +173,10 @@ export interface DrillObjectOpts {
   tmp: string;
   /** Prior passing drill's per-table counts, for the optional drill.max-row-drop gate. */
   priorCounts?: Record<string, number> | null;
+  /** The sentinel's row count recorded AT DUMP TIME for this object (from the run-log), when known.
+   * The "live-ratio" gate compares the restored count against this instead of a live-now estimate —
+   * eliminating the growth drift that false-tripped the floor. null/absent → fall back to the live estimate. */
+  refCount?: number | null;
 }
 
 export interface DrillObjectResult {
@@ -264,19 +295,24 @@ export async function drillObject(opts: DrillObjectOpts): Promise<DrillObjectRes
 
   let ratio: number | null = null;
   if (gate === "live-ratio") {
-    const sentLive = liveEst(sentinel);
-    const liveNum = Number(sentLive);
-    if (!(sentLive !== "" && liveNum > 0)) return done(false, null, `could not read live ${sentinel} estimate`);
-    ratio = Number((restoredNum / liveNum).toFixed(4));
-    // restored should be >= min-row-ratio × live (allows rows added since the backup; catches truncation)
-    if (!(restoredNum >= liveNum * cfg.minRowRatio)) {
-      return done(false, ratio, `restored ${sentinel} ${restoredNum} < ${cfg.minRowRatio}× live ${sentLive} — truncated or stale`);
+    // Prefer the count recorded AT DUMP TIME (restored ≈ ref, immune to how the live table has grown
+    // since); fall back to the live n_live_tup estimate only for dumps that predate that record.
+    let refNum: number;
+    let refKind: "dump-time" | "live";
+    if (opts.refCount != null && opts.refCount > 0) {
+      refNum = opts.refCount;
+      refKind = "dump-time";
+    } else {
+      const sentLive = liveEst(sentinel);
+      const liveNum = Number(sentLive);
+      if (!(sentLive !== "" && liveNum > 0)) return done(false, null, `could not read live ${sentinel} estimate`);
+      refNum = liveNum;
+      refKind = "live";
     }
-    // …and <= max-row-ratio × live (catches duplicated / double-restored rows)
-    if (!(restoredNum <= liveNum * cfg.maxRowRatio)) {
-      return done(false, ratio, `restored ${sentinel} ${restoredNum} > ${cfg.maxRowRatio}× live ${sentLive} — duplicated?`);
-    }
-    console.log(`Row-count table public.${sentinel}: restored=${restoredNum} (live≈${sentLive}, ratio ${ratio})`);
+    const gateRes = evalRowRatio(sentinel, restoredNum, refNum, cfg.minRowRatio, cfg.maxRowRatio, refKind);
+    ratio = gateRes.ratio;
+    if (!gateRes.ok) return done(false, ratio, gateRes.reason);
+    console.log(`Row-count table public.${sentinel}: restored=${restoredNum} (${refKind}≈${refNum}, ratio ${ratio})`);
   } else {
     console.log(`Row-count table public.${sentinel}: restored=${restoredNum} (nonempty gate — aged copy, no live ratio)`);
   }
@@ -300,6 +336,17 @@ export async function drillObject(opts: DrillObjectOpts): Promise<DrillObjectRes
   }
 
   return done(true, ratio, null);
+}
+
+/** The sentinel's row count recorded at DUMP time for this object stamp — the live-ratio gate's dump-time
+ * reference — or null (no run-log, no matching run, or a run predating the recorded count). Best-effort. */
+function dumpTimeRefCount(stamp: string | null, sentinel: string): number | null {
+  if (!stamp) return null;
+  try {
+    return loadLog().runByStamp.get(stamp)?.counts?.[sentinel] ?? null;
+  } catch {
+    return null;
+  }
 }
 
 /** Most recent passing RESTORE drill's per-table counts (the drift baseline), best-effort. */
@@ -382,8 +429,9 @@ async function main(): Promise<void> {
   // verifiedTs known the moment the object is selected → fail() paths below can still attribute it.
   const verifiedTs = stampToIso(key);
   const priorCounts = core.maxRowDrop > 0 ? priorDrillCounts() : null;
+  const refCount = dumpTimeRefCount(stampFromKey(newest), core.rowCountTable);
 
-  const result = await drillObject({ key, tier: "2hourly", gate: "live-ratio", cfg: core, tmp, priorCounts });
+  const result = await drillObject({ key, tier: "2hourly", gate: "live-ratio", cfg: core, tmp, priorCounts, refCount });
 
   // Record the verification — PASS or FAIL (gap #5). Pre-selection failures above have no dump to
   // attribute, so they fail() without a verification; here we always have a selected object.

@@ -215,6 +215,26 @@ async function main(): Promise<void> {
   // Keep the DB password off pg_dump's argv (visible in `ps`) — it rides in a 0600 PGPASSFILE instead.
   const db = pgConn(dbUrl, tmp);
 
+  // Dump-time reference count of the drill sentinel table. Taken here — just before the dump, so it
+  // reflects ~the snapshot pg_dump is about to capture — and recorded in the run-log. The restore-drill /
+  // durable-verify live-ratio gate compares the RESTORED count against THIS (restored ≈ dump-time), instead
+  // of a live-now estimate that drifts upward as an active table grows between dump and verify (the false
+  // "truncated or stale" it used to raise). Probed exactly as the drill will (`public.<table>`, an exact
+  // count(*)). Best-effort: no sentinel / no psql / a failed count just omits it → the drill falls back to
+  // the live estimate. null (not {}) when there's nothing to record, so a legacy-shaped run stays null.
+  let dumpCounts: Record<string, number> | null = null;
+  const sentinelTable = cfg.drill.rowCountTable;
+  if (sentinelTable && commandExists("psql")) {
+    const r = capture("psql", [db.safeUrl, "-tAc", `SELECT count(*) FROM public.${sentinelTable}`], db.env);
+    const n = Number(r.out.replace(/\s/g, ""));
+    if (r.ok && Number.isFinite(n)) {
+      dumpCounts = { [sentinelTable]: n };
+      console.log(`Dump-time row count public.${sentinelTable}: ${n}`);
+    } else {
+      process.stderr.write(`warning: could not count public.${sentinelTable} at dump time — the drill will fall back to the live estimate\n`);
+    }
+  }
+
   console.log(`Dumping Postgres → ${out} (ENCRYPTION=${encryption}) ...`);
   if (encryption === "none") {
     const code = await runToFile("pg_dump", [...dumpFlags, db.safeUrl], out, db.env);
@@ -360,6 +380,7 @@ async function main(): Promise<void> {
       bytes: size,
       key: firstKey,
       sha256,
+      counts: dumpCounts,
       durationMs: Date.now() - SCRIPT_START_MS,
     }),
   );
