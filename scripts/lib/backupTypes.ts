@@ -76,6 +76,11 @@ export interface LogRun {
   /** SHA-256 hex of the uploaded object (ciphertext for age). PRIVATE; the integrity baseline
    * for the durable hash-verify. null for runs predating this field or when hashing was skipped. */
   sha256: string | null;
+  /** Sentinel-table row count(s) captured from the live DB AT DUMP TIME — the durable reference the
+   * restore-drill / durable-verify live-ratio gate compares the RESTORED count against, instead of a
+   * live-now estimate that drifts as the table grows between dump and verify. PRIVATE; never published.
+   * null on records predating this field or when the count could not be taken (drill falls back to live). */
+  counts: Record<string, number> | null;
   runId: string | null;
   runUrl: string | null;
   /** Raw failure reason — PRIVATE only, never published. */

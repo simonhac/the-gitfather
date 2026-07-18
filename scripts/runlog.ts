@@ -119,6 +119,8 @@ export interface RunRecordInput {
   key?: string | null;
   /** SHA-256 hex of the uploaded object (the durable hash-verify baseline). */
   sha256?: string | null;
+  /** Sentinel-table row count(s) taken at dump time — the drill's dump-time ratio reference. PRIVATE. */
+  counts?: Record<string, number> | null;
   /** Raw failure reason — PRIVATE only, never published. */
   error?: string | null;
   /** Whole backup-script wall time in ms (process start → this append). */
@@ -135,6 +137,7 @@ export function appendRun(input: RunRecordInput): void {
     bytes: input.bytes ?? null,
     key: input.key ?? null,
     sha256: input.sha256 ?? null,
+    counts: input.counts ?? null,
     runId,
     runUrl,
     error: input.error ?? null,
