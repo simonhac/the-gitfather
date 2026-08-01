@@ -20,6 +20,7 @@ import {
   loadDrillConfig,
   loadVerifyDurableConfig,
   loadStalenessConfig,
+  loadArchiveConfig,
   loadDashboardConfig,
   type Profile,
 } from "./lib/config.js";
@@ -34,7 +35,7 @@ import {
   configureRcloneRemote,
 } from "./lib/preflight.js";
 
-const TASKS = ["backup", "drill", "verify-durable", "staleness", "dashboard"] as const;
+const TASKS = ["backup", "archive", "drill", "verify-durable", "staleness", "dashboard"] as const;
 type Task = (typeof TASKS)[number];
 
 /** Slack probe iff a bot token + channel are configured. */
@@ -66,6 +67,25 @@ async function probeRestore(cfg: Profile): Promise<ProbeResult[]> {
   out.push(checkR2("r2", r2.bucket!, "R2 dump bucket"));
   out.push(checkPostgres(cfg.credentials.drillDatabaseUrl!, "drill target"));
   out.push(checkPostgres(cfg.credentials.liveDatabaseUrl!, "live row-count source"));
+  out.push(...(await maybeSlack(cfg)));
+  return out;
+}
+
+/**
+ * Archive preflight. Deliberately probes the ARCHIVE database credential, not the dump's: it is a
+ * separate secret precisely because this is the only task that deletes, and a run that silently
+ * fell back to the dump URL would blur that boundary.
+ */
+async function probeArchive(): Promise<ProbeResult[]> {
+  const cfg = loadArchiveConfig({ toR2: true });
+  const r2 = cfg.credentials.r2;
+  const out: ProbeResult[] = [checkBinary("rclone"), checkBinary("psql")];
+  if (cfg.archive.compression === "zstd") out.push(checkBinary("zstd"));
+  if (cfg.archive.compression === "gzip") out.push(checkBinary("gzip"));
+  if (cfg.archive.encryption === "age") out.push(checkBinary("age"));
+  configureRcloneRemote("r2", r2.accountId!, r2.accessKeyId!, r2.secretAccessKey!);
+  out.push(checkR2("r2", r2.bucket!, "R2 archive bucket"));
+  out.push(checkPostgres(cfg.credentials.archiveDatabaseUrl!, "archive source"));
   out.push(...(await maybeSlack(cfg)));
   return out;
 }
@@ -125,6 +145,7 @@ async function probeDashboard(): Promise<ProbeResult[]> {
 
 const PROBES: Record<Task, () => Promise<ProbeResult[]>> = {
   backup: probeBackup,
+  archive: probeArchive,
   drill: probeDrill,
   "verify-durable": probeVerifyDurable,
   staleness: probeStaleness,

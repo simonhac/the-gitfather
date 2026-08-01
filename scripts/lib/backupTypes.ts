@@ -90,6 +90,40 @@ export interface LogRun {
   durationMs: number | null;
 }
 
+/**
+ * One archive-task record, per TABLE per run → _log/<name>/archives-YYYY-MM.jsonl.
+ *
+ * Deliberately its OWN file rather than a row in runs-*.jsonl: LogRun is shaped around GFS tiers,
+ * and archive records with `tiers: []` would render as malformed backup cells in the very heatmap
+ * that exists to make a dropped backup obvious. Nothing renders this yet — it is written from day
+ * one because observability cannot be backfilled; a dashboard panel added later would otherwise
+ * arrive with no history behind it.
+ */
+export interface LogArchive {
+  /** ISO-8601 UTC stamp of the run. */
+  ts: string;
+  ok: boolean;
+  table: string;
+  mode: "archive" | "prune" | "both";
+  /** "none" for a real run; a dry run is recorded too, so the log explains a quiet week. */
+  dryRun: "none" | "source" | "store";
+  weeksArchived: number;
+  rowsArchived: number;
+  weeksPruned: number;
+  rowsPruned: number;
+  /** Bytes of archive object written this run (post-compression, post-encryption). */
+  bytes: number | null;
+  /** Prune refusals — the fingerprint gate declining to delete. Non-zero means a human must look. */
+  refusals: number;
+  /** Rows found in an already-pruned week. Should always be 0. */
+  anomalies: number;
+  /** Raw failure reason — PRIVATE, never published. */
+  error: string | null;
+  durationMs: number | null;
+  runId: string | null;
+  runUrl: string | null;
+}
+
 export interface LogVerification {
   ts: string;
   /** The dump stamp the drill restored & verified (matches a LogRun.ts). */

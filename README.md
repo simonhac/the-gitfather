@@ -289,6 +289,8 @@ The caller reads these and passes them in (explicit `secrets:` + `with:` inputs,
 | secret | `HEARTBEAT_URL` | (optional) dead-man's-switch ping URL |
 | secret | `ALERT_WEBHOOK_URL` | (optional) generic **failure** webhook (Slack-compatible `{"text":…}` POST) — a no-bot alert fallback, or a redundant failure channel into a host app's existing incoming webhook when the bot is also set |
 | secret | `AGE_RECIPIENT` / `AGE_IDENTITY` | (optional) only when `encryption: age` |
+| secret | `PG_ARCHIVE_DATABASE_URL` | (archive) the same DB, kept separate because this is the only task that **deletes** |
+| secret | `AGE_ARCHIVE_RECIPIENT` | (archive) age **public** recipient. Its identity stays OFFLINE — never a repo secret |
 | **variable** | `DASHBOARD_R2_BUCKET` | (dashboard) public bucket name |
 | secret | `DASHBOARD_R2_ACCESS_KEY_ID` / `DASHBOARD_R2_SECRET_ACCESS_KEY` | (dashboard) write-only token for the public bucket |
 
@@ -346,6 +348,127 @@ lock/lifecycle config — it is the only R2 credential CI gets.
 
 For the dashboard, create a **separate public** bucket and a **write-only** token for it (the dump
 bucket gains no web surface).
+
+---
+
+## Archiving a table out of Postgres
+
+Backups copy; the **archiver moves**. `archive-table.ts` extracts rows older than N weeks from an
+append-only table into one compressed, encrypted object per ISO week, and — as a separately gated
+step — deletes those rows from the source. It is for the table that has outgrown its database: the
+request log, the event log, the audit trail nobody queries but nobody wants to lose.
+
+It is entirely optional and entirely profile-driven. Omit the `archive:` block and nothing changes.
+
+```
+<store-prefix>/<table>/2026/<name>-<table>-2026-W23-p001.ndjson.zst.age   # encrypted rows
+<store-prefix>/<table>/2026/<name>-<table>-2026-W23-p001.manifest.json    # plaintext sidecar
+<store-prefix>/<table>/_index/<table>-2026.jsonl                          # derived cache
+```
+
+Weeks are ISO-8601 on **UTC** boundaries, half-open `[Mon 00:00Z, next Mon 00:00Z)`, so they tile the
+timeline with no gap and no overlap. The folder is the ISO *week-numbering* year, which is why
+`2026-W01` files under `2026/` even though it begins on 29 December 2025 — label and folder can never
+disagree. A week eligible but **empty** still gets a manifest (`rowCount: 0`, no data object), so a gap
+in the archive is explained rather than mysterious.
+
+### Why prune is a separate phase
+
+A week is deleted only after its object has been re-downloaded and its SHA-256 re-checked, **and** only
+if the live row set still matches what was archived. That match is a fingerprint — `count(*)` plus an
+order-independent 64-bit XOR of `md5(id)` — that Postgres and Node compute identically:
+
+```sql
+bit_xor(('x' || substr(md5(id::text), 1, 16))::bit(64)::bigint)
+```
+
+The point of an XOR rather than a hash over sorted ids is that it needs no ordering and constant
+memory — `string_agg` over millions of uuids would allocate hundreds of megabytes inside Postgres.
+The deeper point is that **the gate never decrypts anything**, which is what lets the archive key stay
+out of CI entirely (below).
+
+Any drift refuses outright; nothing is ever partially deleted. The two ways drift can happen are
+handled without set subtraction, because objects are additive parts and never rewritten:
+
+| situation | what happens |
+|---|---|
+| rows changed between archive and prune | re-archive the full window as `p002`, mark `p001` superseded, prune against `p002` |
+| rows appear in a week that was already pruned | archive them as a supplement part, and raise a loud alert — this should not happen |
+
+### The two levels of dry run
+
+| flag | source database | store |
+|---|---|---|
+| `--dry-run=none` (default) | reads + deletes | writes |
+| `--dry-run=source` | read-only, enforced with `SET default_transaction_read_only` | writes |
+| `--dry-run=store` | read-only, enforced | nothing written; artifacts left in the work dir |
+
+`store` implies `source`. That is a safety invariant, not a convenience: there is deliberately no
+combination of flags that deletes rows without having written them. Orthogonally,
+`--target=local:<dir>` performs **real** writes to a directory (refusing to overwrite, so it rehearses
+WORM too) — run the whole pipeline there before pointing it at R2.
+
+### Encryption: a different recipient from the dumps
+
+`archive.encryption: age` uses **`AGE_ARCHIVE_RECIPIENT`**, not the dumps' `AGE_RECIPIENT`. Keep the
+matching identity **offline** (a password manager, not a GitHub secret). CI never needs it: verification
+is hash- and fingerprint-based, so a leaked CI credential can move archives around but cannot read a
+single row.
+
+Resist the temptation to reuse the dump recipient. CI legitimately holds *that* identity so
+`verify-durable-pg.ts` can keep proving dumps restore — and a dump is regenerated every few hours, so
+its confidentiality window is short. The archive is the opposite: irreplaceable, and often the most
+sensitive thing you store. Different lifetimes, different trust domains, different keys.
+
+### R2 setup for the archive prefix (once)
+
+Archives are meant to be **permanent**, which is the inverse of the GFS tiers:
+
+```bash
+# NO lifecycle expiry rule on <store-prefix>/ — that absence is what makes archives permanent.
+# A lock for ransomware resistance. Locks OUTRANK lifecycle, so never combine the two here.
+npx wrangler r2 bucket lock add <your-bucket> lock-archive <store-prefix>/ --retention-days 90
+```
+
+Two mechanisms, deliberately not conflated: permanence comes from the missing expiry rule; resistance
+to a leaked credential comes from the lock. 90 days rather than the dumps' 14 because there is no short
+expiry to fight, and it still lets a human with account-level creds clean up an early mistake. The lock
+must **not** cover `_index/`, which is rewritten in place — it is a materialised view of the manifests,
+recoverable at any time with `--rebuild-index`.
+
+The same CI token works: Object Read & Write, no delete.
+
+### Backfilling a legacy table
+
+The first run against a table with years of history is the same code path, looped. Work it off in
+batches, verify, and only then delete:
+
+```bash
+# 1. archive only — this NEVER deletes, so it is safe to repeat and safe to interrupt
+npx tsx scripts/archive-table.ts --mode archive --max-weeks 8
+# …repeat until it reports nothing eligible. It resumes from the manifests already in the store,
+#    so there is no local state to lose.
+
+# 2. spot-check: pull one object back and decrypt it with the offline identity
+rclone cat r2:<bucket>/<key> | age -d -i identity.txt | zstd -d | head -1
+
+# 3. then, and only then
+npx tsx scripts/archive-table.ts --mode prune
+```
+
+Afterwards, run **`VACUUM FULL`** on the table once. A plain `DELETE` only marks space reusable — it
+does not return it to the operating system — so without this the table stops growing but never shrinks.
+It takes an `ACCESS EXCLUSIVE` lock, so size the window to the table: seconds for tens of megabytes,
+rather longer for tens of gigabytes.
+
+### Preflight
+
+```bash
+npm run doctor -- archive
+```
+
+Checks the config, that `psql` / `zstd` / `age` / `rclone` are present, that the archive database
+credential connects, and that the bucket is reachable — before a single row moves.
 
 ---
 
@@ -576,6 +699,7 @@ keys). Credentials are **never** in it — they come from the environment (GitHu
 - **`drill:`** — `row-count-table`, `present-tables` (must exist), `nonempty-tables` (must exist +
   non-empty), `min-row-ratio`, `max-row-ratio`, `max-row-drop`
 - **`verify-durable:`** — `fresh`, `aged`, `retest-days`, `max-restores`
+- **`archive:`** *(optional — see [Archiving a table](#archiving-a-table-out-of-postgres))* — `store-prefix`, `encryption` (`none`|`age`), `compression` (`zstd`|`gzip`|`none`), `compression-level`, and `tables:` — a list of `{ table, time-column, archive-after-weeks, prune-after-weeks, delete-batch-rows, max-weeks-per-run }`
 - **`staleness:`** — `slot-minutes`, `grace-minutes`, `max-age-hours`, `heal-workflow`, `self-heal`, `dry-run`
 - **`slack:`** — `alert-mention` (the channel id is env: `SLACK_CHANNEL`)  ·  **`dashboard:`** — `label`, `hide-run-links`, `url`, `path-prefix`
 

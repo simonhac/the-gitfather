@@ -29,14 +29,14 @@ export interface Env {
   STATE: R2Bucket; // binding: shared dashboard bucket (free, in-network) — scheduler state + logs
 }
 
-type Cadence = "backup" | "staleness" | "durableVerify" | "restoreDrill";
+type Cadence = "backup" | "staleness" | "durableVerify" | "restoreDrill" | "archive";
 
 interface Client {
   id: string; // opaque label — the ONLY client identifier that may appear in logs
   owner: string;
   repo: string;
   installationId: number; // the GitHub App's installation id on this owner's account (not secret; rides in CLIENTS)
-  cadences?: Cadence[]; // optional allowlist of cadences this client runs (default: all)
+  cadences?: Cadence[]; // optional allowlist of cadences this client runs (default: all NON-opt-in ones)
   workflows?: Partial<Record<Cadence, string>>; // optional per-client filename overrides (default: DEFAULT_WORKFLOWS)
 }
 
@@ -48,7 +48,7 @@ interface DispatchResult {
 }
 
 const REF = "main"; // branch in the client repo whose caller workflow we dispatch
-const ALL_CADENCES: readonly Cadence[] = ["backup", "staleness", "durableVerify", "restoreDrill"];
+const ALL_CADENCES: readonly Cadence[] = ["backup", "staleness", "durableVerify", "restoreDrill", "archive"];
 
 // the-gitfather's conventional caller-workflow filenames. They're identical across consuming repos by
 // convention, so they live here as defaults rather than being repeated for every client in the roster.
@@ -58,10 +58,18 @@ const DEFAULT_WORKFLOWS: Record<Cadence, string> = {
   staleness: "pg-staleness-check.yml",
   durableVerify: "pg-durable-verify.yml",
   restoreDrill: "pg-restore-drill.yml",
+  archive: "pg-archive.yml",
 };
 
 const workflowFor = (c: Client, cadence: Cadence): string => c.workflows?.[cadence] ?? DEFAULT_WORKFLOWS[cadence];
-const subscribes = (c: Client, cadence: Cadence): boolean => (c.cadences ? c.cadences.includes(cadence) : true);
+// Cadences a client gets ONLY by naming them. `cadences` defaults to "everything", so a cadence added
+// after clients are already in the roster MUST be opt-in — otherwise it starts dispatching to repos
+// that have no such caller workflow and 404s on every tick. `archive` also deletes rows, which is not
+// something any client should acquire by upgrade.
+const OPT_IN_CADENCES: readonly Cadence[] = ["archive"];
+
+const subscribes = (c: Client, cadence: Cadence): boolean =>
+  c.cadences ? c.cadences.includes(cadence) : !OPT_IN_CADENCES.includes(cadence);
 
 // Which cadences are due on THIS 10-min tick? All cadences are sub-harmonics of 10 minutes, so a single
 // */10 trigger covers everything (1 of the free plan's 5 cron-trigger slots). All math is UTC.
@@ -71,6 +79,14 @@ function dueCadences(t: Date): Cadence[] {
   const h = t.getUTCHours();
   if (m === 0 && h % 8 === 0) due.push("backup"); // every 8h at 00/08/16 UTC (16 = the profiles' anchor-hour → daily/weekly/monthly still promote)
   if (h === 18 && m === 30) due.push("durableVerify"); // daily ~18:30 UTC — must be after the latest anchor hour
+  // Weekly, SUNDAY 19:30 UTC. The day and hour are both load-bearing, so do not move this casually:
+  //   • Sunday is when computeTiers() promotes a dump to the `weekly` tier (at the profile's
+  //     anchor-hour, 16:00 UTC). Running at 19:30 puts the prune ~3.5h AFTER that promotion, so every
+  //     delete is preceded by a same-day durable snapshot that lives for the weekly tier's retention.
+  //     The archive is the system of record, but it is not the only copy of what was just deleted.
+  //   • 19:30 is also after durableVerify (18:30) and well clear of every backup hour (00/08/16).
+  // Opt-in per client via the roster's `cadences` (see OPT_IN_CADENCES).
+  if (t.getUTCDay() === 0 && h === 19 && m === 30) due.push("archive");
   // restoreDrill is superseded by durableVerify; dispatch it only via the manual /trigger endpoint if needed.
   return due;
 }

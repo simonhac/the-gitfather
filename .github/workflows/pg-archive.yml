@@ -1,0 +1,140 @@
+name: pg-archive (reusable)
+
+# Reusable table archiver: move rows older than N weeks out of Postgres into per-week, compressed,
+# encrypted objects in R2 — then, only after each object has been re-downloaded and hash-verified,
+# delete those rows from the source. A consuming repo calls this from a thin caller workflow that
+# owns the schedule + secrets and points at its profile's `archive:` block.
+#
+# Retention is the INVERSE of pg-backup's: archives are meant to be permanent, so the archive/
+# prefix gets NO R2 lifecycle expiry rule (plus a bucket lock for ransomware resistance). See README.
+#
+# The two phases are separable on purpose. `mode: archive` is safe to run repeatedly — it never
+# deletes — which is what makes a large first-time backfill something you can work off in batches
+# and verify before anything is removed.
+
+on:
+  workflow_call:
+    inputs:
+      profile:
+        description: "Path (within the CALLER repo) to the profile .yaml, e.g. pg-backup/myproject.yaml"
+        type: string
+        required: true
+      gitfather_ref:
+        description: "Ref of this repo (the-gitfather) to run the scripts from."
+        type: string
+        required: false
+        default: main
+      r2_bucket:
+        description: "Private R2 bucket name (caller passes vars.R2_BUCKET). Same bucket as the dumps; different prefix."
+        type: string
+        required: true
+      slack_channel:
+        description: "Slack channel id for the summary/alerts (caller passes vars.SLACK_CHANNEL); empty disables Slack."
+        type: string
+        required: false
+        default: ""
+      mode:
+        description: "archive | prune | both. Use 'archive' alone for a backfill — it never deletes."
+        type: string
+        required: false
+        default: both
+      table:
+        description: "Restrict the run to one configured table (default: every table in the profile)."
+        type: string
+        required: false
+        default: ""
+      max_weeks:
+        description: "Override the profile's max-weeks-per-run — the backfill throttle."
+        type: string
+        required: false
+        default: ""
+      dry_run:
+        description: "none | source | store. 'source' keeps the database read-only; 'store' also writes nothing."
+        type: string
+        required: false
+        default: none
+    # Passed EXPLICITLY, never `secrets: inherit` — this repo is owned by a different account than
+    # its consumers, where inherit silently yields empty strings.
+    secrets:
+      PG_ARCHIVE_DATABASE_URL:
+        # Separate from PG_BACKUP_DATABASE_URL on purpose: this is the only workflow that DELETES,
+        # so the capability is opt-in per repo and can later point at a least-privileged role.
+        required: true
+      R2_ACCOUNT_ID:
+        required: true
+      R2_ACCESS_KEY_ID:
+        required: true
+      R2_SECRET_ACCESS_KEY:
+        required: true
+      AGE_ARCHIVE_RECIPIENT:
+        # PUBLIC key material — a secret only so it travels with the other config. The matching
+        # identity is deliberately NOT available to CI; nothing here ever decrypts an archive.
+        required: false
+      SLACK_BOT_TOKEN:
+        required: false
+      ALERT_WEBHOOK_URL:
+        required: false
+
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+    # Generous: a backfill batch can move a lot of rows, and the delete side is deliberately
+    # throttled into small batches to stay kind to the replication slot.
+    timeout-minutes: 120
+    steps:
+      - name: Checkout caller repo (holds the profile)
+        uses: actions/checkout@v4
+        with:
+          path: caller
+
+      - name: Checkout the-gitfather (holds the scripts)
+        uses: actions/checkout@v4
+        with:
+          repository: simonhac/the-gitfather
+          ref: ${{ inputs.gitfather_ref }}
+          path: engine
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: engine/package-lock.json
+
+      - name: Install engine deps
+        run: npm ci
+        working-directory: engine
+
+      - name: Read profile (tool requirements for the install step)
+        working-directory: engine
+        env:
+          PROFILE: ${{ github.workspace }}/caller/${{ inputs.profile }}
+        run: npx tsx scripts/profile-export.ts >> "$GITHUB_ENV"
+
+      - uses: ./engine/.github/actions/setup-tools
+        with:
+          pg-client-major: ${{ env.PG_CLIENT_MAJOR }}
+          install-age: ${{ env.ARCHIVE_ENCRYPTION == 'age' }}
+          install-zstd: ${{ env.ARCHIVE_COMPRESSION == 'zstd' }}
+
+      - name: Archive / prune
+        working-directory: engine
+        env:
+          PROFILE: ${{ github.workspace }}/caller/${{ inputs.profile }}
+          PG_ARCHIVE_DATABASE_URL: ${{ secrets.PG_ARCHIVE_DATABASE_URL }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ inputs.r2_bucket }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AGE_ARCHIVE_RECIPIENT: ${{ secrets.AGE_ARCHIVE_RECIPIENT }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL: ${{ inputs.slack_channel }}
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+          GITHUB_TOKEN: ${{ github.token }} # read-only: lets a failure alert link to THIS job's log page
+        run: |
+          set -euo pipefail
+          args=(--mode "${{ inputs.mode }}" --dry-run "${{ inputs.dry_run }}")
+          # `if`, not `[ -n x ] && …`: under `set -e` a false test as the last command of an
+          # AND-list exits the step, so an unset optional input would abort the whole run.
+          if [ -n "${{ inputs.table }}" ]; then args+=(--table "${{ inputs.table }}"); fi
+          if [ -n "${{ inputs.max_weeks }}" ]; then args+=(--max-weeks "${{ inputs.max_weeks }}"); fi
+          npx tsx scripts/archive-table.ts "${args[@]}"

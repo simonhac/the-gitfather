@@ -28,15 +28,23 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildRawProfile } from "./lib/profile.js";
 import { githubRunInfo } from "./lib/github.js";
-import type { LogRun, LogVerification, BackupTier } from "./lib/backupTypes.js";
+import type { LogRun, LogVerification, LogArchive, BackupTier } from "./lib/backupTypes.js";
 
 function warn(msg: string): void {
   process.stderr.write(`runlog: ${msg}\n`);
 }
 
+// Bounded on purpose. rclone defaults to 3 retries x 10 low-level retries with 5-minute timeouts, so an
+// unreachable endpoint can stall for many minutes — unacceptable for a side-channel that is BEST-EFFORT
+// by contract and, in the archive task, runs after rows have already been deleted. Losing a log line to a
+// brief blip is a far better outcome than hanging the job that was writing it. The data plane (the dump
+// upload itself) keeps rclone's full retry behaviour; only this control-plane logger is clamped.
+const BOUNDED = ["--retries", "1", "--low-level-retries", "2", "--timeout", "30s", "--contimeout", "10s"];
+
 function rclone(args: string[]): { ok: boolean; out: string } {
   try {
-    return { ok: true, out: execFileSync("rclone", args, { encoding: "utf8" }) };
+    // execFileSync gets its own hard ceiling too, in case rclone ignores or outlives its own timeouts.
+    return { ok: true, out: execFileSync("rclone", [...args, ...BOUNDED], { encoding: "utf8", timeout: 120_000 }) };
   } catch (e) {
     const err = e as { stdout?: Buffer | string };
     return { ok: false, out: err.stdout ? err.stdout.toString() : "" };
@@ -48,7 +56,11 @@ function rclone(args: string[]): { ok: boolean; out: string } {
  * tell "file genuinely absent" (→ start fresh) from "R2 unreachable" (→ skip, don't risk
  * clobbering history with a truncated write). Never throws.
  */
-function appendRecord(fileBase: "runs" | "verifications", ts: string, record: LogRun | LogVerification): void {
+function appendRecord(
+  fileBase: "runs" | "verifications" | "archives",
+  ts: string,
+  record: LogRun | LogVerification | LogArchive,
+): void {
   const remote = process.env.RUNLOG_RCLONE_REMOTE ?? "r2";
   const bucket = process.env.R2_BUCKET; // credential (env)
   // Read the profile `name` tolerantly (raw, unvalidated) — appendRun is best-effort and is also called
@@ -106,7 +118,7 @@ function appendRecord(fileBase: "runs" | "verifications", ts: string, record: Lo
     warn("failed to write the run-log back to R2");
     return;
   }
-  process.stdout.write(`runlog: appended ${fileBase === "runs" ? "run" : "verify"} → _log/${basename}/${fileName}\n`);
+  process.stdout.write(`runlog: appended ${fileBase} → _log/${basename}/${fileName}\n`);
 }
 
 export interface RunRecordInput {
@@ -225,3 +237,12 @@ function isEntrypoint(): boolean {
 }
 
 if (isEntrypoint()) main();
+
+/**
+ * Append an archive-task record. Best-effort like the rest of this module: a logging hiccup must
+ * never fail an archive run, let alone leave rows deleted with no record that it happened.
+ */
+export function appendArchive(input: Omit<LogArchive, "runId" | "runUrl">): void {
+  const { runId, runUrl } = githubRunInfo();
+  appendRecord("archives", input.ts, { ...input, runId, runUrl });
+}

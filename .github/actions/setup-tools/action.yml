@@ -10,6 +10,10 @@ inputs:
     description: "Set 'true' to install the age CLI (required when encryption: age — used to encrypt/decrypt dumps). Not preinstalled on GitHub runners."
     required: false
     default: ""
+  install-zstd:
+    description: "Set 'true' to ensure the zstd CLI is present (archive compression: zstd). Normally preinstalled on GitHub runners; this is belt-and-braces."
+    required: false
+    default: ""
   rclone-version:
     description: "rclone version to pin."
     required: false
@@ -28,6 +32,19 @@ runs:
         sudo apt-get update -qq
         sudo apt-get install -y -qq age
         age --version
+
+    - name: Ensure zstd (archive compression=zstd)
+      if: inputs.install-zstd == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        # zstd ships in the ubuntu-latest image today, but the archiver hard-fails without it and
+        # a silently-changed runner image should not be able to break a weekly job.
+        if ! command -v zstd >/dev/null; then
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq zstd
+        fi
+        zstd --version
 
     - name: Install rclone (+ optional pg client)
       shell: bash
