@@ -45,6 +45,31 @@ integrity:                     # backup-time integrity checks
   check-structure: true        # pg_restore -l TOC check before declaring success (encryption: none)
   verify-after-upload: false   # opt-in: re-download + (decrypt) + pg_restore -l after upload (age structural check)
 
+archive:                       # OPTIONAL — archive-table.ts. Move old rows of an append-only table
+                               # OUT of Postgres into per-week objects, then delete them from the source.
+                               # Omit this block entirely if you don't archive anything.
+  store-prefix: archive/example  # object-key prefix, a SIBLING of backup-prefix. Give it its own R2
+                               #   lifecycle rule (NO expiry — that is what makes archives permanent)
+                               #   and its own bucket lock. Remember locks outrank lifecycle.
+  encryption: age              # none | age. NOT the same recipient as the dumps: this uses
+                               #   AGE_ARCHIVE_RECIPIENT, whose identity is meant to live OFFLINE, so a
+                               #   leaked CI credential cannot read the archive. Nothing in CI needs to
+                               #   decrypt — verification is hash + fingerprint based.
+  compression: zstd            # zstd | gzip | none. Applied BEFORE encryption.
+  compression-level: 12        # 1..19 for zstd (clamped to 9 for gzip)
+  tables:
+    - table: public.api_logs
+      time-column: created_at  # must be NOT NULL and indexed; weeks are ISO-8601 on UTC boundaries
+      archive-after-weeks: 4   # a week is eligible only once its LAST row is this old
+      prune-after-weeks: 13    # >= archive-after-weeks. Deliberately LONGER here: archiving from 4
+                               #   weeks keeps the pipeline exercised weekly (rather than idle until
+                               #   the horizon), while the database still answers a quarter of history
+                               #   for debugging and for any replay path that reads this table.
+                               #   Widening later is free; narrowing deletes more on the next run and
+                               #   nothing already deleted comes back — so err wide.
+      delete-batch-rows: 2000  # small batches — one huge DELETE floods a realtime publication's slot
+      max-weeks-per-run: 1     # the backfill throttle; override per run with --max-weeks
+
 retention:                     # GFS windows as natural-language durations (these are the defaults).
   grandson: 2 days             #   2-hourly — every 2 h, kept this long
   son: 3 weeks                 #   daily    — one per day at the anchor hour

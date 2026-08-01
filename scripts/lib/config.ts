@@ -174,6 +174,37 @@ const stalenessGroup = z
   })
   .strict().prefault({} as never);
 
+// Archive encryption deliberately offers FEWER options than the dump's `encryption:` — "aes-gcm"
+// is a not-implemented stub there, and an archive is the one artifact that must never be written
+// with a scheme that cannot actually run. Weeks are ISO-8601 on UTC boundaries with no timezone
+// knob: a local-time week would be 167 or 169 hours across a DST change, and the whole design
+// rests on weeks tiling the timeline exactly.
+const ARCHIVE_ENCRYPTIONS = ["none", "age"] as const;
+const COMPRESSIONS = ["zstd", "gzip", "none"] as const;
+
+const columnName = z.string().regex(/^\w+$/, "must be a column name (letters, digits, _)");
+
+const archiveTableGroup = z
+  .object({
+    table: tableName,
+    timeColumn: strDefault("created_at").pipe(columnName),
+    archiveAfterWeeks: intIn(4, 0, 520), // only weeks whose LAST row is this old are eligible
+    pruneAfterWeeks: intIn(4, 0, 520), // ≥ archive-after-weeks; widen to keep a replay window alive
+    deleteBatchRows: intIn(2000, 1, 500_000), // small batches: the table may be in a realtime publication
+    maxWeeksPerRun: intIn(1, 1, 10_000), // 1 for the weekly cadence; raise it to work off a backlog
+  })
+  .strict();
+
+const archiveGroup = z
+  .object({
+    storePrefix: opt(nonEmpty()), // required by archiveSchema; sibling of backup-prefix, own lifecycle+lock
+    encryption: z.enum(ARCHIVE_ENCRYPTIONS).default("age"),
+    compression: z.enum(COMPRESSIONS).default("zstd"),
+    compressionLevel: intIn(12, 1, 19),
+    tables: z.array(archiveTableGroup).default([]),
+  })
+  .strict().prefault({} as never);
+
 const slackGroup = z
   .object({
     // the channel id is a deployment identifier paired with the bot token, so it lives in the env
@@ -220,9 +251,26 @@ const credentialsGroup = z
     databaseUrl: opt(pgUrl), // PG_BACKUP_DATABASE_URL
     drillDatabaseUrl: opt(pgUrl), // DRILL_DATABASE_URL
     liveDatabaseUrl: opt(pgUrl), // PG_LIVE_DATABASE_URL
+    // PG_ARCHIVE_DATABASE_URL — the archiver is the only task that DELETES from the source, so it
+    // takes its own credential rather than reusing the dump's read-only-in-practice one. Keeping it
+    // separate makes the delete capability opt-in per repo and leaves room to point it at a
+    // least-privileged role later without touching the engine.
+    archiveDatabaseUrl: opt(pgUrl),
     r2: r2Creds,
     dashboardR2: r2Creds,
-    age: z.object({ recipient: opt(nonEmpty()), identity: opt(nonEmpty()) }).strict().prefault({} as never),
+    // Two recipients, two trust domains. `recipient`/`identity` (AGE_RECIPIENT/AGE_IDENTITY) encrypt
+    // the pg dumps, and CI holds that identity so the daily automated restore drill keeps working.
+    // `archiveRecipient` encrypts the archives, and its identity is deliberately NOT in CI — archive
+    // verification is hash + fingerprint based and never needs to decrypt. `archiveIdentity` exists
+    // only for a human running a decrypt drill or a restore locally.
+    age: z
+      .object({
+        recipient: opt(nonEmpty()),
+        identity: opt(nonEmpty()),
+        archiveRecipient: opt(nonEmpty()),
+        archiveIdentity: opt(nonEmpty()),
+      })
+      .strict().prefault({} as never),
     slackToken: opt(nonEmpty()), // SLACK_BOT_TOKEN (secret)
     slackChannel: opt(nonEmpty()), // SLACK_CHANNEL (non-secret id, paired with the token; a GitHub Variable)
     heartbeatUrl: opt(z.url()), // HEARTBEAT_URL
@@ -242,6 +290,7 @@ export const profileSchema = z.object({
   anchorHourUtc: intIn(16, 0, 23),
   dump: dumpGroup,
   integrity: integrityGroup,
+  archive: archiveGroup,
   retention: retentionGroup,
   drill: drillGroup,
   verifyDurable: verifyDurableGroup,
@@ -326,6 +375,44 @@ export const stalenessSchema = profileSchema
   .superRefine(requireValidStalenessSlot);
 
 /**
+ * Archive config. Like the dashboard, R2 requirements depend on a RUNTIME flag: `--target=local:<dir>`
+ * writes real artifacts to a directory and needs no bucket at all, which is how the whole pipeline is
+ * rehearsed before it is ever pointed at R2. archive-table.ts passes the target it parsed; doctor
+ * validates with toR2:true.
+ */
+export function archiveSchema(opts: { toR2?: boolean } = {}) {
+  return profileSchema
+    .superRefine(requireSlackChannel)
+    .superRefine((v, ctx) => {
+      if (!v.name) miss(ctx, ["name"], "must be set");
+      if (!v.archive.storePrefix) miss(ctx, ["archive", "storePrefix"], "must be set");
+      if (opts.toR2) requireR2(v, ctx);
+      if (!v.credentials.archiveDatabaseUrl) miss(ctx, ["credentials", "archiveDatabaseUrl"], "must be set");
+      if (v.archive.tables.length === 0) {
+        miss(ctx, ["archive", "tables"], "must list at least one table to archive");
+      }
+      if (v.archive.encryption === "age" && !v.credentials.age.archiveRecipient) {
+        miss(ctx, ["credentials", "age", "archiveRecipient"], "required when archive.encryption=age");
+      }
+      v.archive.tables.forEach((t, i) => {
+        // Pruning before archiving would delete rows that were never written — the schema refuses
+        // to express it rather than relying on the task to notice at runtime.
+        if (t.pruneAfterWeeks < t.archiveAfterWeeks) {
+          miss(
+            ctx,
+            ["archive", "tables", i, "pruneAfterWeeks"],
+            `must be >= archive-after-weeks (${t.archiveAfterWeeks}) — a week cannot be pruned before it is archived`,
+          );
+        }
+      });
+      const dupes = v.archive.tables.map((t) => t.table).filter((t, i, a) => a.indexOf(t) !== i);
+      if (dupes.length) {
+        miss(ctx, ["archive", "tables"], `duplicate table entries: ${[...new Set(dupes)].join(", ")}`);
+      }
+    });
+}
+
+/**
  * Dashboard config. R2_BUCKET / name requirements depend on RUNTIME flags (reading logs from R2 vs
  * --sample/--logdir; --upload), so the schema is parameterised: build-dashboard.ts passes the flags it
  * parsed; doctor validates with fromR2:true.
@@ -349,6 +436,7 @@ export type DrillConfig = Profile;
 export type VerifyDurableConfig = Profile;
 export type StalenessConfig = Profile;
 export type DashboardConfig = Profile;
+export type ArchiveConfig = Profile;
 
 // ── retention → dashboard RetentionMap ───────────────────────────────────────
 
@@ -365,6 +453,7 @@ const CRED_ENV: Record<string, string> = {
   "credentials.databaseUrl": "PG_BACKUP_DATABASE_URL",
   "credentials.drillDatabaseUrl": "DRILL_DATABASE_URL",
   "credentials.liveDatabaseUrl": "PG_LIVE_DATABASE_URL",
+  "credentials.archiveDatabaseUrl": "PG_ARCHIVE_DATABASE_URL",
   "credentials.r2.accountId": "R2_ACCOUNT_ID",
   "credentials.r2.bucket": "R2_BUCKET",
   "credentials.r2.accessKeyId": "R2_ACCESS_KEY_ID",
@@ -374,6 +463,8 @@ const CRED_ENV: Record<string, string> = {
   "credentials.dashboardR2.secretAccessKey": "DASHBOARD_R2_SECRET_ACCESS_KEY",
   "credentials.age.recipient": "AGE_RECIPIENT",
   "credentials.age.identity": "AGE_IDENTITY",
+  "credentials.age.archiveRecipient": "AGE_ARCHIVE_RECIPIENT",
+  "credentials.age.archiveIdentity": "AGE_ARCHIVE_IDENTITY",
   "credentials.slackToken": "SLACK_BOT_TOKEN",
   "credentials.slackChannel": "SLACK_CHANNEL",
   "credentials.heartbeatUrl": "HEARTBEAT_URL",
@@ -414,6 +505,7 @@ export const loadVerifyDurableConfig = (): VerifyDurableConfig => loadConfig(ver
 export const loadStalenessConfig = (): StalenessConfig => loadConfig(stalenessSchema);
 export const loadDashboardConfig = (opts?: { fromR2?: boolean; upload?: boolean }): DashboardConfig =>
   loadConfig(dashboardSchema(opts));
+export const loadArchiveConfig = (opts?: { toR2?: boolean }): ArchiveConfig => loadConfig(archiveSchema(opts));
 
 // ── Validated singleton (for the libs that read config globally: slack.ts / runlog.ts / logStore.ts) ──
 // Validated with the loose-cred profileSchema (creds optional — those libs null-guard, and a task's

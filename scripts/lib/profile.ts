@@ -63,6 +63,7 @@ function credentialsFromEnv(): Record<string, unknown> {
     databaseUrl: e.PG_BACKUP_DATABASE_URL,
     drillDatabaseUrl: e.DRILL_DATABASE_URL,
     liveDatabaseUrl: e.PG_LIVE_DATABASE_URL,
+    archiveDatabaseUrl: e.PG_ARCHIVE_DATABASE_URL,
     r2: {
       accountId: e.R2_ACCOUNT_ID,
       bucket: e.R2_BUCKET,
@@ -74,7 +75,12 @@ function credentialsFromEnv(): Record<string, unknown> {
       accessKeyId: e.DASHBOARD_R2_ACCESS_KEY_ID,
       secretAccessKey: e.DASHBOARD_R2_SECRET_ACCESS_KEY,
     },
-    age: { recipient: e.AGE_RECIPIENT, identity: e.AGE_IDENTITY },
+    age: {
+      recipient: e.AGE_RECIPIENT,
+      identity: e.AGE_IDENTITY,
+      archiveRecipient: e.AGE_ARCHIVE_RECIPIENT,
+      archiveIdentity: e.AGE_ARCHIVE_IDENTITY,
+    },
     slackToken: e.SLACK_BOT_TOKEN,
     slackChannel: e.SLACK_CHANNEL,
     heartbeatUrl: e.HEARTBEAT_URL,
