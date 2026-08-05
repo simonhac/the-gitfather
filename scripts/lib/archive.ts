@@ -520,6 +520,62 @@ export interface PrunePlan {
  * recorded when the object was written and verified. Any drift refuses outright — a partial
  * or best-effort delete is never an option, because the rows it removed would be unrecoverable.
  */
+/**
+ * The stored-object half of the prune gate: which object to re-read before deleting a week, and
+ * the SHA-256 it must still have. Pure, so every refusal path is testable without a store.
+ *
+ * planPrune() only compares the LIVE table against the manifest — it says nothing about whether the
+ * archive is still intact. The object IS hash-verified when written, but a week is pruned
+ * `prune-after-weeks − archive-after-weeks` later (9 weeks apart in Boost's profile), so in the
+ * steady state prune always acts on an object last verified many runs earlier. Without this, an
+ * object that rotted, was truncated, or was tampered with after archiving is deleted from the
+ * database anyway — the one unrecoverable mistake this tool can make.
+ *
+ * Every failure answers `error`, never "no hash recorded, carry on": a manifest we cannot read is
+ * not evidence that the archive is good. A legacy manifest predating `objectSha256` therefore
+ * BLOCKS its week's prune until it is re-archived, which is the safe direction to fail.
+ */
+export function parsePruneManifest(
+  text: string | null,
+  expectPart: number,
+): { objectKey: string; objectSha256: string } | { nothingToVerify: true } | { error: string } {
+  if (text === null) return { error: "manifest object is missing from the store" };
+  if (!text.trim()) return { error: "manifest object is empty" };
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { error: "manifest is not valid JSON" };
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { error: "manifest is not a JSON object" };
+  }
+  const m = parsed as Record<string, unknown>;
+
+  if (typeof m.part !== "number") return { error: "manifest records no part number" };
+  if (m.part !== expectPart) return { error: `manifest is for part ${m.part}, expected part ${expectPart}` };
+
+  if (typeof m.rowCount !== "number" || !Number.isFinite(m.rowCount)) {
+    return { error: "manifest records no rowCount" };
+  }
+
+  const objectKey = typeof m.objectKey === "string" ? m.objectKey.trim() : "";
+
+  // A zero-row week writes no data object at all (objectKey/objectSha256 are null by design), so
+  // there is nothing to re-read — and nothing to lose, since the delete removes no rows. This is
+  // gated on rowCount being genuinely 0, NOT merely on the key being absent: a manifest for a
+  // non-empty week that has lost its key must refuse, not silently waive the check.
+  if (m.rowCount === 0 && !objectKey) return { nothingToVerify: true };
+
+  if (!objectKey) return { error: "manifest records no objectKey" };
+
+  const objectSha256 = typeof m.objectSha256 === "string" ? m.objectSha256.trim() : "";
+  if (!objectSha256) return { error: "manifest records no objectSha256 — re-archive this week before pruning it" };
+
+  return { objectKey, objectSha256 };
+}
+
 export function planPrune(state: WeekState | undefined, live: Fingerprint): PrunePlan {
   if (!state) return { action: "refuse", reason: "no archive exists for this week" };
   if (state.state === "pruned") return { action: "skip", reason: "already pruned" };

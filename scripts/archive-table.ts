@@ -31,6 +31,16 @@ import "./lib/bootEnv.js"; // MUST be first — loads $PROFILE before backupType
 // available to CI — it is an age recipient whose identity lives offline — which is exactly why
 // the gate is built from hashes and fingerprints rather than from decrypting and diffing.
 //
+// BOTH HALVES RUN AT PRUNE TIME, and the object half is easy to lose. `verify-after-upload` proves
+// the bytes landed when the week was ARCHIVED; it says nothing about the object weeks later, and
+// prune-after-weeks is deliberately far beyond archive-after-weeks (13 vs 4 in Boost's profile), so
+// prune always acts on an object last checked many runs earlier. pruneWeek() therefore re-reads the
+// object and re-checks it against the manifest's objectSha256 before any DELETE — without that, an
+// object that rotted, was truncated, or was tampered with after archiving is deleted from the
+// database anyway, which is the one unrecoverable mistake this tool can make. A zero-row week has no
+// object and is exempt (see parsePruneManifest, which gates that exemption on rowCount, not on the
+// key being absent).
+//
 // Required env (credentials — from GitHub secrets, NOT the profile):
 //   PG_ARCHIVE_DATABASE_URL   the only task that DELETES; kept separate from the dump's URL
 //   AGE_ARCHIVE_RECIPIENT     age public recipient (archive.encryption: age)
@@ -59,6 +69,7 @@ import {
   indexObjectKey,
   planArchive,
   planPrune,
+  parsePruneManifest,
   activePart,
   sameFingerprint,
   parseDryRun,
@@ -400,6 +411,10 @@ async function archiveWeek(ctx: {
 
 async function pruneWeek(ctx: {
   pg: PgArchive;
+  store: Store;
+  workDir: string;
+  prefix: string;
+  name: string;
   table: string;
   timeColumn: string;
   week: IsoWeek;
@@ -408,7 +423,8 @@ async function pruneWeek(ctx: {
   mayDeleteRows: boolean;
   result: TableRun;
 }): Promise<void> {
-  const { pg, table, timeColumn, week, batchRows, states, mayDeleteRows, result } = ctx;
+  const { pg, store, workDir, prefix, name, table, timeColumn, week, batchRows, states, mayDeleteRows, result } = ctx;
+  const short = table.includes(".") ? table.split(".").pop()! : table;
   const state = states.get(week.label);
   const live = pg.fingerprint(table, timeColumn, week);
   const plan = planPrune(state, live);
@@ -419,6 +435,42 @@ async function pruneWeek(ctx: {
     warn(`⚠ ${msg}`);
     result.refusals.push(msg);
     return;
+  }
+
+  // The live table matches the manifest — but that says nothing about the ARCHIVE still being
+  // intact. Re-read the object and check it against the hash recorded when it was written. This
+  // runs before the mayDeleteRows gate on purpose, so a --dry-run=source rehearsal exercises the
+  // same proof a real prune depends on. Read-only: SuppressedStore passes reads through.
+  const manKey = manifestObjectKey({ prefix, name, table: short, week, part: plan.part! });
+  const man = parsePruneManifest(await store.cat(manKey), plan.part!);
+  if ("error" in man) {
+    const msg = `${table} ${week.label}: prune REFUSED — ${man.error}`;
+    warn(`⚠ ${msg}`);
+    result.refusals.push(msg);
+    return;
+  }
+  if (!("nothingToVerify" in man)) {
+    const reread = join(workDir, `prune-verify-${short}-${week.label}-p${plan.part}.bin`);
+    let actualSha: string;
+    try {
+      await store.fetchToFile(man.objectKey, reread);
+      actualSha = await sha256File(reread);
+    } catch (e) {
+      const msg = `${table} ${week.label}: prune REFUSED — could not re-read ${man.objectKey}: ${(e as Error).message}`;
+      warn(`⚠ ${msg}`);
+      result.refusals.push(msg);
+      return;
+    } finally {
+      rmSync(reread, { force: true });
+    }
+    if (actualSha !== man.objectSha256) {
+      const msg =
+        `${table} ${week.label}: prune REFUSED — archived object ${man.objectKey} re-read as ${actualSha}, ` +
+        `expected ${man.objectSha256} (the archive has changed since it was written; rows NOT deleted)`;
+      warn(`⚠ ${msg}`);
+      result.refusals.push(msg);
+      return;
+    }
   }
 
   if (!mayDeleteRows) {
@@ -539,6 +591,10 @@ async function processTable(ctx: {
     for (const week of ready) {
       await pruneWeek({
         pg,
+        store,
+        workDir,
+        prefix,
+        name,
         table,
         timeColumn,
         week,
