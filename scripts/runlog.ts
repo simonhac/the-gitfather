@@ -51,6 +51,61 @@ function rclone(args: string[]): { ok: boolean; out: string } {
   }
 }
 
+/** "YYYY-MM" for a Date, in UTC — the run-log's partition key (records are stamped in UTC). */
+function monthKey(d: Date): string {
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+}
+
+/**
+ * The newest run record in the PRIVATE run-log — for a consumer that needs the CAUSE of the last
+ * run, not just GitHub's pass/fail verdict (the staleness watchdog quotes it in its page, so an
+ * operator learns "the credential is stale" from Slack instead of from the Actions log).
+ *
+ * Reads only the current month's partition, falling back to the previous one so a failure in the
+ * first minutes of a month still resolves. Best-effort like everything else here: any problem
+ * answers null and the caller degrades to its unclassified wording.
+ */
+export function readLatestRun(now: Date = new Date()): LogRun | null {
+  const remote = process.env.RUNLOG_RCLONE_REMOTE ?? "r2";
+  const bucket = process.env.R2_BUCKET;
+  const rawName = buildRawProfile().name;
+  const basename = typeof rawName === "string" ? rawName : undefined;
+  if (!bucket || !basename) return null;
+
+  const prevMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
+  for (const ym of [monthKey(now), monthKey(prevMonth)]) {
+    const cat = rclone(["cat", `${remote}:${bucket}/_log/${basename}/runs-${ym}.jsonl`, "--s3-no-check-bucket"]);
+    if (!cat.ok) continue;
+    const latest = pickLatestRun(cat.out);
+    if (latest) return latest;
+  }
+  return null;
+}
+
+/**
+ * Newest valid record in a runs-*.jsonl body. Pure, so the awkward parts are testable without R2:
+ * a torn final line (read-modify-write means the last line can be partial) must not discard the
+ * whole partition, and the newest record is chosen by `ts` rather than by position, so an
+ * out-of-order append can't win.
+ */
+export function pickLatestRun(body: string): LogRun | null {
+  const records = (body ?? "")
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .map((l) => {
+      try {
+        return JSON.parse(l) as LogRun;
+      } catch {
+        return null;
+      }
+    })
+    .filter((r): r is LogRun => !!r && typeof r === "object" && !Array.isArray(r) && typeof r.ts === "string");
+  if (!records.length) return null;
+  records.sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
+  return records[records.length - 1];
+}
+
 /**
  * Best-effort read-modify-write of the current month's jsonl in R2. Lists first so we can
  * tell "file genuinely absent" (→ start fresh) from "R2 unreachable" (→ skip, don't risk
@@ -135,6 +190,8 @@ export interface RunRecordInput {
   counts?: Record<string, number> | null;
   /** Raw failure reason — PRIVATE only, never published. */
   error?: string | null;
+  /** Machine-readable twin of `error` (PgFailureCode) — PRIVATE. Lets the watchdog quote the cause. */
+  errorCode?: string | null;
   /** Whole backup-script wall time in ms (process start → this append). */
   durationMs?: number | null;
 }
@@ -153,6 +210,7 @@ export function appendRun(input: RunRecordInput): void {
     runId,
     runUrl,
     error: input.error ?? null,
+    errorCode: input.errorCode ?? null,
     durationMs: input.durationMs ?? null,
   };
   appendRecord("runs", input.ts, record);

@@ -38,3 +38,27 @@ export function parseDuration(input: string): Duration {
   const unit = m[2].toLowerCase();
   return { days: n * UNIT_DAYS[unit], label: `${n} ${unit}${n === 1 ? "" : "s"}` };
 }
+
+/**
+ * Human elapsed time for log lines and alert prose: "45m", "16h 19m", "1d 1h".
+ *
+ * The staleness log used to interpolate `${ageH}h ${ageM}m` where ageM was the TOTAL minutes,
+ * so a 16-hour-old backup printed as "16h 979m old". The minutes here are the remainder, the
+ * larger unit is dropped when zero, and a negative input (clock skew between the runner and the
+ * object stamp) clamps to "<1m" rather than rendering "-1h -3m".
+ */
+export function formatElapsed(ms: number): string {
+  const totalMin = Math.floor(Math.max(0, ms) / 60_000);
+  if (totalMin < 1) return "<1m";
+  if (totalMin < 60) return `${totalMin}m`;
+
+  const totalHours = Math.floor(totalMin / 60);
+  if (totalHours < 24) {
+    const m = totalMin % 60;
+    return m ? `${totalHours}h ${m}m` : `${totalHours}h`;
+  }
+
+  const d = Math.floor(totalHours / 24);
+  const h = totalHours % 24;
+  return h ? `${d}d ${h}h` : `${d}d`;
+}

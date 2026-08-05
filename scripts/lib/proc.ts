@@ -8,7 +8,7 @@
 //     runToFile()/pipeToFile() here. (execFileSync's default 1 MiB maxBuffer would
 //     throw on a real dump — see runlog.ts, which only ever handles tiny outputs.)
 //   • CONTROL-PLANE (rclone lsf/cat/copyto of jsonl + small objects, gh, psql counts):
-//     small, bounded output — capture() via execFileSync, mirroring runlog.ts:28-35.
+//     small, bounded output — capture() via spawnSync, mirroring runlog.ts:28-35.
 //
 // `set -euo pipefail` fidelity: each helper resolves a numeric exit code; pipeToFile()
 // awaits BOTH children and reports failure if EITHER is non-zero (Node has no pipefail).
@@ -16,7 +16,7 @@
 // caller's responsibility (each script owns a fatal() that records ❌ then process.exit(1)).
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { spawn, execFileSync, execSync } from "node:child_process";
+import { spawn, spawnSync, execSync } from "node:child_process";
 import { openSync, closeSync, createReadStream } from "node:fs";
 import { createHash } from "node:crypto";
 
@@ -59,7 +59,13 @@ export function run(
  * stderr inherited. Resolves the exit code (127 on a spawn error, like run()); never rejects,
  * so the caller's `if (code !== 0) await fail(...)` always runs. The fd is always closed.
  */
-export function runToFile(cmd: string, args: string[], outPath: string, env: Env = process.env): Promise<number> {
+export function runToFile(
+  cmd: string,
+  args: string[],
+  outPath: string,
+  env: Env = process.env,
+  opts: { onStderr?: (chunk: string) => void } = {},
+): Promise<number> {
   const fd = openSync(outPath, "w");
   return new Promise((resolve) => {
     let settled = false;
@@ -73,7 +79,13 @@ export function runToFile(cmd: string, args: string[], outPath: string, env: Env
       }
       resolve(code);
     };
-    const child = spawn(cmd, args, { stdio: ["ignore", fd, "inherit"], env });
+    // stderr stays "inherit" unless the caller wants a copy: an observer must not change the job
+    // log. With onStderr, stderrTee() writes every chunk straight through as well as buffering it.
+    const child = spawn(cmd, args, { stdio: ["ignore", fd, opts.onStderr ? "pipe" : "inherit"], env });
+    if (opts.onStderr) {
+      child.stderr?.setEncoding("utf8");
+      child.stderr?.on("data", (chunk: string) => opts.onStderr!(chunk));
+    }
     child.on("error", (e) => {
       process.stderr.write(`${cmd}: ${(e as Error).message}\n`);
       done(127);
@@ -95,6 +107,7 @@ export function pipeToFile(
   b: { cmd: string; args: string[] },
   outPath: string,
   env: Env = process.env,
+  opts: { onStderrA?: (chunk: string) => void; onStderrB?: (chunk: string) => void } = {},
 ): Promise<number> {
   const fd = openSync(outPath, "w");
   return new Promise((resolve) => {
@@ -114,8 +127,19 @@ export function pipeToFile(
       resolve(code);
     };
 
-    const left = spawn(a.cmd, a.args, { stdio: ["ignore", "pipe", "inherit"], env });
-    const right = spawn(b.cmd, b.args, { stdio: ["pipe", fd, "inherit"], env });
+    // Each child's stderr is captured SEPARATELY when asked for. Merging them would let the
+    // encryptor's noise be classified as a dump failure (or vice versa) — the two legs fail for
+    // completely different reasons and only the left one speaks libpq.
+    const left = spawn(a.cmd, a.args, { stdio: ["ignore", "pipe", opts.onStderrA ? "pipe" : "inherit"], env });
+    const right = spawn(b.cmd, b.args, { stdio: ["pipe", fd, opts.onStderrB ? "pipe" : "inherit"], env });
+    if (opts.onStderrA) {
+      left.stderr?.setEncoding("utf8");
+      left.stderr?.on("data", (chunk: string) => opts.onStderrA!(chunk));
+    }
+    if (opts.onStderrB) {
+      right.stderr?.setEncoding("utf8");
+      right.stderr?.on("data", (chunk: string) => opts.onStderrB!(chunk));
+    }
 
     if (left.stdout && right.stdin) {
       // If `right` dies first, swallow the resulting EPIPE on the left's stdout rather
@@ -162,26 +186,47 @@ export function pipeToFile(
 /**
  * Run `cmd args` and capture its stdout — for rclone lsf/cat/copyto and psql counts. Returns
  * ok=false (not a throw) on non-zero so the caller can distinguish "command ran, empty result"
- * from "command failed". stderr is suppressed (mirrors the bash control-plane `2>/dev/null`),
- * and maxBuffer is raised to 256 MiB so a long-retention recursive `rclone lsf -R` listing
+ * from "command failed". stderr is RETURNED rather than discarded — it used to go to /dev/null,
+ * which is how a psql probe that had actually hit `FATAL: password authentication failed` could
+ * only ever be reported as "could not count". Nothing prints it; a caller that wants it asks.
+ * maxBuffer is raised to 256 MiB so a long-retention recursive `rclone lsf -R` listing
  * cannot trip the default 1 MiB limit (which would masquerade as an empty bucket). Do NOT use
  * this for a dump-sized stream — that path uses runToFile/pipeToFile.
  */
-export function capture(cmd: string, args: string[], env: Env = process.env): { ok: boolean; out: string } {
-  try {
-    return {
-      ok: true,
-      out: execFileSync(cmd, args, {
-        encoding: "utf8",
-        env,
-        maxBuffer: 256 * 1024 * 1024,
-        stdio: ["ignore", "pipe", "ignore"],
-      }),
-    };
-  } catch (e) {
-    const err = e as { stdout?: Buffer | string };
-    return { ok: false, out: err.stdout ? err.stdout.toString() : "" };
-  }
+export function capture(cmd: string, args: string[], env: Env = process.env): { ok: boolean; out: string; stderr: string } {
+  const r = spawnSync(cmd, args, {
+    encoding: "utf8",
+    env,
+    maxBuffer: 256 * 1024 * 1024,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  // A spawn-time failure (ENOENT/EACCES) has no exit status — report it as the stderr, so a
+  // caller that classifies the failure sees *something* rather than an empty string.
+  if (r.error) return { ok: false, out: "", stderr: (r.error as Error).message };
+  return { ok: r.status === 0, out: r.stdout ?? "", stderr: r.stderr ?? "" };
+}
+
+/**
+ * A bounded stderr sink for runToFile/pipeToFile. Writes every chunk THROUGH to this process's
+ * stderr (so the job log is byte-identical to the inherit-only behaviour) while retaining the
+ * first `maxBytes` for classification. The head is kept, not the tail: libpq reports the causal
+ * error first and everything after it is cascade.
+ */
+export function stderrTee(maxBytes = 1024 * 1024): { onChunk: (chunk: string) => void; text: () => string } {
+  let buf = "";
+  let truncated = false;
+  return {
+    onChunk(chunk: string) {
+      process.stderr.write(chunk);
+      if (truncated) return;
+      buf += chunk;
+      if (buf.length > maxBytes) {
+        buf = buf.slice(0, maxBytes) + "\n…[stderr truncated]\n";
+        truncated = true;
+      }
+    },
+    text: () => buf,
+  };
 }
 
 /**

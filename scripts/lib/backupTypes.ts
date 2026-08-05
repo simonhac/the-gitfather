@@ -85,6 +85,12 @@ export interface LogRun {
   runUrl: string | null;
   /** Raw failure reason — PRIVATE only, never published. */
   error: string | null;
+  /**
+   * Machine-readable twin of `error` (lib/pg-classify.ts PgFailureCode), so a consumer can act on
+   * the CAUSE without prose-matching — the staleness watchdog quotes it in its page. PRIVATE, like
+   * `error`. null on records predating this field, and on failures that never reached the database
+   * (a missing binary, a config error). */
+  errorCode: string | null;
   /** Whole backup-script wall time in ms (process start → run-log append). null on records
    * predating this field. PRIVATE — a dump-time trend signal, not published. */
   durationMs: number | null;

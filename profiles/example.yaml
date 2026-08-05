@@ -97,6 +97,10 @@ staleness:                     # check-staleness.ts
   grace-minutes: 25            # minutes past a slot boundary before it's "overdue" — trades faster recovery
                                #   (≈ grace + check interval) against redundant heals on scheduler jitter
   max-age-hours: 5             # backstop: page if the newest 2hourly object is older than this (slot logic is primary)
+  repage-minutes: 60           # minutes between LOUD re-pages while an outage persists. The check runs
+                               #   far more often than this; entry and any change of CAUSE always page.
+                               #   0 = page every tick (the old behaviour). Slack noise only — the job
+                               #   still exits non-zero, so Actions and the dashboard are unchanged.
   heal-workflow: pg-backup.yml # the workflow self-heal re-triggers on a missed slot
   self-heal: true              # false = alert only (never auto-retry)
   dry-run: false               # true = log the trigger, don't fire
