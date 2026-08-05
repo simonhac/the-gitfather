@@ -700,7 +700,7 @@ keys). Credentials are **never** in it — they come from the environment (GitHu
   non-empty), `min-row-ratio`, `max-row-ratio`, `max-row-drop`
 - **`verify-durable:`** — `fresh`, `aged`, `retest-days`, `max-restores`
 - **`archive:`** *(optional — see [Archiving a table](#archiving-a-table-out-of-postgres))* — `store-prefix`, `encryption` (`none`|`age`), `compression` (`zstd`|`gzip`|`none`), `compression-level`, and `tables:` — a list of `{ table, time-column, archive-after-weeks, prune-after-weeks, delete-batch-rows, max-weeks-per-run }`
-- **`staleness:`** — `slot-minutes`, `grace-minutes`, `max-age-hours`, `heal-workflow`, `self-heal`, `dry-run`
+- **`staleness:`** — `slot-minutes`, `grace-minutes`, `max-age-hours`, `repage-minutes`, `heal-workflow`, `self-heal`, `dry-run`
 - **`slack:`** — `alert-mention` (the channel id is env: `SLACK_CHANNEL`)  ·  **`dashboard:`** — `label`, `hide-run-links`, `url`, `path-prefix`
 
 All have safe defaults — see **[Verifying backups](#verifying-backups-integrity)**.

@@ -168,6 +168,11 @@ const stalenessGroup = z
     maxAgeHours: intIn(3, 1, Number.MAX_SAFE_INTEGER), // backstop: page if newest 2hourly object is older than this
     slotMinutes: intIn(120, 1, 1440), // backup cadence in minutes — MUST match the caller's cron interval
     graceMinutes: intIn(25, 0, 720), // minutes past a slot boundary before the slot counts as overdue
+    // Minutes between LOUD re-pages while an outage persists. The watchdog ticks far more often
+    // than this (every ~10 min), and paging on every tick is how 16 hours of downtime became ~96
+    // identical @here messages. Entry and any change of cause always page regardless; 0 disables
+    // throttling. Slack noise only — the job still exits non-zero on every stale tick.
+    repageMinutes: intIn(60, 0, 1440),
     healWorkflow: strDefault("pg-backup.yml"), // workflow self-heal re-triggers
     selfHeal: boolIn(true),
     dryRun: boolIn(false),

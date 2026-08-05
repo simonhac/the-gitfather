@@ -29,7 +29,9 @@ import { join } from "node:path";
 import { backupSchema, reportConfigError, peekProfile } from "./lib/config.js";
 import { buildRawProfile } from "./lib/profile.js";
 import { pgConn } from "./lib/pgconn.js";
-import { run, runToFile, pipeToFile, commandExists, bestEffort, sha256File, capture } from "./lib/proc.js";
+import { run, runToFile, pipeToFile, commandExists, bestEffort, sha256File, capture, stderrTee } from "./lib/proc.js";
+import { classifyPgFailure, isConnectionLevel } from "./lib/pg-classify.js";
+import type { PgFailureCode } from "./lib/pg-classify.js";
 import { computeTiers, runOrigin } from "./lib/schedule.js";
 import { appendRun } from "./runlog.js";
 import { githubLogUrl } from "./lib/github.js";
@@ -187,7 +189,11 @@ async function main(): Promise<void> {
 
   // On failure: record ❌ on today's row, then post a loud mentioning alert threaded under it. All
   // best-effort — Slack problems must never mask the real error.
-  const fail = async (msg: string): Promise<never> => {
+  // `errorCode` is the machine-readable twin of `msg` (see lib/pg-classify.ts). It rides into the
+  // PRIVATE run-log so the staleness watchdog can quote the cause in its page without re-deriving
+  // it from prose; build-dashboard.ts maps Log*→Public* explicitly, so it never reaches the public
+  // dashboard. null for the failures that aren't a database failure at all (missing binary, config).
+  const fail = async (msg: string, errorCode: PgFailureCode | null = null): Promise<never> => {
     process.stderr.write(`ERROR: ${msg}\n`);
     if (slackEnabled()) {
       const dayts = (await bestEffort("slack fail tick", () => slackDailyRecord(false, label, "", origin, now))) ?? "";
@@ -201,7 +207,7 @@ async function main(): Promise<void> {
     }
     await bestEffort("alert webhook", () => alertWebhook(`🔴 ${fileBasename} backup FAILED at ${label} — ${msg}`));
     await bestEffort("runlog fail", () =>
-      appendRun({ ts: runTsIso, ok: false, tiers: [], error: msg, durationMs: Date.now() - SCRIPT_START_MS }),
+      appendRun({ ts: runTsIso, ok: false, tiers: [], error: msg, errorCode, durationMs: Date.now() - SCRIPT_START_MS }),
     );
     cleanup();
     process.exit(1);
@@ -231,26 +237,47 @@ async function main(): Promise<void> {
       dumpCounts = { [sentinelTable]: n };
       console.log(`Dump-time row count public.${sentinelTable}: ${n}`);
     } else {
+      // This probe is the first thing to touch the database, so it is the first thing to see a
+      // dead credential — and it used to bury that under "could not count", costing 16 hours of
+      // pages that named the wrong thing. If it failed because it could never open a session,
+      // the dump is already doomed: fail now, with the real reason. Anything else (a missing
+      // table, a privilege, an unrecognised error) keeps the tolerant warn-and-continue, because
+      // only pg_dump can actually settle it.
+      const probe = classifyPgFailure(r.stderr, `could not count public.${sentinelTable}`);
+      if (isConnectionLevel(probe.code)) await fail(probe.message, probe.code);
       process.stderr.write(`warning: could not count public.${sentinelTable} at dump time — the drill will fall back to the live estimate\n`);
     }
   }
 
   console.log(`Dumping Postgres → ${out} (ENCRYPTION=${encryption}) ...`);
   if (encryption === "none") {
-    const code = await runToFile("pg_dump", [...dumpFlags, db.safeUrl], out, db.env);
-    if (code !== 0) await fail("pg_dump failed");
+    // Tee pg_dump's stderr: it still streams to the job log unchanged, but we keep a copy so the
+    // alert can name the cause instead of saying "pg_dump failed" and making someone open Actions.
+    const tee = stderrTee();
+    const code = await runToFile("pg_dump", [...dumpFlags, db.safeUrl], out, db.env, { onStderr: tee.onChunk });
+    if (code !== 0) {
+      const f = classifyPgFailure(tee.text());
+      await fail(f.message, f.code);
+    }
   } else if (encryption === "age") {
     if (!commandExists("age")) await fail("ENCRYPTION=age but 'age' not found");
     // Presence is already enforced by the schema (age ⇒ AGE_RECIPIENT); guard kept as defence-in-depth.
     const recipient = cfg.credentials.age.recipient;
     if (!recipient) await fail("ENCRYPTION=age requires AGE_RECIPIENT");
+    // Only the LEFT leg speaks libpq, so only it is classified. An `age` failure with a healthy
+    // pg_dump keeps the generic pipeline message rather than borrowing pg_dump's vocabulary.
+    const dumpTee = stderrTee();
     const code = await pipeToFile(
       { cmd: "pg_dump", args: [...dumpFlags, db.safeUrl] },
       { cmd: "age", args: ["-r", recipient!] },
       out,
       db.env,
+      { onStderrA: dumpTee.onChunk },
     );
-    if (code !== 0) await fail("pg_dump | age pipeline failed");
+    if (code !== 0) {
+      const f = classifyPgFailure(dumpTee.text(), "pg_dump | age pipeline failed");
+      await fail(f.message, f.code);
+    }
   } else {
     // aes-gcm
     await fail("ENCRYPTION=aes-gcm not implemented yet (encryption is a planned follow-up)");

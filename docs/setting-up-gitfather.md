@@ -205,6 +205,7 @@ Everything here has a safe default or is feature-gated. Ask, but offer the defau
 |---|---|---|
 | `staleness.slot-minutes` | `120` | backup cadence in minutes — **must match your backup cron interval** (`0 */2` = 120). The primary freshness trigger: a slot with no backup past its grace window is "overdue" |
 | `staleness.grace-minutes` | `25` | minutes past a slot boundary before it counts as overdue (**must be < slot-minutes**). Trades faster recovery against redundant heals on scheduler jitter |
+| `staleness.repage-minutes` | `60` | minutes between **loud** re-pages while an outage persists. The check runs every ~10 min, so paging on every tick turns a long outage into dozens of identical `@here` messages; entry into an outage and any change of **cause** still page immediately. `0` restores page-every-tick. Affects Slack only — the job still exits non-zero, so Actions and the dashboard are unchanged, and a recovery note is posted when a fresh backup lands |
 | `staleness.self-heal` | `true` | on a missed tick, re-trigger the backup workflow via `gh` (needs `gh` auth + `GITHUB_REPOSITORY`) |
 | `staleness.dry-run` | `false` | staleness check evaluates but takes no action |
 | `staleness.heal-workflow` | `pg-backup.yml` | workflow file self-heal triggers |

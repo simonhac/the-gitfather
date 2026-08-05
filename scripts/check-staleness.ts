@@ -27,6 +27,9 @@ import { run, capture, commandExists } from "./lib/proc.js";
 import { backupLooksBroken, slotState, stampToEpochMs } from "./lib/schedule.js";
 import { slackOneoff, slackDailyRefresh, alertWebhook, failAlertText } from "./lib/slack.js";
 import { githubLogUrl } from "./lib/github.js";
+import { readLatestRun } from "./runlog.js";
+import { formatElapsed } from "./lib/duration.js";
+import { advanceAlertState, clearAlertState, decideAlert, readAlertState, writeAlertState } from "./lib/alert-state.js";
 
 async function main(): Promise<void> {
   // Validate + type all config up front (zod); fails fast with one aggregated report. See lib/config.ts.
@@ -41,15 +44,33 @@ async function main(): Promise<void> {
   const staleHours = cfg.staleness.maxAgeHours;
   const slotMinutes = cfg.staleness.slotMinutes;
   const graceMinutes = cfg.staleness.graceMinutes;
+  const repageMinutes = cfg.staleness.repageMinutes;
   const minBytes = cfg.dump.minBytes;
   const backupWorkflow = cfg.staleness.healWorkflow;
 
   const endpoint = `https://${r2Account}.r2.cloudflarestorage.com`;
 
-  const fail = async (msg: string): Promise<never> => {
+  // Page on ENTRY to an outage, on any change of cause, and then only once per repage-minutes.
+  // Everything else about a stale tick is unchanged — in particular this still exits non-zero, so
+  // Actions stays red and the dashboard signal is untouched. The throttle governs Slack only.
+  //
+  // `cause` is the classified failure code from the run-log (null when unknown); it both decides
+  // "is this the same outage?" and is what the operator reads. State lives in R2; any problem
+  // reading it resolves to PAGE, because a missing page is the one failure mode we can't accept.
+  const fail = async (msg: string, cause: string | null = null): Promise<never> => {
     process.stderr.write(`ERROR: ${msg}\n`);
-    await slackOneoff(failAlertText("STALE", msg, await githubLogUrl()), true).catch(() => {});
-    await alertWebhook(`🔴 PG backup STALE (${fileBasename}): ${msg}`).catch(() => {});
+    const prev = readAlertState(r2Bucket, fileBasename);
+    const decision = decideAlert(prev, Date.now(), cause, repageMinutes);
+    if (decision.page) {
+      await slackOneoff(failAlertText("STALE", msg, await githubLogUrl()), true).catch(() => {});
+      await alertWebhook(`🔴 PG backup STALE (${fileBasename}): ${msg}`).catch(() => {});
+    } else {
+      process.stderr.write(
+        `(alert throttled: already paged for this outage; next page in ~${decision.nextPageInMinutes}m — ` +
+          `staleness.repage-minutes=${repageMinutes})\n`,
+      );
+    }
+    writeAlertState(r2Bucket, fileBasename, advanceAlertState(prev, Date.now(), cause, decision));
     process.exit(1);
   };
   const note = async (msg: string): Promise<void> => {
@@ -99,7 +120,16 @@ async function main(): Promise<void> {
     // also fails, the next check sees two consecutive failures and pages here. See backupLooksBroken().
     if (backupLooksBroken(runs)) {
       const failed = runs.find((r) => r.status === "completed")?.conclusion || "failure";
-      return fail(`${msg} — backup failing repeatedly (latest \`${failed}\`); not auto-retrying (broken, not missed).`);
+      // GitHub only knows the run failed. The run-log knows WHY — the backup classified it (see
+      // lib/pg-classify.ts) and recorded it there. Quote it, so the page an operator actually reads
+      // says "the credential is stale" rather than sending them to the Actions log to find out.
+      const latest = readLatestRun();
+      const cause = latest && latest.ok === false ? (latest.errorCode ?? null) : null;
+      const because = latest && latest.ok === false && latest.error ? ` — ${latest.error}` : "";
+      return fail(
+        `${msg} — backup failing repeatedly (latest \`${failed}\`)${because}; not auto-retrying (broken, not missed).`,
+        cause,
+      );
     }
     const last = runs.find((r) => r.status === "completed")?.conclusion || ""; // newest completed verdict, for the notes below
 
@@ -186,6 +216,7 @@ async function main(): Promise<void> {
   const nowMs = Date.now();
   const ageH = Math.floor((nowMs - epochMs) / 3_600_000); // integer-truncated, like the bash
   const ageM = Math.floor((nowMs - epochMs) / 60_000);
+  const ageText = formatElapsed(nowMs - epochMs); // "16h 19m", not "16h 979m"
 
   // Refresh today's Slack row every run (independent of freshness): re-renders ⬜ placeholders for
   // elapsed-but-empty 2-hourly buckets. No-op when today has no message yet.
@@ -198,11 +229,21 @@ async function main(): Promise<void> {
   const { overdue, slotStartMs } = slotState(nowMs, epochMs, slotMinutes, graceMinutes);
   const slotIso = new Date(slotStartMs).toISOString();
   console.log(
-    `Newest 2hourly object: ${newest} — ${ageH}h ${ageM}m old ` +
+    `Newest 2hourly object: ${newest} — ${ageText} old ` +
       `(slot ${slotIso}, grace ${graceMinutes}m, backstop ${staleHours}h)`,
   );
   if (!overdue && ageH < staleHours) {
-    console.log(`✓ Fresh: newest backup is ${ageM}m old; current slot (${slotIso}) satisfied`);
+    console.log(`✓ Fresh: newest backup is ${ageText} old; current slot (${slotIso}) satisfied`);
+    // Close the loop: an outage that ends should SAY so. Without this, the last word on a 16-hour
+    // outage is the final angry page, and the only way to learn it recovered is to go looking.
+    const prev = readAlertState(r2Bucket, fileBasename);
+    if (prev) {
+      const downFor = formatElapsed(nowMs - Date.parse(prev.since));
+      await slackOneoff(
+        `🟢 PG backup RECOVERED (${fileBasename}): ${newest} landed — stale for ${downFor}.`,
+      ).catch(() => {});
+      clearAlertState(r2Bucket, fileBasename);
+    }
     return;
   }
   await onStale(
