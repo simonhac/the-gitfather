@@ -14,6 +14,7 @@ import {
   fingerprintOf,
   planArchive,
   planPrune,
+  parsePruneManifest,
   activePart,
   fingerprintSql,
   extractSql,
@@ -468,4 +469,87 @@ test("planPrune: an already-pruned week is a no-op, not a refusal", () => {
 test("planPrune: a zero-row week needs no delete but is still marked pruned", () => {
   const state = { label: "2026-W23", state: "archived" as const, parts: [part(1, "full", emptyFingerprint())] };
   assert.deepEqual(planPrune(state, emptyFingerprint()), { action: "prune", expectRows: 0, part: 1 });
+});
+
+// ── The stored-object half of the prune gate ─────────────────────────────────
+// planPrune only compares the LIVE table against the manifest, which says nothing about whether
+// the stored object is still intact. The object is hash-verified when it is written, but a week is
+// pruned `prune-after-weeks - archive-after-weeks` later (9 weeks apart in Boost's profile), so in
+// the steady state prune ALWAYS acts on an object last verified many runs ago. These cover the
+// second half: re-read the object at prune time and refuse on any drift.
+
+const MANIFEST = (over: Record<string, unknown> = {}) =>
+  JSON.stringify({
+    week: "2026-W23",
+    part: 1,
+    rowCount: 40,
+    objectKey: "archive/boost/api_logs/2026/boost-api_logs-2026-W23-p001.ndjson.zst.age",
+    objectSha256: "a".repeat(64),
+    fingerprint: { n: 40, digest: "aaaa000000000000" },
+    ...over,
+  });
+
+test("parsePruneManifest: yields the key and hash the gate needs", () => {
+  const r = parsePruneManifest(MANIFEST(), 1);
+  assert.equal("error" in r, false);
+  assert.deepEqual(r, {
+    objectKey: "archive/boost/api_logs/2026/boost-api_logs-2026-W23-p001.ndjson.zst.age",
+    objectSha256: "a".repeat(64),
+  });
+});
+
+test("parsePruneManifest: a MISSING manifest refuses — never 'nothing to check, go ahead'", () => {
+  const r = parsePruneManifest(null, 1);
+  assert.ok("error" in r && /manifest/i.test(r.error));
+});
+
+test("parsePruneManifest: unparseable or non-object manifests refuse", () => {
+  for (const text of ["", "   ", "not json", "null", "[]", "42"]) {
+    const r = parsePruneManifest(text, 1);
+    assert.ok("error" in r, `should refuse: ${JSON.stringify(text)}`);
+  }
+});
+
+test("parsePruneManifest: a manifest with no recorded hash refuses rather than skipping the check", () => {
+  // A legacy manifest predating objectSha256 must block the delete, not silently waive it.
+  const r = parsePruneManifest(MANIFEST({ objectSha256: undefined }), 1);
+  assert.ok("error" in r && /objectSha256/.test(r.error));
+  const blank = parsePruneManifest(MANIFEST({ objectSha256: "" }), 1);
+  assert.ok("error" in blank);
+});
+
+test("parsePruneManifest: a manifest with no object key refuses", () => {
+  const r = parsePruneManifest(MANIFEST({ objectKey: undefined }), 1);
+  assert.ok("error" in r && /objectKey/.test(r.error));
+});
+
+test("parsePruneManifest: a manifest for a DIFFERENT part refuses — wrong object, wrong proof", () => {
+  const r = parsePruneManifest(MANIFEST({ part: 2 }), 1);
+  assert.ok("error" in r && /part/.test(r.error));
+});
+
+test("parsePruneManifest: a ZERO-ROW week has no object to verify, and deletes nothing anyway", () => {
+  // archiveWeek writes no data object when live.n === 0 — objectKey/objectSha256 are null by design.
+  const r = parsePruneManifest(MANIFEST({ rowCount: 0, objectKey: null, objectSha256: null }), 1);
+  assert.deepEqual(r, { nothingToVerify: true });
+});
+
+test("parsePruneManifest: a NON-empty week that lost its key still refuses — the waiver is rowCount-gated", () => {
+  // The dangerous shape: if "no key recorded" alone waived the check, a manifest that lost its key
+  // would wave 40 rows through unverified. Only a genuinely empty week may skip it.
+  const r = parsePruneManifest(MANIFEST({ rowCount: 40, objectKey: null, objectSha256: null }), 1);
+  assert.ok("error" in r && /objectKey/.test(r.error));
+});
+
+test("parsePruneManifest: a zero-row week that DID write an object is still verified", () => {
+  const r = parsePruneManifest(MANIFEST({ rowCount: 0 }), 1);
+  assert.deepEqual(r, {
+    objectKey: "archive/boost/api_logs/2026/boost-api_logs-2026-W23-p001.ndjson.zst.age",
+    objectSha256: "a".repeat(64),
+  });
+});
+
+test("parsePruneManifest: a manifest with no rowCount refuses", () => {
+  const r = parsePruneManifest(MANIFEST({ rowCount: undefined }), 1);
+  assert.ok("error" in r && /rowCount/.test(r.error));
 });
