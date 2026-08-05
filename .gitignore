@@ -4,6 +4,7 @@ dist/
 scheduler/node_modules/
 scheduler/wrangler.jsonc
 scheduler/.wrangler/
+.wrangler/
 *.dump
 *.dump.age
 *.dump.enc
