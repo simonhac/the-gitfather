@@ -21,6 +21,7 @@ import {
   type BackupGrid,
   type BackupStats,
 } from "./backupTypes.js";
+import { tzAbbrev } from "./tzAbbrev.js";
 
 export const WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 const MONTH_SHORT = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -87,12 +88,10 @@ const whenFmt = new Intl.DateTimeFormat("en-GB", {
   hour12: true,
 });
 
-const tzFmt = new Intl.DateTimeFormat("en-GB", { timeZone: DISPLAY_TZ, timeZoneName: "short" });
-
 /** "Wed 19 Jun 2026, 2:00 am UTC" (narrow no-break spaces normalised). */
 export function formatInTz(d: Date): string {
   const base = whenFmt.format(d).replace(/\u202f/g, " ");
-  const tz = tzFmt.formatToParts(d).find((p) => p.type === "timeZoneName")?.value ?? "";
+  const tz = tzAbbrev(d);
   return tz ? `${base} ${tz}` : base;
 }
 

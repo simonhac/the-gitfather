@@ -35,6 +35,7 @@ import { peekProfile } from "./config.js";
 import { DISPLAY_TZ, SLOTS_PER_DAY, HOURS_PER_SLOT } from "./backupTypes.js";
 import type { RunOrigin } from "./backupTypes.js";
 import { tzParts } from "./backupHistory.js";
+import { tzAbbrev } from "./tzAbbrev.js";
 
 function warn(msg: string): void {
   process.stderr.write(`slack: ${msg}\n`);
@@ -195,7 +196,9 @@ const hmFmt = new Intl.DateTimeFormat("en-GB", {
   minute: "2-digit",
   hourCycle: "h23",
 });
-// C-locale-style abbreviations (en-US gives "Sep"/"Mon", matching bash `date +%b`/`%a`).
+// C-locale-style abbreviations (en-US gives "Sep"/"Mon", matching bash `date +%b`/`%a`). The
+// timezone abbreviation is NOT taken from here — en-US renders Australian zones as "GMT+10"; see
+// tzAbbrev.ts.
 const headerDateFmt = new Intl.DateTimeFormat("en-US", {
   timeZone: DISPLAY_TZ,
   weekday: "short",
@@ -203,7 +206,6 @@ const headerDateFmt = new Intl.DateTimeFormat("en-US", {
   month: "short",
   year: "numeric",
 });
-const tzAbbrFmt = new Intl.DateTimeFormat("en-US", { timeZone: DISPLAY_TZ, timeZoneName: "short" });
 
 /** Current HH:MM in DISPLAY_TZ — the tick label (was `TZ=$DISPLAY_TZ date +%H:%M`). */
 export function dailyLabel(now: Date = new Date()): string {
@@ -245,7 +247,7 @@ export function failAlertText(what: string, reason: string, logUrl = ""): string
 export function dailyHeader(now: Date = new Date()): string {
   const dp = headerDateFmt.formatToParts(now);
   const get = (t: string) => dp.find((p) => p.type === t)?.value ?? "";
-  const tz = tzAbbrFmt.formatToParts(now).find((p) => p.type === "timeZoneName")?.value ?? "";
+  const tz = tzAbbrev(now);
   // Only the "<basename> DB backup" name is linked; the whole header stays bold (Slack renders a
   // link inside *…*). With unfurl_links:false on every post, the link never expands to a preview.
   const name = dashboardLink(`${fileBasename()} DB backup`);
