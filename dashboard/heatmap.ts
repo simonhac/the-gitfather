@@ -8,6 +8,8 @@
 import { buildBackupGrid, summarize, formatInTz, slotApproxDate, storedBytes, r2MonthlyCostUsd, WEEKDAY_LABELS } from "../scripts/lib/backupHistory.js";
 import {
   SLOTS_PER_DAY,
+  slotCadencePhrase,
+  slotCadenceAdjective,
   DAYS_PER_WEEK,
   COLS_PER_WEEK,
   DISPLAY_TZ,
@@ -43,8 +45,10 @@ const GRID_BORDER = DARK ? "#2a2f3a" : "#e3e6ec";
 const MUTED = DARK ? "#949cad" : "#677085";
 const CELL_STROKE = DARK ? "rgba(255,255,255,0.06)" : "rgba(16,24,40,0.08)";
 
+// The `2hourly` key is the frozen R2 prefix, not the cadence — label it from the profile's slot
+// width so a tooltip cannot say "2-hourly" about an 8-hourly backup.
 const TIER_LABEL: Record<string, string> = {
-  "2hourly": "2-hourly", daily: "daily", weekly: "weekly", monthly: "monthly",
+  "2hourly": slotCadenceAdjective(), daily: "daily", weekly: "weekly", monthly: "monthly",
 };
 const STATE_LABEL: Record<BackupCellState, string> = {
   empty: "No backup", failed: "Failed", expired: "Expired (was OK)", ok: "Backup OK",
@@ -89,8 +93,8 @@ header.appendChild(
   elem(
     "p",
     "subtitle",
-    `This grid shows every off-site Postgres backup over the last ${WEEKS} weeks — a fresh one every 2 hours, ` +
-      `${SLOTS_PER_DAY} a day. Older copies thin out on a Grandfather–Father–Son schedule: the 2-hourly ` +
+    `This grid shows every off-site Postgres backup over the last ${WEEKS} weeks — ${slotCadencePhrase()}. ` +
+      `Older copies thin out on a Grandfather–Father–Son schedule: the ${slotCadenceAdjective()} ` +
       `“grandsons” are kept for ${R["2hourly"].label}, then one “son” per day for ${R.daily.label}, one “father” ` +
       `per week for ${R.weekly.label}, and one “grandfather” per month for ${R.monthly.label} — at its fullest ` +
       `about ${maxRetained(R)} backups at once. Greens are retained (brighter = restore-verified), amber flags a ` +

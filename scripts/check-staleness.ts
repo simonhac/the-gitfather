@@ -6,7 +6,7 @@ import "./lib/bootEnv.js"; // MUST be first — loads $PROFILE before backupType
 // workflow not firing.
 //
 // Lists the newest object under $backup-prefix/2hourly/ and derives its age from the timestamped key.
-// Each run it also refreshes today's Slack row (renders ⬜ for elapsed-but-empty 2-hourly buckets).
+// Each run it also refreshes today's Slack row (renders ⬜ for elapsed-but-empty slot buckets).
 // Freshness is slot-based: if the CURRENT cadence slot (staleness.slot-minutes) still has no backup once
 // staleness.grace-minutes past its boundary, it calls onStale() — so a missed tick is caught ~grace minutes
 // later, not after the multi-hour max-age wait. staleness.max-age-hours is only a backstop (pages if the
@@ -219,12 +219,12 @@ async function main(): Promise<void> {
   const ageText = formatElapsed(nowMs - epochMs); // "16h 19m", not "16h 979m"
 
   // Refresh today's Slack row every run (independent of freshness): re-renders ⬜ placeholders for
-  // elapsed-but-empty 2-hourly buckets. No-op when today has no message yet.
+  // elapsed-but-empty slot buckets. No-op when today has no message yet.
   await slackDailyRefresh().catch(() => {});
 
   // Slot-based freshness: did THIS cadence slot's backup land? A missed slot is caught ~grace minutes
   // past its boundary, so recovery tracks the grace window — not the (necessarily large) max-age
-  // backstop, which a healthy 2-hourly system reaches by design. maxAgeHours is retained as a backstop:
+  // backstop, which a healthy slot-paced system reaches by design. maxAgeHours is retained as a backstop:
   // if slot-minutes is misconfigured (or the slot math drifts), a truly ancient object still pages.
   const { overdue, slotStartMs } = slotState(nowMs, epochMs, slotMinutes, graceMinutes);
   const slotIso = new Date(slotStartMs).toISOString();

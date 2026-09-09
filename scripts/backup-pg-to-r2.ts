@@ -8,7 +8,7 @@ import "./lib/bootEnv.js"; // MUST be first — loads $PROFILE before backupType
 // the configured anchor. Retention is enforced by R2 lifecycle rules + bucket locks per prefix (set
 // out-of-band; see README), not by this script. Built for GitHub Actions but runnable locally.
 //
-// Slack: one message per day that updates in place — a ✅/❌ + HH:MM tick per 2-hourly run (see
+// Slack: one message per day that updates in place — a ✅/❌ + HH:MM tick per slot run (see
 // lib/slack.ts). A failed run appends ❌ and posts a loud, mentioning threaded alert.
 //
 // Usage:

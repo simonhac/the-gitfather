@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { DEFAULT_SLOT_MINUTES } from "../lib/backupTypes.js";
 import {
   backupSchema,
   drillSchema,
@@ -103,16 +104,36 @@ test("drill: min-row-ratio in 0..1; max-row-ratio default 2 (>=1); max-row-drop 
 test("staleness: max-age-hours positive; slot/grace defaults; min-bytes default + coercion", () => {
   const s = stalenessSchema.safeParse(stalenessBase).data?.staleness;
   assert.equal(s?.maxAgeHours, 3);
-  assert.equal(s?.slotMinutes, 120);
+  // One number, not two: the schema default IS the display constant (see DEFAULT_SLOT_MINUTES).
+  assert.equal(s?.slotMinutes, DEFAULT_SLOT_MINUTES);
+  assert.equal(s?.slotMinutes, 480);
   assert.equal(s?.graceMinutes, 25);
   assert.ok(!stalenessSchema.safeParse({ ...stalenessBase, staleness: { maxAgeHours: 0 } }).success);
   assert.equal(stalenessSchema.safeParse({ ...stalenessBase, dump: { minBytes: 2048 } }).data?.dump.minBytes, 2048);
 });
 
+test("staleness: slot-minutes must divide a whole day (else slot buckets mis-file runs)", () => {
+  const parse = (slotMinutes: number) =>
+    stalenessSchema.safeParse({ ...stalenessBase, staleness: { slotMinutes, graceMinutes: 5 } });
+  for (const ok of [60, 120, 240, 480, 720, 1440]) {
+    assert.ok(parse(ok).success, `${ok} divides 1440`);
+  }
+  for (const bad of [100, 7, 500, 1000]) {
+    const r = parse(bad);
+    assert.ok(!r.success, `${bad} does not divide 1440`);
+    assert.match(r.error!.issues.map((i) => i.message).join(" "), /divide 1440/);
+  }
+});
+
 test("staleness: grace-minutes must be < slot-minutes (else the slot can never go overdue)", () => {
-  assert.ok(stalenessSchema.safeParse({ ...stalenessBase, staleness: { graceMinutes: 119 } }).success); // < 120 default slot
-  assert.ok(!stalenessSchema.safeParse({ ...stalenessBase, staleness: { graceMinutes: 120 } }).success); // == slot
-  assert.ok(!stalenessSchema.safeParse({ ...stalenessBase, staleness: { graceMinutes: 200 } }).success); // > slot
+  // Pin the slot explicitly rather than leaning on the schema default — this rule is about the
+  // RELATIONSHIP between the two, and reading one of them from ambient config hides that.
+  const grace = (graceMinutes: number, slotMinutes = 120) =>
+    stalenessSchema.safeParse({ ...stalenessBase, staleness: { graceMinutes, slotMinutes } }).success;
+  assert.ok(grace(119)); // < slot
+  assert.ok(!grace(120)); // == slot
+  assert.ok(!grace(200)); // > slot
+  assert.ok(grace(200, 480)); // the same grace is fine against a wider slot
   assert.ok(!stalenessSchema.safeParse({ ...stalenessBase, staleness: { slotMinutes: 20, graceMinutes: 25 } }).success); // grace ≥ short slot
   assert.ok(stalenessSchema.safeParse({ ...stalenessBase, staleness: { slotMinutes: 60, graceMinutes: 25 } }).success); // 25 < 60
 });
