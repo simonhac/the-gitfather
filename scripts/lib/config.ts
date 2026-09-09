@@ -18,7 +18,7 @@
 
 import { z } from "zod";
 import { parseDuration, type Duration } from "./duration.js";
-import { DEFAULT_RETENTION, type RetentionMap } from "./backupTypes.js";
+import { DEFAULT_RETENTION, DEFAULT_SLOT_MINUTES, type RetentionMap } from "./backupTypes.js";
 import { buildRawProfile } from "./profile.js";
 
 // ── Reusable grammars ────────────────────────────────────────────────────────
@@ -166,7 +166,10 @@ const stalenessGroup = z
     // Primary trigger is slot-based (slotMinutes/graceMinutes); maxAgeHours is a backstop that still
     // pages if the slot math is misconfigured and a truly ancient object slips through.
     maxAgeHours: intIn(3, 1, Number.MAX_SAFE_INTEGER), // backstop: page if newest 2hourly object is older than this
-    slotMinutes: intIn(120, 1, 1440), // backup cadence in minutes — MUST match the caller's cron interval
+    // Backup cadence in minutes — MUST match the caller's cron interval, and must divide 1440
+    // (requireValidStalenessSlot). The default is shared with the display constants so the alerting
+    // cadence and the rendered cadence can never be two different numbers.
+    slotMinutes: intIn(DEFAULT_SLOT_MINUTES, 1, 1440),
     graceMinutes: intIn(25, 0, 720), // minutes past a slot boundary before the slot counts as overdue
     // Minutes between LOUD re-pages while an outage persists. The watchdog ticks far more often
     // than this (every ~10 min), and paging on every tick is how 16 hours of downtime became ~96
@@ -360,6 +363,20 @@ export const drillSchema = profileSchema.superRefine(requireDrillCreds);
 export const verifyDurableSchema = profileSchema.superRefine(requireDrillCreds);
 
 function requireValidStalenessSlot(v: Profile, ctx: Ctx): void {
+  // The slot width has to tile a day exactly. Everything that buckets a run into a slot does
+  // `floor(hour / (24 / slotsPerDay))` — the Slack daily row, the dashboard heatmap columns, the
+  // cadence prose — so a non-divisor produces slots whose boundaries do not exist, and the grid
+  // silently mis-files runs rather than failing. Refuse it here instead.
+  if (1440 % v.staleness.slotMinutes !== 0) {
+    miss(
+      ctx,
+      ["staleness", "slotMinutes"],
+      `must divide 1440 (a whole day) — ${v.staleness.slotMinutes} does not, so the Slack row and the ` +
+        `dashboard heatmap would bucket runs into slot boundaries that never occur. Use e.g. ` +
+        `60, 120, 240, 480 or 720`,
+    );
+  }
+
   // grace must sit strictly inside the slot: if grace ≥ slot, dueMs always lands in a LATER slot than the
   // one `now` is in, so the current slot can never be flagged overdue — slot-based self-heal silently never
   // fires and recovery falls back to the slow max-age-hours backstop. See lib/schedule.ts slotState().

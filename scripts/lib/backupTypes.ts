@@ -22,10 +22,58 @@ export type BackupTier = "2hourly" | "daily" | "weekly" | "monthly";
  */
 export const DISPLAY_TZ = process.env.DISPLAY_TZ || "UTC";
 
-export const SLOTS_PER_DAY = 3; // 8-hourly (backups at 00:00 / 08:00 / 16:00 UTC)
-export const HOURS_PER_SLOT = 24 / SLOTS_PER_DAY; // 8 — display-slot width; keep in sync with the scheduler cadence
+// ── Backup cadence — DERIVED, never hardcoded ────────────────────────────────
+// The slot width is the profile's `staleness.slot-minutes`, bridged into process.env by bootEnv
+// (Node) and baked into the browser bundle by build-dashboard's esbuild `define` — the same route
+// DISPLAY_TZ takes, for the same reason: these are read at MODULE LOAD.
+//
+// It is spelled out here because a hardcoded cadence has already shipped a dashboard that told
+// readers "a fresh one every 2 hours, 3 a day" — self-contradictory, and wrong in both halves
+// against an 8-hourly schedule. Only the "3" was derived; the "2 hours" was a literal left behind
+// when the cadence changed. Anything that renders the cadence takes it from here.
+
+/**
+ * Slot width when no profile is loaded. `staleness.slot-minutes` takes its zod default FROM this
+ * constant, so there is exactly one number: the two used to disagree (the schema said 120 while the
+ * display hardcoded 3 slots/day, i.e. 480), which is half of why the dashboard could claim a
+ * two-hourly cadence and a three-a-day count in the same sentence.
+ */
+export const DEFAULT_SLOT_MINUTES = 480;
+
+/** Slots per day for a given slot width. `staleness.slot-minutes` is validated to divide 1440. */
+export function slotsPerDayFrom(slotMinutes: number): number {
+  return Math.round(1440 / slotMinutes);
+}
+
+export const SLOT_MINUTES = Number(process.env.SLOT_MINUTES) || DEFAULT_SLOT_MINUTES;
+export const SLOTS_PER_DAY = slotsPerDayFrom(SLOT_MINUTES);
+export const HOURS_PER_SLOT = 24 / SLOTS_PER_DAY; // display-slot width in hours
 export const DAYS_PER_WEEK = 7;
-export const COLS_PER_WEEK = SLOTS_PER_DAY * DAYS_PER_WEEK; // 21
+export const COLS_PER_WEEK = SLOTS_PER_DAY * DAYS_PER_WEEK;
+
+/** The cadence as an interval, e.g. "every 8 hours" / "every hour" / "every 90 minutes". */
+function intervalPhrase(slotMinutes: number): string {
+  if (slotMinutes % 60 !== 0) return `every ${slotMinutes} minutes`;
+  const hours = slotMinutes / 60;
+  return hours === 1 ? "every hour" : `every ${hours} hours`;
+}
+
+/**
+ * The cadence as a sentence fragment: "a fresh one every 8 hours, 3 a day".
+ * At one slot a day the count is dropped — "1 a day" adds nothing once the interval IS a day.
+ */
+export function slotCadencePhrase(slotMinutes: number = SLOT_MINUTES): string {
+  if (slotMinutes >= 1440) return "a fresh one once a day";
+  return `a fresh one ${intervalPhrase(slotMinutes)}, ${slotsPerDayFrom(slotMinutes)} a day`;
+}
+
+/** The cadence as an adjective for the grandson tier: "8-hourly" / "hourly" / "daily" / "90-minute". */
+export function slotCadenceAdjective(slotMinutes: number = SLOT_MINUTES): string {
+  if (slotMinutes >= 1440) return "daily";
+  if (slotMinutes === 60) return "hourly";
+  if (slotMinutes % 60 !== 0) return `${slotMinutes}-minute`;
+  return `${slotMinutes / 60}-hourly`;
+}
 
 // ── GFS retention (configurable per profile; these are the defaults) ──────────
 // The profile's `retention:` block sets these as natural-language durations; the loader parses them
@@ -49,7 +97,9 @@ export const DEFAULT_RETENTION: RetentionMap = {
 
 /** Per-tier GFS name, cadence phrase, and copy-interval (days) — drives the subtitle + max-count math. */
 export const TIER_META: Record<BackupTier, { gfs: string; every: string; cadenceDays: number }> = {
-  "2hourly": { gfs: "grandson", every: "every 8 hours", cadenceDays: 1 / SLOTS_PER_DAY },
+  // Key and label diverge on purpose: `2hourly/` is the frozen R2 object-key prefix (a legacy name
+  // from when the cadence WAS two-hourly); `every` is the live cadence, derived.
+  "2hourly": { gfs: "grandson", every: intervalPhrase(SLOT_MINUTES), cadenceDays: 1 / SLOTS_PER_DAY },
   daily: { gfs: "son", every: "every day", cadenceDays: 1 },
   weekly: { gfs: "father", every: "every week", cadenceDays: 7 },
   monthly: { gfs: "grandfather", every: "every month", cadenceDays: 365 / 12 },
@@ -66,7 +116,7 @@ export function maxRetained(r: RetentionMap): number {
 // ── Private log records (written by runlog.ts) ───────────────────────────────
 
 export interface LogRun {
-  /** ISO-8601 UTC stamp of the dump (the run's 2-hourly slot). */
+  /** ISO-8601 UTC stamp of the dump (the run's slot). */
   ts: string;
   ok: boolean;
   /** Tiers promoted to. Always includes "2hourly" on success; [] on failure. */

@@ -21,7 +21,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadDashboardConfig, retentionFromConfig, joinObjectKey } from "./lib/config.js";
 import { readLogDir, downloadLogsFromR2 } from "./lib/logStore.js";
-import { HOURS_PER_SLOT } from "./lib/backupTypes.js";
+import { HOURS_PER_SLOT, SLOT_MINUTES } from "./lib/backupTypes.js";
 import type { LogRun, LogVerification, PublicPayload, BackupTier } from "./lib/backupTypes.js";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
@@ -84,7 +84,12 @@ async function main(): Promise<void> {
     legalComments: "none",
     // The browser bundle reads DISPLAY_TZ via `process.env.DISPLAY_TZ` (see backupTypes.ts); bake the
     // value in at build time so `process` is never referenced at runtime in the browser.
-    define: { "process.env.DISPLAY_TZ": JSON.stringify(process.env.DISPLAY_TZ || "UTC") },
+    define: {
+      "process.env.DISPLAY_TZ": JSON.stringify(process.env.DISPLAY_TZ || "UTC"),
+      // Same reason as DISPLAY_TZ: the bundle derives SLOTS_PER_DAY and the cadence prose from this
+      // at module load, and a browser has no profile to read.
+      "process.env.SLOT_MINUTES": JSON.stringify(String(SLOT_MINUTES)),
+    },
   });
   const bundle = bundled.outputFiles[0].text;
 

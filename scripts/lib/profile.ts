@@ -8,8 +8,9 @@
 //   2. deep-maps kebab-case keys → camelCase (so the zod schema + typed Profile are camelCase
 //      and code uses dot access — no cfg["max-age-hours"]),
 //   3. merges credentials from the environment into a `credentials` group (buildRawProfile),
-//   4. bridges DISPLAY_TZ into process.env (bridgeDisplayTz) — called by bootEnv as the FIRST
-//      import so the module-load Intl formatters in backupTypes/backupHistory/slack pick up the tz.
+//   4. bridges DISPLAY_TZ and SLOT_MINUTES into process.env (bridgeProfileEnv) — called by bootEnv as
+//      the FIRST import, so the module-load Intl formatters and the derived slot constants in
+//      backupTypes/backupHistory/slack pick them up.
 //
 // IMPORTANT: this module imports ONLY `yaml` + `node:fs` — never config.ts/backupTypes.ts — so that
 // importing it (from bootEnv) does NOT evaluate backupTypes.ts before bridgeDisplayTz() has run.
@@ -114,4 +115,28 @@ function isValidTz(tz: string): boolean {
 export function bridgeDisplayTz(): void {
   const tz = loadProfileConfig().timezone;
   if (typeof tz === "string" && isValidTz(tz)) process.env.DISPLAY_TZ = tz;
+}
+
+/**
+ * Set process.env.SLOT_MINUTES from the profile's `staleness.slot-minutes` BEFORE backupTypes.ts
+ * derives SLOTS_PER_DAY / HOURS_PER_SLOT / the cadence prose from it at module load.
+ *
+ * Like bridgeDisplayTz, this only accepts a value it can render honestly — here, a whole-minute
+ * divisor of a day. A non-divisor would give a fractional slot width, and `floor(hour / width)`
+ * would then bucket runs into slots whose boundaries do not exist; the config layer refuses that
+ * outright (requireValidStalenessSlot), so reaching the default here means the profile is already
+ * failing validation, not that a wrong grid is being drawn.
+ */
+export function bridgeSlotMinutes(): void {
+  const staleness = loadProfileConfig().staleness as Record<string, unknown> | undefined;
+  const m = staleness?.slotMinutes;
+  if (typeof m === "number" && Number.isInteger(m) && m > 0 && m <= 1440 && 1440 % m === 0) {
+    process.env.SLOT_MINUTES = String(m);
+  }
+}
+
+/** Everything backupTypes.ts captures at module load. Call FIRST (see bootEnv.ts). */
+export function bridgeProfileEnv(): void {
+  bridgeDisplayTz();
+  bridgeSlotMinutes();
 }
