@@ -49,6 +49,20 @@ export function extForEncryption(encryption: string): string {
   return encryption === "age" ? "dump.age" : encryption === "aes-gcm" ? "dump.enc" : "dump";
 }
 
+/**
+ * Is this object one of OUR dumps, in ANY encryption generation?
+ *
+ * Selection must never be filtered by the CURRENTLY configured extension. A bucket legitimately
+ * holds both generations for a whole retention window after `encryption:` changes, and pinning the
+ * filter to today's setting makes yesterday's objects invisible rather than absent — which is how
+ * a durable-verify run once passed on 1 object out of 35, silently, the day dumps were encrypted.
+ * The decrypt path in drillObject() already dispatches on each object's OWN extension, so every
+ * generation this matches genuinely restores.
+ */
+export function isDumpObject(name: string): boolean {
+  return /\.dump(\.age|\.enc)?$/.test(name);
+}
+
 /** The dump stamp embedded in a key → an ISO-8601 UTC ts (matches a LogRun.ts), or null. */
 export function stampToIso(key: string): string | null {
   const m = basename(key).match(/[0-9]{8}T[0-9]{6}Z/);
@@ -410,19 +424,19 @@ async function main(): Promise<void> {
 
   // Newest dump = the newest object in 2hourly/. Every run writes there; daily/weekly/monthly are
   // server-side copies of OLDER 2hourly objects. Listing 2hourly/ NON-recursively keeps the lexical
-  // sort genuinely chronological, so the drill verifies the latest dump. Filtering to the expected
-  // extension means a foreign/legacy object can never be selected and mask a real backup.
-  const ext = extForEncryption(cfg.encryption);
-  console.log(`Finding newest .${ext} object under r2:${r2Bucket}/${backupPrefix}/2hourly/ …`);
+  // sort genuinely chronological, so the drill verifies the latest dump. Filtering to dump objects
+  // (any generation — see isDumpObject) means a manifest or a log shard can never be selected and
+  // mask a real backup, WITHOUT the newest dump going invisible the day `encryption:` changes.
+  console.log(`Finding newest dump object under r2:${r2Bucket}/${backupPrefix}/2hourly/ …`);
   const ls = capture("rclone", ["lsf", "--files-only", `r2:${r2Bucket}/${backupPrefix}/2hourly/`, "--s3-no-check-bucket"]);
   const objs = ls.out
     .split("\n")
     .map((s) => s.trim())
     .filter(Boolean)
-    .filter((o) => o.endsWith(`.${ext}`))
+    .filter(isDumpObject)
     .sort();
   const newest = objs.length ? objs[objs.length - 1] : "";
-  if (!newest) await fail(`no .${ext} objects under ${backupPrefix}/2hourly/`);
+  if (!newest) await fail(`no dump objects under ${backupPrefix}/2hourly/`);
   const key = `2hourly/${newest}`;
   console.log(`Latest: ${backupPrefix}/${key}`);
 

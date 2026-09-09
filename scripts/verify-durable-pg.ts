@@ -20,11 +20,12 @@ import "./lib/bootEnv.js"; // MUST be first — loads $PROFILE before backupType
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadVerifyDurableConfig } from "./lib/config.js";
+import { loadVerifyDurableConfig, retentionFromConfig } from "./lib/config.js";
 import { capture, commandExists } from "./lib/proc.js";
 import { stampToEpochMs } from "./lib/schedule.js";
 import { loadLog, stampFromKey, type LogStore } from "./lib/logStore.js";
-import { drillObject, drillCoreFromProfile, extForEncryption, stampToIso, type DrillGate } from "./restore-drill-pg.js";
+import { DURABLE_TIERS, expectedDurableKeys } from "./lib/durableCensus.js";
+import { drillObject, drillCoreFromProfile, isDumpObject, stampToIso, type DrillGate } from "./restore-drill-pg.js";
 import { appendVerify } from "./runlog.js";
 import { slackOneoff, alertWebhook, failAlertText } from "./lib/slack.js";
 import { githubLogUrl } from "./lib/github.js";
@@ -106,7 +107,6 @@ async function main(): Promise<void> {
     }
   }
 
-  const ext = extForEncryption(cfg.encryption);
   let log: LogStore;
   try {
     log = loadLog();
@@ -121,10 +121,12 @@ async function main(): Promise<void> {
   const retestMs = cfg.verifyDurable.retestDays * 86_400_000;
 
   // ── Enumerate durable objects ──────────────────────────────────────────────
+  // isDumpObject, NOT the currently configured extension: a bucket holds both generations for a
+  // whole retention window after `encryption:` changes, and every one of them is ours to verify.
   const all: DurableObj[] = [];
-  for (const tier of ["daily", "weekly", "monthly"] as BackupTier[]) {
+  for (const tier of DURABLE_TIERS) {
     const lsr = capture("rclone", ["lsf", "--files-only", `r2:${r2Bucket}/${backupPrefix}/${tier}/`, "--s3-no-check-bucket"]);
-    for (const name of lsr.out.split("\n").map((s) => s.trim()).filter(Boolean).filter((o) => o.endsWith(`.${ext}`))) {
+    for (const name of lsr.out.split("\n").map((s) => s.trim()).filter(Boolean).filter(isDumpObject)) {
       const stamp = stampFromKey(name);
       if (!stamp) continue;
       const epoch = stampToEpochMs(stamp);
@@ -132,7 +134,27 @@ async function main(): Promise<void> {
       all.push({ tier, name, key: `${tier}/${name}`, stamp, ageMs: nowMs - epoch });
     }
   }
-  console.log(`Durable objects: ${all.length} (daily/weekly/monthly under ${backupPrefix})`);
+
+  // ── Census floor ───────────────────────────────────────────────────────────
+  // Everything below works off `all`, which is a FILTERED listing — so on its own it cannot tell
+  // "nothing is due" apart from "I could not see it", and it has been wrong that way before. The
+  // run-log is an independent record of what was promoted and is still inside its retention
+  // window; anything it names that the listing missed is either a lifecycle rule deleting early or
+  // this enumeration going blind again. Both are backup failures, so page rather than log.
+  const expected = expectedDurableKeys(log.runs, retentionFromConfig(cfg.retention), nowMs);
+  const found = new Set(all.map((o) => o.key));
+  const missing = expected.filter((k) => !found.has(k));
+  console.log(
+    `Durable objects: ${all.length} (daily/weekly/monthly under ${backupPrefix}); run-log expects at least ${expected.length}`,
+  );
+  if (missing.length) {
+    const shown = missing.slice(0, 5).join(", ");
+    await page(
+      `durable census short by ${missing.length} of ${expected.length}: ` +
+        `${shown}${missing.length > 5 ? `, +${missing.length - 5} more` : ""} — ` +
+        `present in the run-log, absent from the ${backupPrefix} listing`,
+    );
+  }
 
   // ── Verification state per object (join by key, falling back to legacy stamp+tier) ─────────
   const verifsFor = (o: DurableObj): LogVerification[] => {

@@ -510,6 +510,14 @@ missed run self-corrects:
 - **`verify-durable.aged`** (default on): full-restore the newest `weekly`/`monthly` object **≥
   `verify-durable.retest-days` (14)** old not yet restore-verified (the aged-copy proof, just inside the WORM lock).
 - **`verify-durable.max-restores`** caps full restores per run (hash-checks are uncapped — cheap).
+- **Census floor** (always on): the durable listing is checked against the run-log, which independently
+  records every promotion and the retention window it is still inside. Anything the log names that the
+  listing did not return **pages**, naming the keys. A filtered listing cannot otherwise tell "nothing is
+  due" apart from "I could not see it" — and it got that wrong once, the day a profile switched
+  `encryption: none → age`: the enumeration filtered on the *currently configured* extension, so every
+  pre-switch `.dump` object went invisible and the run reported green having verified 1 object of 35.
+  Selection now matches **any** dump generation (`.dump`, `.dump.age`, `.dump.enc`), because a bucket
+  legitimately holds both for a whole retention window after the setting changes.
 
 Net: **weekly/monthly are validated twice** (hash on write + restore at ~2 weeks), **daily once** (it's
 the short-lived 3-week tier). Because the daily primary restore covers the freshest dump every day, this
