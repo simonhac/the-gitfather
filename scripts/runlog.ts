@@ -28,6 +28,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildRawProfile } from "./lib/profile.js";
 import { githubRunInfo } from "./lib/github.js";
+import { pickLatestRun, runlogKey, runlogMonthsToTry } from "./lib/runlogParse.js";
 import type { LogRun, LogVerification, LogArchive, BackupTier } from "./lib/backupTypes.js";
 import type { LogCredential } from "./lib/credentialAge.js";
 
@@ -52,10 +53,7 @@ function rclone(args: string[]): { ok: boolean; out: string } {
   }
 }
 
-/** "YYYY-MM" for a Date, in UTC — the run-log's partition key (records are stamped in UTC). */
-function monthKey(d: Date): string {
-  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
-}
+export { pickLatestRun } from "./lib/runlogParse.js";
 
 /**
  * The newest run record in the PRIVATE run-log — for a consumer that needs the CAUSE of the last
@@ -73,38 +71,13 @@ export function readLatestRun(now: Date = new Date()): LogRun | null {
   const basename = typeof rawName === "string" ? rawName : undefined;
   if (!bucket || !basename) return null;
 
-  const prevMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
-  for (const ym of [monthKey(now), monthKey(prevMonth)]) {
-    const cat = rclone(["cat", `${remote}:${bucket}/_log/${basename}/runs-${ym}.jsonl`, "--s3-no-check-bucket"]);
+  for (const ym of runlogMonthsToTry(now)) {
+    const cat = rclone(["cat", `${remote}:${bucket}/${runlogKey(basename, ym)}`, "--s3-no-check-bucket"]);
     if (!cat.ok) continue;
-    const latest = pickLatestRun(cat.out);
+    const latest = pickLatestRun<LogRun>(cat.out);
     if (latest) return latest;
   }
   return null;
-}
-
-/**
- * Newest valid record in a runs-*.jsonl body. Pure, so the awkward parts are testable without R2:
- * a torn final line (read-modify-write means the last line can be partial) must not discard the
- * whole partition, and the newest record is chosen by `ts` rather than by position, so an
- * out-of-order append can't win.
- */
-export function pickLatestRun(body: string): LogRun | null {
-  const records = (body ?? "")
-    .split("\n")
-    .map((l) => l.trim())
-    .filter(Boolean)
-    .map((l) => {
-      try {
-        return JSON.parse(l) as LogRun;
-      } catch {
-        return null;
-      }
-    })
-    .filter((r): r is LogRun => !!r && typeof r === "object" && !Array.isArray(r) && typeof r.ts === "string");
-  if (!records.length) return null;
-  records.sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
-  return records[records.length - 1];
 }
 
 /**

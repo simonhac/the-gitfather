@@ -2,7 +2,7 @@ import "./lib/bootEnv.js"; // MUST be first — loads $PROFILE before backupType
 // ─────────────────────────────────────────────────────────────────────────────
 // doctor — the "is this consumer well configured?" preflight.
 //
-//   npx tsx scripts/doctor.ts <backup|archive|drill|verify-durable|staleness|dashboard|all>
+//   npx tsx scripts/doctor.ts <backup|archive|drill|verify-durable|dashboard|all>
 //   npm run doctor -- all
 //
 // For each selected task it: (1) runs the SAME zod schema the task itself uses
@@ -12,14 +12,13 @@ import "./lib/bootEnv.js"; // MUST be first — loads $PROFILE before backupType
 //
 // STRICTLY READ-ONLY: no dump, no upload, no `gh workflow run`, no Slack post. Safe to
 // run against production credentials. This is the broader preflight that complements
-// build-dashboard's `--sample` and check-staleness's `staleness.dry-run`.
+// build-dashboard's `--sample`. (The staleness watchdog runs in the Cloudflare Worker — see scheduler/.)
 // ─────────────────────────────────────────────────────────────────────────────
 
 import {
   loadBackupConfig,
   loadDrillConfig,
   loadVerifyDurableConfig,
-  loadStalenessConfig,
   loadArchiveConfig,
   loadDashboardConfig,
   type Profile,
@@ -33,11 +32,10 @@ import {
   checkR2,
   checkPostgres,
   checkSlack,
-  checkGh,
   configureRcloneRemote,
 } from "./lib/preflight.js";
 
-const TASKS = ["backup", "archive", "drill", "verify-durable", "staleness", "dashboard"] as const;
+const TASKS = ["backup", "archive", "drill", "verify-durable", "dashboard"] as const;
 type Task = (typeof TASKS)[number];
 
 /** Slack probe iff a bot token + channel are configured. */
@@ -122,17 +120,6 @@ async function probeVerifyDurable(): Promise<ProbeResult[]> {
   return [...(await probeRestore(cfg)), ...probeCredentialAge(cfg)];
 }
 
-async function probeStaleness(): Promise<ProbeResult[]> {
-  const cfg = loadStalenessConfig();
-  const r2 = cfg.credentials.r2;
-  const out: ProbeResult[] = [checkBinary("rclone")];
-  configureRcloneRemote("r2", r2.accountId!, r2.accessKeyId!, r2.secretAccessKey!);
-  out.push(checkR2("r2", r2.bucket!, "R2 dump bucket"));
-  if (cfg.staleness.selfHeal) out.push(checkGh(process.env.GITHUB_REPOSITORY));
-  out.push(...(await maybeSlack(cfg)));
-  return out;
-}
-
 async function probeDashboard(): Promise<ProbeResult[]> {
   // Validate the real (R2-reading) path; --upload's bucket is probed below if its creds are present.
   const cfg = loadDashboardConfig({ fromR2: true });
@@ -177,7 +164,6 @@ const PROBES: Record<Task, () => Promise<ProbeResult[]>> = {
   archive: probeArchive,
   drill: probeDrill,
   "verify-durable": probeVerifyDurable,
-  staleness: probeStaleness,
   dashboard: probeDashboard,
 };
 

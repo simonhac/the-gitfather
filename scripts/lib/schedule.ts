@@ -3,7 +3,7 @@
 // get subtly wrong) is unit-testable. All computed in UTC, matching the bash scripts.
 // ─────────────────────────────────────────────────────────────────────────────
 
-import type { RunOrigin } from "./backupTypes.js";
+import type { RunOrigin } from "./runOrigin.js";
 
 /**
  * Classify a run's origin for the Slack-row marker. `eventName` = GITHUB_EVENT_NAME; `reason` =
@@ -54,7 +54,7 @@ export function stampToEpochMs(stamp: string): number {
  * 120-minute slot puts the boundaries on even UTC hours — matching a two-hourly backup cron. A slot
  * is "satisfied" once an object stamped at-or-after its boundary exists; it counts as "overdue" only
  * once the boundary has passed AND the grace window has elapsed AND nothing has landed for it. This
- * decouples self-heal recovery time (≈ grace) from the backup interval — see check-staleness.ts.
+ * decouples self-heal recovery time (≈ grace) from the backup interval — see scheduler/src/watchdog.ts.
  * Pure + UTC, like the rest of this module (unit-tested in schedule.test.ts).
  */
 export function slotState(

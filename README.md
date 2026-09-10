@@ -28,8 +28,9 @@ repo, and credentials come from the environment (GitHub secrets), never from the
   (the freshest daily each day, weekly/monthly again at ~2 weeks), with row-count gates and a census
   floor that pages for anything the log names but the listing didn't return.
   → [Verifying backups](docs/verify-and-restore.md)
-- **Staleness watchdog with self-heal** — a 10-minute check that re-triggers a missed backup slot and
-  pages when it can't. → [Configuration & `doctor`](docs/configuration-and-troubleshooting.md)
+- **Staleness watchdog with self-heal** — a 10-minute check, run **outside GitHub** in the Cloudflare
+  Worker, that re-triggers a missed backup slot and pages when it can't — so an Actions outage is
+  detected rather than silencing the detector. → [`scheduler/README.md`](scheduler/README.md)
 - **Alerting that survives GitHub being the broken thing** — one Slack message per day updated in
   place, a failure-only webhook, and an external dead-man's-switch.
   → [Slack and alerting](docs/slack-and-alerting.md)
@@ -66,15 +67,15 @@ your-repo                              the-gitfather (this repo, public)
     pg-backup.yml ───────────uses────────►  pg-backup.yml
     pg-durable-verify.yml ───uses────────►  pg-durable-verify.yml   (daily; supersedes the weekly drill)
     pg-restore-drill.yml ────uses────────►  pg-restore-drill.yml    (optional once durable-verify is wired)
-    pg-staleness-check.yml ──uses────────►  pg-staleness-check.yml
     pg-dashboard.yml ────────uses────────►  pg-dashboard.yml
     pg-archive.yml ──────────uses────────►  pg-archive.yml          (optional, weekly)
 ```
 
-> **Scheduling — GitHub cron *or* the Cloudflare scheduler.** The caller workflows carry their own
-> `schedule:` cron, which is the simplest setup; GitHub's cron is best-effort and occasionally drops
-> ticks (the staleness watchdog exists to self-heal exactly that). To schedule several projects
-> punctually from one free Worker instead, see [`scheduler/README.md`](scheduler/README.md).
+> **Scheduling and the watchdog live in the Cloudflare Worker.** The caller workflows carry no
+> `schedule:` cron; one free Worker dispatches every client's backups/verifies on a punctual cadence
+> and runs the staleness watchdog natively every 10 minutes against each client's bucket. The backup
+> job publishes its profile's `staleness:` block to the bucket for it, so config flows GitHub →
+> Cloudflare, never the reverse. See [`scheduler/README.md`](scheduler/README.md).
 
 ---
 
@@ -103,7 +104,7 @@ By hand, in order:
    mint the scoped CI token. → [R2 setup](docs/r2-setup.md)
 2. **Copy [`profiles/example.yaml`](profiles/example.yaml)** into your repo as `pg-backup/<name>.yaml`
    and edit it. → [Profile reference](docs/configuration-and-troubleshooting.md#profile-reference)
-3. **Add the caller workflows** — backup, staleness, dashboard, durable-verify, and optionally archive.
+3. **Add the caller workflows** — backup, dashboard, durable-verify, and optionally archive.
    → [Wiring a consuming repo](docs/wiring-a-consuming-repo.md)
 4. **Set the secrets and variables** in your repo; secrets must be passed **explicitly**, not with
    `secrets: inherit`. → [Secrets and variables](docs/wiring-a-consuming-repo.md#3-set-the-secrets--variables-in-your-repo)
@@ -122,7 +123,6 @@ the-gitfather/
     backup-pg-to-r2.ts        # dump → (encrypt) → upload 2hourly/ → promote to daily/weekly/monthly; records a SHA-256
     verify-durable-pg.ts      # DAILY: hash-check each durable object + restore freshest daily + re-restore aged weekly/monthly
     restore-drill-pg.ts       # pull newest → restore into a throwaway → assert row counts (exports drillObject)
-    check-staleness.ts        # alert if no fresh backup landed recently; self-heal a missed tick
     archive-table.ts          # move aged rows out of Postgres into per-ISO-week objects; prune, gated
     backfill-archive-sizes.ts # maintenance: fill missing object sizes into the archive index
     build-dashboard.ts        # render the static backup-history dashboard from the R2 run-logs
@@ -134,12 +134,12 @@ the-gitfather/
                               #   scheduling, tier maths, log store, preflight probes (all .ts)
     __tests__/                # unit + bash-parity tests (node:test via tsx)
   dashboard/                  # the static page: template.html + heatmap.ts (SVG renderer) + theme.ts
-  scheduler/                  # optional Cloudflare Worker that schedules every client's workflows
+  scheduler/                  # the Cloudflare Worker: schedules every client's workflows + runs the staleness watchdog
   profiles/example.yaml       # copy this into YOUR repo and edit
   docs/                       # the documentation linked below
   .github/
     workflows/                # REUSABLE (on: workflow_call): pg-backup, pg-durable-verify,
-                              #   pg-restore-drill, pg-staleness-check, pg-dashboard, pg-archive
+                              #   pg-restore-drill, pg-dashboard, pg-archive
     actions/setup-tools       # composite: pinned rclone (+ optional pg client)
 ```
 
@@ -160,7 +160,7 @@ Built as a GitHub-Actions toolkit (TypeScript run via `tsx`), but every script i
 | [Slack and alerting](docs/slack-and-alerting.md) | The daily row, the failure webhook, the dead-man's-switch |
 | [Configuration, `doctor`, and troubleshooting](docs/configuration-and-troubleshooting.md) | Profile reference, validation, preflight, local runs, symptoms |
 | [Where this fits: 3-2-1-1-0](docs/threat-model.md) | The honest mapping, and the threat model |
-| [`scheduler/README.md`](scheduler/README.md) | The optional Cloudflare Worker scheduler |
+| [`scheduler/README.md`](scheduler/README.md) | The Cloudflare Worker: scheduler + staleness watchdog, roster, cutover |
 | [`profiles/example.yaml`](profiles/example.yaml) | The annotated profile — every knob, with its default |
 
 ---

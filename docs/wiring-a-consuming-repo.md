@@ -12,9 +12,11 @@ the restore-drill `row-count-table`, timezone, etc. See the
 
 ## 2. Add the caller workflows (`.github/workflows/` in your repo)
 
-Six reusable workflows, each with a thin caller here. `pg-backup`, `pg-staleness-check` and
-`pg-dashboard` are the core; `pg-durable-verify` is strongly recommended (and supersedes
-`pg-restore-drill`); `pg-archive` is optional. The `# see "Job-log link"` comments below refer to
+Five reusable workflows, each with a thin caller here. `pg-backup` and `pg-dashboard` are the core;
+`pg-durable-verify` is strongly recommended (and supersedes `pg-restore-drill`); `pg-archive` is
+optional. There is **no staleness caller**: the watchdog runs inside the
+[Cloudflare Worker](../scheduler/README.md), which reads the `staleness:` block your backup publishes
+to the bucket — so a repo with no Actions minutes left is still watched. The `# see "Job-log link"` comments below refer to
 [Slack, the failure webhook, and the dead-man's-switch → Job-log link](slack-and-alerting.md#job-log-link).
 
 > **Secrets must be passed explicitly.** This repo is **public and owned by `simonhac`**, so for any
@@ -116,35 +118,6 @@ jobs:
       ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}   # optional failure webhook
 ```
 
-`pg-staleness-check.yml` — note the `permissions` block (the self-heal re-triggers your backup workflow):
-
-```yaml
-name: My DB staleness check
-on:
-  schedule:
-    - cron: "*/10 * * * *"       # every 10 min — GitHub drops cron ticks in correlated clusters
-                                 # (backup + watchdog together), so 6 chances/hour keeps the watchdog
-                                 # live. It only ACTS when the current backup slot is overdue (grace-minutes).
-  workflow_dispatch: {}
-concurrency: { group: pg-staleness-check, cancel-in-progress: false }
-jobs:
-  check:
-    permissions:
-      actions: write             # lets the self-heal call `gh workflow run pg-backup.yml`
-      contents: read
-    uses: simonhac/the-gitfather/.github/workflows/pg-staleness-check.yml@main
-    with:
-      profile: pg-backup/myproject.yaml
-      r2_bucket: ${{ vars.R2_BUCKET }}
-      slack_channel: ${{ vars.SLACK_CHANNEL }}
-    secrets:
-      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}   # optional
-      ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}   # optional failure webhook
-```
-
 `pg-dashboard.yml` — runs after each backup, isolated so a dashboard failure never affects backups:
 
 ```yaml
@@ -230,7 +203,7 @@ The caller reads these and passes them in (explicit `secrets:` + `with:` inputs,
 | secret | `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | scoped R2 S3 token (Object Read & Write, **no delete**) |
 | **variable** | `R2_BUCKET` | private dump bucket name |
 | secret | `SLACK_BOT_TOKEN` | (optional) `xoxb-…`, scope `chat:write` |
-| **variable** | `SLACK_CHANNEL` | (optional) channel id `C…` — the non-secret id paired with the bot token |
+| **variable** | `SLACK_CHANNEL` | (optional) channel id `C…` — the non-secret id paired with the bot token. May instead live in the profile as `slack.channel`; the variable wins when both are set |
 | secret | `HEARTBEAT_URL` | (optional) dead-man's-switch ping URL |
 | secret | `ALERT_WEBHOOK_URL` | (optional) generic **failure** webhook (Slack-compatible `{"text":…}` POST) — a no-bot alert fallback, or a redundant failure channel into a host app's existing incoming webhook when the bot is also set |
 | secret | `AGE_RECIPIENT` / `AGE_IDENTITY` | (optional) only when `encryption: age` |

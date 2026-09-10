@@ -8,13 +8,13 @@ posts a loud, `@here`-mentioning threaded alert whose `<basename> DB backup` tit
 (`dashboard.url`) and whose error reason links to that run's GitHub Actions **job log** (falling back to the
 run page, or plain text off-Actions). The staleness, restore-drill, and durable-verify failure pages share
 this format. Any **elapsed-but-empty** slot renders as
-`⬜ HH:00`, so a skipped run shows as a visible gap; the staleness check (every ~10 min) re-renders the row so a
-just-missed slot surfaces within minutes. This needs a **bot token** (`chat.update`; incoming webhooks
+`⬜ HH:00`, so a skipped run shows as a visible gap; the [Worker's watchdog](../scheduler/README.md) (every ~10 min)
+re-renders the row so a just-missed slot surfaces within minutes. This needs a **bot token** (`chat.update`; incoming webhooks
 can't update). "Today's message" is persisted as a tiny JSON object at `_status/<basename>/<date>.json`
 in R2. If `SLACK_BOT_TOKEN`/`SLACK_CHANNEL` are unset, all Slack output is silently skipped.
 
 **Failure webhook (no-bot fallback).** Separately from the bot, set `ALERT_WEBHOOK_URL` to get a
-Slack-compatible `{"text":…}` POST on **failure only** (backup / restore-drill / staleness) — the simple
+Slack-compatible `{"text":…}` POST on **failure only** (backup / restore-drill; the watchdog's copy is the Worker secret `ALERT_WEBHOOK_URL_<ID>`) — the simple
 alerting path when you don't run a bot, or a redundant failure channel into a host app's existing
 incoming webhook when you do. It can't update in place, so it fires on failures only (no per-run success
 spam). Unset → no-op.
@@ -37,8 +37,9 @@ to get the precise job-log link.
 
 ### Dead-man's-switch (optional, recommended)
 
-The only watchdog that runs *outside* GitHub, so it catches the scheduled workflow **not firing at all**
-(Actions cron is best-effort — it delays and occasionally drops ticks entirely). Create a check (e.g.
+The last line of defence, independent of both GitHub **and** the Cloudflare Worker. The Worker's
+staleness watchdog already catches a backup not landing and pages from outside GitHub; this catches the
+Worker itself being down. Create a check (e.g.
 [healthchecks.io](https://healthchecks.io)) with a period of ~8 h + grace ~3 h, and wire it to a **loud**
 channel you actually watch (Slack with a mention, SMS/PagerDuty — not just an email that buries) — this is
 the alert that fires when GitHub is the thing that's broken. Put its ping URL in `HEARTBEAT_URL`; the

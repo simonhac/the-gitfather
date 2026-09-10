@@ -35,6 +35,7 @@ import type { PgFailureCode } from "./lib/pg-classify.js";
 import { computeTiers, runOrigin } from "./lib/schedule.js";
 import { appendRun } from "./runlog.js";
 import { githubLogUrl } from "./lib/github.js";
+import { publishWatchdogConfig } from "./lib/watchdogPublish.js";
 import { slackEnabled, slackPost, slackDailyRecord, dailyLabel, alertWebhook, failAlertText } from "./lib/slack.js";
 import type { BackupTier } from "./lib/backupTypes.js";
 
@@ -152,6 +153,11 @@ async function main(): Promise<void> {
   process.env.RCLONE_CONFIG_R2_ACCESS_KEY_ID = r2Key;
   process.env.RCLONE_CONFIG_R2_SECRET_ACCESS_KEY = r2Secret;
   process.env.RCLONE_CONFIG_R2_ENDPOINT = endpoint;
+
+  // Publish the staleness watchdog's view of this profile to the bucket, every run, before the dump —
+  // the Cloudflare Worker reads it from there (lib/watchdogConfig.ts). Config flows GitHub → Cloudflare,
+  // never the reverse, and a profile edit lands with the next run. Best-effort: never blocks the dump.
+  await bestEffort("publish watchdog config", () => publishWatchdogConfig(cfg, now));
 
   // Object extension per encryption mode. Unknown mode is a plain config error (no Slack).
   let ext: string;

@@ -30,6 +30,7 @@ import {
 } from "./backupTypes.js";
 import { summarizeOutcomes, type OutcomeCode } from "./outcomes.js";
 import { tzAbbrev } from "./tzAbbrev.js";
+import { tzPartsIn, type TzParts } from "./dailyRow.js";
 
 export const WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 const MONTH_SHORT = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -38,30 +39,9 @@ const MONTH_SHORT = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Se
 // All bucketing is done in DISPLAY_TZ (default UTC) via Intl, so the grid is correct
 // for any timezone and any DST regime.
 
-const tzPartsFmt = new Intl.DateTimeFormat("en-GB", {
-  timeZone: DISPLAY_TZ,
-  year: "numeric",
-  month: "numeric",
-  day: "numeric",
-  hour: "numeric",
-  minute: "numeric",
-  hour12: false,
-});
-
-interface TzParts {
-  y: number;
-  mo: number;
-  day: number;
-  hour: number;
-}
-
-/** Calendar parts of `d` as seen in DISPLAY_TZ. */
+/** Calendar parts of `d` as seen in DISPLAY_TZ (the parameterised form lives in dailyRow.ts). */
 export function tzParts(d: Date): TzParts {
-  const parts = tzPartsFmt.formatToParts(d);
-  const get = (t: string) => Number(parts.find((p) => p.type === t)?.value);
-  let hour = get("hour");
-  if (hour === 24) hour = 0;
-  return { y: get("year"), mo: get("month"), day: get("day"), hour };
+  return tzPartsIn(d, DISPLAY_TZ);
 }
 
 /** Days since the Unix epoch for a display-timezone calendar date (DST-safe ordinal). */
@@ -165,7 +145,7 @@ const whenFmt = new Intl.DateTimeFormat("en-GB", {
 /** "Wed 19 Jun 2026, 2:00 am UTC" (narrow no-break spaces normalised). */
 export function formatInTz(d: Date): string {
   const base = whenFmt.format(d).replace(/\u202f/g, " ");
-  const tz = tzAbbrev(d);
+  const tz = tzAbbrev(d, DISPLAY_TZ);
   return tz ? `${base} ${tz}` : base;
 }
 

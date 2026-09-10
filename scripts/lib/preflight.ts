@@ -4,7 +4,7 @@
 // Each probe answers one question about an EXTERNAL dependency (a binary, the R2
 // bucket, a Postgres endpoint, Slack, gh) and returns a {name, ok, detail} verdict.
 // Everything here is strictly read-only: `rclone lsf`, `psql 'select 1'`, Slack
-// `auth.test`, `gh auth status`, `--version`. No dump, no upload, no workflow trigger,
+// `auth.test`, `--version`. No dump, no upload, no workflow trigger,
 // no Slack post — doctor must be safe to run against production creds.
 //
 // Built on commandExists()/capture() from proc.ts (capture never throws and bounds its
@@ -118,11 +118,3 @@ export async function checkSlack(token: string, channel: string): Promise<ProbeR
   }
 }
 
-/** gh is installed and authenticated (needed for staleness self-heal). Read-only. */
-export function checkGh(repo?: string): ProbeResult {
-  const name = "gh (self-heal)";
-  if (!commandExists("gh")) return { name, ok: false, detail: "gh not found on PATH", optional: true };
-  const res = capture("gh", ["auth", "status"]);
-  if (!res.ok) return { name, ok: false, detail: "gh not authenticated (`gh auth status` failed)", optional: true };
-  return { name, ok: true, detail: repo ? `authenticated (repo ${repo})` : "authenticated", optional: true };
-}
