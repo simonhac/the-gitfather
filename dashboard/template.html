@@ -146,7 +146,9 @@
   .stat {
     background: var(--card); border: 1px solid var(--border); border-radius: 8px;
     padding: 12px 15px; box-shadow: var(--shadow);
-    display: flex; flex-direction: column; justify-content: center; min-height: 66px;
+    /* Top-aligned, not centred: a grid row is as tall as its tallest card, so centring made the
+       short cards' labels sit lower than the tall one's and the label row stopped reading as a row. */
+    display: flex; flex-direction: column; justify-content: flex-start; min-height: 66px;
     transition: box-shadow 0.16s ease, transform 0.16s ease;
   }
   .stat:hover { transform: translateY(-1px); box-shadow: var(--shadow-lift); }
