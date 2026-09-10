@@ -416,15 +416,34 @@ export function deriveArchiveState(run: PublicArchiveRun): ArchiveCellState {
   return run.weeksArchived + run.weeksPruned > 0 ? "archived" : "quiet";
 }
 
-/** Better of two untroubled states; `archived` outranks `quiet`. */
-const ARCHIVE_SUCCESS_RANK: Record<string, number> = { archived: 2, quiet: 1 };
-/** Worse of two troubled states; a failed run outranks a refusal. */
-const ARCHIVE_PROBLEM_RANK: Record<string, number> = { failed: 2, attention: 1 };
+/**
+ * One archive run's outcome CODE. `deriveArchiveState` has already done the hard part — it checks
+ * refusals and anomalies BEFORE `ok`, because archive-table.ts folds them into `ok` and a refusal is
+ * a deliberate decline, not a breakage — so this is a straight mapping. `archived` and `quiet` are
+ * both clean runs; whether anything was stored is the BODY's question, and the body no longer takes
+ * its answer from the runs at all.
+ */
+export function archiveCode(sr: { state: ArchiveCellState }): OutcomeCode {
+  if (sr.state === "failed") return "failed";
+  if (sr.state === "attention") return "attention";
+  return "ok";
+}
 
 /**
  * Assemble the archive block: one Map per week row (index-aligned with BackupGrid.rows), keyed by
  * short table name. Returns null when the profile archives nothing — the caller then renders the
  * page exactly as it did before this feature existed.
+ *
+ * Each cell has two channels with two different subjects, and a cell exists when EITHER has
+ * something to say:
+ *
+ *   data  the rows DATED this week, placed by their ISO week label (`_index/`)
+ *   runs  the archiver runs that EXECUTED during this week, placed by their timestamp
+ *
+ * They are rarely the same week. The run that archives W30's rows happens weeks later — five rows
+ * above W30's body on this grid — which is why the tooltip splits the two halves with a rule.
+ * Putting the runs on the week they ran is still right: it is what keeps an archive record on the
+ * same row as the weekly backup it follows a few hours later.
  */
 export function buildArchiveColumns(payload: PublicPayload, now: Date, weeks = 52): ArchiveColumns | null {
   const archive = payload.archive;
@@ -434,53 +453,61 @@ export function buildArchiveColumns(payload: PublicPayload, now: Date, weeks = 5
   const known = new Set(tables);
   const currentWeekStart = currentWeekStartOrdinal(now);
 
-  // row → table → records
-  const byRow = new Map<number, Map<string, ArchiveSlotRun[]>>();
-  for (const run of archive.runs) {
-    if (!known.has(run.table)) continue; // build-dashboard unions log-only tables in, so this is a guard
-    const d = new Date(run.t);
-    const { row } = weekRowOf(d, currentWeekStart);
-    if (row < 0 || row >= weeks) continue;
+  // row → table → the two channels, accumulated independently.
+  interface Channels {
+    runs: ArchiveSlotRun[];
+    data: ArchiveCell["data"];
+  }
+  const byRow = new Map<number, Map<string, Channels>>();
+  const channelsAt = (row: number, table: string): Channels => {
     let byTable = byRow.get(row);
     if (!byTable) {
       byTable = new Map();
       byRow.set(row, byTable);
     }
-    let arr = byTable.get(run.table);
-    if (!arr) {
-      arr = [];
-      byTable.set(run.table, arr);
+    let ch = byTable.get(table);
+    if (!ch) {
+      ch = { runs: [], data: null };
+      byTable.set(table, ch);
     }
-    arr.push({ run, state: deriveArchiveState(run), whenLabel: formatInTz(d) });
+    return ch;
+  };
+
+  for (const run of archive.runs) {
+    if (!known.has(run.table)) continue; // build-dashboard unions log-only tables in, so this is a guard
+    const d = new Date(run.t);
+    const { row } = weekRowOf(d, currentWeekStart);
+    if (row < 0 || row >= weeks) continue;
+    channelsAt(row, run.table).runs.push({ run, state: deriveArchiveState(run), whenLabel: formatInTz(d) });
+  }
+
+  // `weeks` absent = the index was not read this build; `[]` = it was read and is empty. Neither
+  // draws a body, but only the second is knowledge.
+  for (const w of archive.weeks ?? []) {
+    if (!known.has(w.table)) continue;
+    let monday: number;
+    try {
+      monday = isoWeekMondayOrdinal(w.week);
+    } catch {
+      continue; // an impossible label costs its own week, not the block
+    }
+    const row = (currentWeekStart - monday) / DAYS_PER_WEEK;
+    if (row < 0 || row >= weeks) continue;
+    channelsAt(row, w.table).data = { state: w.state, rows: w.rows };
   }
 
   const rows: Map<string, ArchiveCell>[] = [];
   for (let r = 0; r < weeks; r++) {
     const cells = new Map<string, ArchiveCell>();
     rows.push(cells);
-    const byTable = byRow.get(r);
-    if (!byTable) continue;
-    for (const [table, runsIn] of byTable) {
-      runsIn.sort((a, b) => Date.parse(a.run.t) - Date.parse(b.run.t));
-      let successState: ArchiveCellState | null = null;
-      let problemState: ArchiveCellState | null = null;
-      for (const sr of runsIn) {
-        if (sr.state === "failed" || sr.state === "attention") {
-          if (!problemState || ARCHIVE_PROBLEM_RANK[sr.state] > ARCHIVE_PROBLEM_RANK[problemState]) problemState = sr.state;
-        } else if (!successState || ARCHIVE_SUCCESS_RANK[sr.state] > ARCHIVE_SUCCESS_RANK[successState]) {
-          successState = sr.state;
-        }
-      }
+    for (const [table, ch] of byRow.get(r) ?? []) {
+      ch.runs.sort((a, b) => Date.parse(a.run.t) - Date.parse(b.run.t));
       cells.set(table, {
         row: r,
         table,
-        runs: runsIn,
-        // Headline follows the backup grid's convention: the success is the colour, the problem
-        // shows as the split triangle. With no success at all, the problem IS the cell.
-        state: successState ?? problemState ?? "failed",
-        successState,
-        problemState,
-        multiple: runsIn.length > 1,
+        runs: ch.runs,
+        data: ch.data,
+        mark: summarizeOutcomes(ch.runs.map(archiveCode)),
       });
     }
   }
@@ -490,9 +517,15 @@ export function buildArchiveColumns(payload: PublicPayload, now: Date, weeks = 5
 
 /** Row/issue totals over the VISIBLE window, matching `summarize`'s scope for the backup cards. */
 export function summarizeArchives(cols: ArchiveColumns): ArchiveStats {
-  const stats: ArchiveStats = { rowsArchived: 0, rowsPruned: 0, issues: 0 };
+  const stats: ArchiveStats = { rowsArchived: 0, rowsPruned: 0, issues: 0, weeksArchived: 0, weeksPruned: 0 };
   for (const row of cols.rows) {
     for (const cell of row.values()) {
+      // The data channel: a week counted here is one whose ROWS are in the archive, which is a
+      // different question from how many rows the runs in the window moved.
+      if (cell.data) {
+        stats.weeksArchived++;
+        if (cell.data.state === "pruned") stats.weeksPruned++;
+      }
       for (const sr of cell.runs) {
         if (sr.state === "failed" || sr.state === "attention") stats.issues++;
         if (sr.run.dryRun !== "none") continue; // a dry run moved nothing; don't count phantom rows

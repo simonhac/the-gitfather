@@ -5,12 +5,9 @@ import {
   CELL_H,
   cellOps,
   bodyClass,
-  archiveBody,
-  archiveCode,
-  archiveMark,
   type RectOp,
 } from "../lib/cellGlyph.js";
-import { backupCode, runBodyState } from "../lib/backupHistory.js";
+import { backupCode, archiveCode, runBodyState } from "../lib/backupHistory.js";
 import { summarizeOutcomes, NO_MARK, type OutcomeCode } from "../lib/outcomes.js";
 
 // The glyph is asserted as an op LIST rather than as rendered SVG: the grid, the legend swatches and
@@ -44,12 +41,6 @@ test("bodyClass: one mapping from lifecycle state to colour, for both cell kinds
   assert.equal(bodyClass(null), null);
 });
 
-test("archiveBody: only a week that stored something has a body", () => {
-  assert.equal(archiveBody({ successState: "archived" }), "b-archived");
-  assert.equal(archiveBody({ successState: "quiet" }), null);
-  assert.equal(archiveBody({ successState: null }), null);
-});
-
 // ── Per-run codes ────────────────────────────────────────────────────────────
 
 test("backupCode: reads the run and its verification, not the derived state", () => {
@@ -70,12 +61,6 @@ test("archiveCode: a refusal is attention, not failure — the gate declined on 
   assert.equal(archiveCode({ state: "attention" }), "attention");
   assert.equal(archiveCode({ state: "archived" }), "ok");
   assert.equal(archiveCode({ state: "quiet" }), "ok");
-});
-
-test("archiveMark: folds a week's runs down to distinct codes", () => {
-  assert.deepEqual(archiveMark({ runs: [{ state: "archived" }, { state: "attention" }] as never }), {
-    worst: "attention", second: "ok", codes: 2,
-  });
 });
 
 // ── The glyph ────────────────────────────────────────────────────────────────

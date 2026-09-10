@@ -307,7 +307,17 @@ export interface PublicPayload {
    * records). Absent → the dashboard renders exactly as it did before archive columns existed: no
    * columns, no legend keys, no stats row, no blurb.
    */
-  archive?: { tables: PublicArchiveTable[]; runs: PublicArchiveRun[] };
+  archive?: {
+    tables: PublicArchiveTable[];
+    runs: PublicArchiveRun[];
+    /**
+     * The `_index/` view: which weeks' ROWS are archived or pruned. ABSENT means "not read this
+     * build" — no `_index/`, or a fetch that failed soft; `[]` means "read, and there was nothing
+     * there". The two must stay distinguishable: one is a gap in what we know, the other is
+     * something we know.
+     */
+    weeks?: PublicArchiveWeek[];
+  };
 }
 
 // ── Derived grid types ───────────────────────────────────────────────────────
@@ -405,20 +415,22 @@ export interface ArchiveCell {
   row: number; // 0 = most-recent week (top) — the same row index as the backup grid
   /** Short table name; the key into ArchiveColumns.tables. */
   table: string;
-  /** All records for this table in this week, time-sorted (length >= 1). */
-  runs: ArchiveSlotRun[];
-  /** Headline state — the best success among the runs, else the worst problem. */
-  state: ArchiveCellState;
-  /** Best of archived/quiet among the untroubled runs (null if every run had a problem). */
-  successState: ArchiveCellState | null;
   /**
-   * Worst of failed/attention among the troubled runs (null if none). A backup cell needs no
-   * equivalent because failure has one colour and archives have two — a refusal and a breakage are
-   * different things, and the cell has to know which one it is showing.
+   * Archiver records that EXECUTED during this week, time-sorted. MAY BE EMPTY: a cell exists when
+   * either channel has something to say, and the week whose rows moved is almost never the week the
+   * archiver ran — the run that archives W30 sits five rows above W30's body.
    */
-  problemState: ArchiveCellState | null;
-  /** True if the week holds more than one record for this table. */
-  multiple: boolean;
+  runs: ArchiveSlotRun[];
+  /**
+   * The rows DATED this week — their lifecycle state and how many there are — from `_index/`.
+   *
+   * null when this week has no index entry, which deliberately cannot be told apart from a week
+   * that had no rows: the index gains a week only when it is archived, so a backlog and an empty
+   * week look the same. That limit is forced by the data rather than chosen.
+   */
+  data: { state: ArchiveBodyState; rows: number } | null;
+  /** The mark: did the archiver runs that happened this week go clean? See outcomes.ts. */
+  mark: CellMark;
 }
 
 export interface ArchiveColumns {
@@ -433,6 +445,13 @@ export interface ArchiveStats {
   rowsPruned: number;
   /** Runs that failed or need a look — the one number an operator should want to be zero. */
   issues: number;
+  /**
+   * Visible table-weeks whose rows are in the archive, and the subset already pruned from the
+   * database. These come from the DATA channel, where the row counts above come from the runs —
+   * two subjects, so they are hints on their cards rather than headline numbers.
+   */
+  weeksArchived: number;
+  weeksPruned: number;
 }
 
 /**

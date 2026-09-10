@@ -19,8 +19,8 @@
 // cell size, because the draw loop and the mouse hit-test both read it and must never disagree.
 // ─────────────────────────────────────────────────────────────────────────────
 
-import type { ArchiveCell, ArchiveCellState, BackupBodyState, ArchiveBodyState } from "./backupTypes.js";
-import { summarizeOutcomes, type CellMark, type OutcomeCode } from "./outcomes.js";
+import type { BackupBodyState, ArchiveBodyState } from "./backupTypes.js";
+import type { CellMark, OutcomeCode } from "./outcomes.js";
 
 // ── Geometry ─────────────────────────────────────────────────────────────────
 // Width and height are separate constants so a non-square cell can be tried by editing two
@@ -144,35 +144,4 @@ export function bodyClass(state: BackupBodyState | ArchiveBodyState | null): Bod
     default:
       return null;
   }
-}
-
-// ── Archive weeks ────────────────────────────────────────────────────────────
-
-/**
- * One archive run's outcome code. `deriveArchiveState` has already done the hard part — it checks
- * refusals and anomalies BEFORE `ok`, because archive-table.ts folds them into `ok` and a refusal
- * is a deliberate decline, not a breakage — so this is a straight mapping. `archived` and `quiet`
- * are both clean runs; the difference between them is whether anything was stored, which is the
- * BODY's question, not the mark's.
- */
-export function archiveCode(sr: { state: ArchiveCellState }): OutcomeCode {
-  if (sr.state === "failed") return "failed";
-  if (sr.state === "attention") return "attention";
-  return "ok";
-}
-
-/**
- * The body of an archive week.
- *
- * NOTE the subject: today this is derived from the RUNS, so it says "the archiver moved rows during
- * this week" — which is what the blue cell has always meant. The data-week view (`_index/`, where
- * the body would instead mean "the rows DATED this week are archived / pruned") is the next change,
- * and it replaces the source here without touching the glyph.
- */
-export function archiveBody(cell: Pick<ArchiveCell, "successState">): BodyClass | null {
-  return bodyClass(cell.successState === "archived" ? "archived" : null);
-}
-
-export function archiveMark(cell: Pick<ArchiveCell, "runs">): CellMark {
-  return summarizeOutcomes(cell.runs.map(archiveCode));
 }

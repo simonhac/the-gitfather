@@ -21,6 +21,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadDashboardConfig, retentionFromConfig, joinObjectKey } from "./lib/config.js";
 import { readLogDir, downloadLogsFromR2 } from "./lib/logStore.js";
+import { downloadArchiveIndexFromR2, readArchiveIndexDir } from "./lib/archiveIndex.js";
 import { shortTableName } from "./lib/archive.js";
 import { HOURS_PER_SLOT, SLOT_MINUTES } from "./lib/backupTypes.js";
 import type {
@@ -30,6 +31,7 @@ import type {
   PublicPayload,
   PublicArchiveRun,
   PublicArchiveTable,
+  PublicArchiveWeek,
   BackupTier,
 } from "./lib/backupTypes.js";
 
@@ -86,11 +88,44 @@ function publishedTableNames(fullNames: string[]): Map<string, string> {
   return new Map(fullNames.map((full) => [full, claims.get(shortTableName(full))!.size > 1 ? full : shortTableName(full)]));
 }
 
+/**
+ * Column order: the profile's tables first, then any table seen only in the log — a table dropped
+ * from `archive.tables` keeps its column, because the rows it moved are still out there. Fully
+ * qualified, as the profile and the run-log spell them.
+ */
+function archiveTableOrder(archives: LogArchive[], archiveSpecs: ArchiveSpec[]): string[] {
+  return [...new Set([...archiveSpecs.map((t) => t.table), ...archives.map((a) => a.table)])];
+}
+
+/**
+ * The SHORT names to fetch `_index/` under — that is the form the archiver writes its object keys
+ * in. Two tables in different schemas sharing a short name already share one `_index/` path in R2
+ * (an archiver-level problem, not a dashboard one), so both are skipped with a warning rather than
+ * one table being shown another's weeks.
+ */
+function archiveIndexTables(order: string[]): string[] {
+  const claims = new Map<string, string[]>();
+  for (const full of order) {
+    const short = shortTableName(full);
+    claims.set(short, [...(claims.get(short) ?? []), full]);
+  }
+  const out: string[] = [];
+  for (const [short, fulls] of claims) {
+    if (fulls.length > 1) {
+      console.warn(`dashboard: WARNING ${fulls.join(" and ")} share the _index/ path "${short}" — skipping their week states`);
+      continue;
+    }
+    out.push(short);
+  }
+  return out;
+}
+
 function scrub(
   runs: LogRun[],
   verifications: LogVerification[],
   archives: LogArchive[],
   archiveSpecs: ArchiveSpec[],
+  archiveWeeks: PublicArchiveWeek[] | null,
 ): PublicPayload {
   const payload: PublicPayload = {
     label,
@@ -102,9 +137,7 @@ function scrub(
     verifications: verifications.map((v) => ({ vt: v.verifiedTs, ok: v.ok, ratio: v.ratio, kind: v.kind })),
   };
 
-  // Column order: the profile's tables first, then any table seen only in the log — a table dropped
-  // from `archive.tables` keeps its column, because the rows it moved are still out there.
-  const order = [...new Set([...archiveSpecs.map((t) => t.table), ...archives.map((a) => a.table)])];
+  const order = archiveTableOrder(archives, archiveSpecs);
   if (order.length === 0) return payload; // no archive block → a page identical to the pre-archive one
 
   const specByTable = new Map(archiveSpecs.map((t) => [t.table, t]));
@@ -131,7 +164,41 @@ function scrub(
     anomalies: a.anomalies,
     runUrl: hideLinks ? null : a.runUrl,
   }));
-  return { ...payload, archive: { tables, runs: archiveRuns } };
+  // `weeks` is omitted entirely when the index was not read, so the browser can tell "we did not
+  // look" from "we looked and there is nothing there".
+  const published = new Set(tables.map((t) => t.table));
+  return {
+    ...payload,
+    archive: {
+      tables,
+      runs: archiveRuns,
+      ...(archiveWeeks ? { weeks: archiveWeeks.filter((w) => published.has(w.table)) } : {}),
+    },
+  };
+}
+
+/**
+ * The `_index/` view of what happened to each week's ROWS — the archive cells' body channel.
+ *
+ * null means "not read this build", which the payload keeps distinct from "read and empty". The
+ * whole call is wrapped: this is a second, later-added source, and a dashboard that fails to build
+ * because an index could not be listed would be a worse outcome than one drawn from runs alone.
+ * --sample carries its own weeks, so it never comes through here.
+ */
+function readArchiveIndex(archives: LogArchive[], archiveSpecs: ArchiveSpec[]): PublicArchiveWeek[] | null {
+  if (useSample) return null; // the sample carries its own weeks
+  const tables = archiveIndexTables(archiveTableOrder(archives, archiveSpecs));
+  if (tables.length === 0) return null;
+  const prefix = cfg.archive.storePrefix;
+  try {
+    if (logdir) return readArchiveIndexDir(logdir, tables);
+    if (!prefix) return null; // nothing archives here, so there is no store to read
+    if (!cfg.credentials.r2.bucket) return null;
+    return downloadArchiveIndexFromR2(cfg.credentials.r2.bucket, prefix, tables);
+  } catch (e) {
+    console.warn(`dashboard: WARNING could not read the archive index (${(e as Error).message}) — runs only`);
+    return null;
+  }
 }
 
 function escHtml(s: string): string {
@@ -155,9 +222,10 @@ async function main(): Promise<void> {
     ({ runs, verifications, archives } = downloadLogsFromR2(cfg.credentials.r2.bucket, cfg.name));
     archiveSpecs = profileArchiveSpecs();
   }
-  const payload = scrub(runs, verifications, archives, archiveSpecs);
+  const payload = scrub(runs, verifications, archives, archiveSpecs, readArchiveIndex(archives, archiveSpecs));
   const archiveNote = payload.archive
-    ? `, ${payload.archive.runs.length} archive records over ${payload.archive.tables.length} table(s)`
+    ? `, ${payload.archive.runs.length} archive records over ${payload.archive.tables.length} table(s)` +
+      (payload.archive.weeks ? `, ${payload.archive.weeks.length} indexed week(s)` : ", no _index/ read")
     : "";
   console.log(
     `dashboard: ${payload.runs.length} runs, ${payload.verifications.length} verifications${archiveNote} (label="${label}")`,
