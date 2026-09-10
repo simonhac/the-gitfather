@@ -12,6 +12,8 @@
 // bundle only ever sees scrubbed data.
 // ─────────────────────────────────────────────────────────────────────────────
 
+import type { CellMark } from "./outcomes.js";
+
 export type BackupTier = "2hourly" | "daily" | "weekly" | "monthly";
 
 /**
@@ -273,6 +275,24 @@ export interface PublicArchiveTable {
   pruneAfterWeeks: number | null;
 }
 
+/**
+ * One ISO week of one table's archive index, scrubbed for publication — the `_index/` view of what
+ * happened to the rows DATED that week, as opposed to how a run went.
+ *
+ * The private record also carries per-part fingerprints, digests, part numbers and roles. None of
+ * that is published: a digest is a gift to anyone reasoning about what is in the bucket, and the
+ * page only needs the state and the size. `rows` is the ACTIVE part's row count (lib/archive.ts
+ * activePart) — see lib/archiveIndex.ts, where the scrub happens.
+ */
+export interface PublicArchiveWeek {
+  /** Schema-stripped table name, matching PublicArchiveRun.table. */
+  table: string;
+  /** ISO week label, e.g. "2026-W13". A calendar fact, not an instant. */
+  week: string;
+  state: ArchiveBodyState;
+  rows: number;
+}
+
 export interface PublicPayload {
   /** Generic project label, e.g. "mydb" (the profile's name / dashboard.label). */
   label: string;
@@ -287,7 +307,17 @@ export interface PublicPayload {
    * records). Absent → the dashboard renders exactly as it did before archive columns existed: no
    * columns, no legend keys, no stats row, no blurb.
    */
-  archive?: { tables: PublicArchiveTable[]; runs: PublicArchiveRun[] };
+  archive?: {
+    tables: PublicArchiveTable[];
+    runs: PublicArchiveRun[];
+    /**
+     * The `_index/` view: which weeks' ROWS are archived or pruned. ABSENT means "not read this
+     * build" — no `_index/`, or a fetch that failed soft; `[]` means "read, and there was nothing
+     * there". The two must stay distinguishable: one is a gap in what we know, the other is
+     * something we know.
+     */
+    weeks?: PublicArchiveWeek[];
+  };
 }
 
 // ── Derived grid types ───────────────────────────────────────────────────────
@@ -306,6 +336,14 @@ export interface SlotRun {
   whenLabel: string;
 }
 
+/**
+ * What a backup slot HOLDS — the body channel. A strict subset of BackupCellState: `failed` is not
+ * a body (a failed run produced no data, so the square stays blank and the mark carries it), and
+ * `unverified` is not either (a dump whose drill failed is still a dump — the amber lives in the
+ * mark, where it can coexist with the green).
+ */
+export type BackupBodyState = "ok" | "verified" | "expired";
+
 export interface BackupCell {
   row: number; // 0 = most-recent week (top)
   col: number; // 0..COLS_PER_WEEK-1
@@ -313,14 +351,10 @@ export interface BackupCell {
   slot: number; // 0..SLOTS_PER_DAY-1
   /** All runs that fell in this slot, time-sorted (length >= 1). */
   runs: SlotRun[];
-  /** Headline state — the best success among the runs, else "failed". Drives summary/legend. */
-  state: BackupCellState;
-  /** Best of verified/ok/expired among the successful runs (null if all failed). */
-  successState: BackupCellState | null;
-  /** True if any run in the slot failed. */
-  hasFailure: boolean;
-  /** True if the slot holds more than one run. */
-  multiple: boolean;
+  /** The body: the best thing this slot holds, or null when every run failed. */
+  body: BackupBodyState | null;
+  /** The mark: did the runs in this slot go clean? See outcomes.ts. */
+  mark: CellMark;
 }
 
 export interface BackupRow {
@@ -360,6 +394,15 @@ export interface BackupStats {
  */
 export type ArchiveCellState = "archived" | "quiet" | "attention" | "failed";
 
+/**
+ * What an archive week HOLDS — the body channel, as opposed to how a run went.
+ *
+ * `pruned` is the brighter step of the blue ramp because a prune is gated on a fingerprint re-check
+ * of the stored object: a pruned week is BY CONSTRUCTION a verified one, which is exactly what the
+ * brighter green means on the backup side.
+ */
+export type ArchiveBodyState = "archived" | "pruned";
+
 /** One archive record within a week/table cell (a cell can hold several — a manual backfill). */
 export interface ArchiveSlotRun {
   run: PublicArchiveRun;
@@ -372,20 +415,22 @@ export interface ArchiveCell {
   row: number; // 0 = most-recent week (top) — the same row index as the backup grid
   /** Short table name; the key into ArchiveColumns.tables. */
   table: string;
-  /** All records for this table in this week, time-sorted (length >= 1). */
-  runs: ArchiveSlotRun[];
-  /** Headline state — the best success among the runs, else the worst problem. */
-  state: ArchiveCellState;
-  /** Best of archived/quiet among the untroubled runs (null if every run had a problem). */
-  successState: ArchiveCellState | null;
   /**
-   * Worst of failed/attention among the troubled runs (null if none). BackupCell gets away with a
-   * `hasFailure` boolean because failure has one colour and archives have two — a refusal and a
-   * breakage are different things, and the cell has to know which one it is showing.
+   * Archiver records that EXECUTED during this week, time-sorted. MAY BE EMPTY: a cell exists when
+   * either channel has something to say, and the week whose rows moved is almost never the week the
+   * archiver ran — the run that archives W30 sits five rows above W30's body.
    */
-  problemState: ArchiveCellState | null;
-  /** True if the week holds more than one record for this table. */
-  multiple: boolean;
+  runs: ArchiveSlotRun[];
+  /**
+   * The rows DATED this week — their lifecycle state and how many there are — from `_index/`.
+   *
+   * null when this week has no index entry, which deliberately cannot be told apart from a week
+   * that had no rows: the index gains a week only when it is archived, so a backlog and an empty
+   * week look the same. That limit is forced by the data rather than chosen.
+   */
+  data: { state: ArchiveBodyState; rows: number } | null;
+  /** The mark: did the archiver runs that happened this week go clean? See outcomes.ts. */
+  mark: CellMark;
 }
 
 export interface ArchiveColumns {
@@ -400,6 +445,13 @@ export interface ArchiveStats {
   rowsPruned: number;
   /** Runs that failed or need a look — the one number an operator should want to be zero. */
   issues: number;
+  /**
+   * Visible table-weeks whose rows are in the archive, and the subset already pruned from the
+   * database. These come from the DATA channel, where the row counts above come from the runs —
+   * two subjects, so they are hints on their cards rather than headline numbers.
+   */
+  weeksArchived: number;
+  weeksPruned: number;
 }
 
 /**

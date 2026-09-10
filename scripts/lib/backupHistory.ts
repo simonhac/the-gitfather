@@ -16,6 +16,7 @@ import {
   type PublicPayload,
   type PublicArchiveRun,
   type BackupCellState,
+  type BackupBodyState,
   type SlotRun,
   type BackupCell,
   type BackupRow,
@@ -27,6 +28,7 @@ import {
   type ArchiveColumns,
   type ArchiveStats,
 } from "./backupTypes.js";
+import { summarizeOutcomes, type OutcomeCode } from "./outcomes.js";
 import { tzAbbrev } from "./tzAbbrev.js";
 
 export const WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
@@ -70,6 +72,43 @@ export function dateOrdinal(y: number, mo: number, day: number): number {
 /** 0 = Monday … 6 = Sunday for a day ordinal. */
 export function weekdayMon0(ordinal: number): number {
   return (new Date(ordinal * 86_400_000).getUTCDay() + 6) % 7;
+}
+
+/**
+ * Days since the Unix epoch of the MONDAY that starts ISO week `label` ("2026-W13").
+ *
+ * DISPLAY_TZ deliberately does not enter. An ISO week label is a CALENDAR fact — it names seven
+ * dates, not an instant — so it maps to a date ordinal directly. Converting its Monday 00:00 UTC to
+ * an instant and bucketing that in a negative-offset zone lands on the previous Sunday, which would
+ * shift every archive body up a row: the one bug this function exists to make impossible.
+ *
+ * Throws on a label that is well-formed but not a real week ("2025-W53"), because a silently
+ * clamped week would put rows on a row they do not belong to.
+ */
+export function isoWeekMondayOrdinal(label: string): number {
+  const m = /^(\d{4})-W(\d{2})$/.exec(label);
+  if (!m) throw new Error(`invalid ISO week label "${label}" — expected e.g. "2026-W23"`);
+  const year = Number(m[1]);
+  const week = Number(m[2]);
+  const weeks = isoWeeksInYear(year);
+  if (week < 1 || week > weeks) {
+    throw new Error(`invalid ISO week label "${label}" — ${year} has ${weeks} ISO weeks`);
+  }
+  // ISO week 1 is the week containing 4 January, by definition.
+  const jan4 = dateOrdinal(year, 1, 4);
+  return jan4 - weekdayMon0(jan4) + (week - 1) * DAYS_PER_WEEK;
+}
+
+/**
+ * 53 when the ISO year has a 53rd week — 1 January a Thursday, or a Wednesday in a leap year.
+ *
+ * lib/archive.ts has the same function, but that module imports `node:crypto` and so can never be
+ * pulled into the browser bundle. A unit test walks 400 weeks through both to pin the agreement.
+ */
+function isoWeeksInYear(year: number): number {
+  const jan1 = new Date(Date.UTC(year, 0, 1)).getUTCDay(); // 0=Sun … 4=Thu
+  const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+  return jan1 === 4 || (leap && jan1 === 3) ? 53 : 52;
 }
 
 function ordinalToDate(ordinal: number): { y: number; mo: number; day: number } {
@@ -167,6 +206,44 @@ export function deriveState(
 }
 
 /**
+ * One run's outcome CODE — the mark channel's atom.
+ *
+ * Read from the run and its matched verification rather than from `SlotRun.state`, because
+ * `deriveState` reports `expired` before it ever looks at the verification: an aged-out dump whose
+ * drill failed would otherwise lose its amber.
+ *
+ * Folding the drill into its run is deliberate: a lone backup whose drill failed is ONE action that
+ * went half-right, so it reads as a single amber bar rather than as "mixed".
+ */
+export function backupCode(sr: { run: { ok: boolean }; verification: { ok: boolean } | null }): OutcomeCode {
+  if (!sr.run.ok) return "failed";
+  if (sr.verification && !sr.verification.ok) return "attention";
+  return "ok";
+}
+
+/**
+ * What one run contributes to the BODY — what we hold because of it, or null when it produced
+ * nothing. `unverified` maps to `ok` because a dump whose drill failed is still a dump; the amber
+ * has moved to the mark, where it can coexist with the green.
+ */
+export function runBodyState(state: BackupCellState): BackupBodyState | null {
+  switch (state) {
+    case "verified":
+      return "verified";
+    case "ok":
+    case "unverified":
+      return "ok";
+    case "expired":
+      return "expired";
+    default:
+      return null; // failed | empty — no data to show
+  }
+}
+
+/** Best of two bodies: a verified copy outranks a plain one, which outranks an expired one. */
+const BODY_RANK: Record<BackupBodyState, number> = { verified: 3, ok: 2, expired: 1 };
+
+/**
  * Bytes currently sitting in R2. Each tier a run was promoted to is a separate object
  * (the backup is server-side copied into 2hourly/daily/weekly/monthly), and each copy
  * expires independently by its own lifecycle rule — so a run still contributes one
@@ -261,19 +338,18 @@ export function buildBackupGrid(payload: PublicPayload, now: Date, weeks = 52): 
     arr.push({ run, verification, state: deriveState(run, verification, nowMs, retention), whenLabel: formatInTz(d) });
   }
 
-  // Reduce each slot to one cell. Headline state = best success (verified > ok > expired), which
-  // becomes the cell's BODY; the runs' outcomes become its mark (see cellGlyph.ts).
-  const SUCCESS_RANK: Record<string, number> = { verified: 4, ok: 3, unverified: 2, expired: 1 };
+  // Reduce each slot to one cell, in the two channels the glyph draws: the BODY is the best thing
+  // the slot holds (verified > ok > expired, null when every run failed), and the MARK is how the
+  // runs went. Neither is derivable from the other — which is the point of having both.
   for (let r = 0; r < weeks; r++) {
     const byCol = slotRuns.get(r);
     if (!byCol) continue;
     for (const [col, runsIn] of byCol) {
       runsIn.sort((a, b) => Date.parse(a.run.t) - Date.parse(b.run.t));
-      let successState: BackupCellState | null = null;
-      let hasFailure = false;
+      let body: BackupBodyState | null = null;
       for (const sr of runsIn) {
-        if (sr.state === "failed") hasFailure = true;
-        else if (!successState || SUCCESS_RANK[sr.state] > SUCCESS_RANK[successState]) successState = sr.state;
+        const b = runBodyState(sr.state);
+        if (b && (!body || BODY_RANK[b] > BODY_RANK[body])) body = b;
       }
       rows[r].cells.set(col, {
         row: r,
@@ -281,10 +357,8 @@ export function buildBackupGrid(payload: PublicPayload, now: Date, weeks = 52): 
         weekday: Math.floor(col / SLOTS_PER_DAY),
         slot: col % SLOTS_PER_DAY,
         runs: runsIn,
-        state: successState ?? "failed",
-        successState,
-        hasFailure,
-        multiple: runsIn.length > 1,
+        body,
+        mark: summarizeOutcomes(runsIn.map(backupCode)),
       });
     }
   }
@@ -342,15 +416,34 @@ export function deriveArchiveState(run: PublicArchiveRun): ArchiveCellState {
   return run.weeksArchived + run.weeksPruned > 0 ? "archived" : "quiet";
 }
 
-/** Better of two untroubled states; `archived` outranks `quiet`. */
-const ARCHIVE_SUCCESS_RANK: Record<string, number> = { archived: 2, quiet: 1 };
-/** Worse of two troubled states; a failed run outranks a refusal. */
-const ARCHIVE_PROBLEM_RANK: Record<string, number> = { failed: 2, attention: 1 };
+/**
+ * One archive run's outcome CODE. `deriveArchiveState` has already done the hard part — it checks
+ * refusals and anomalies BEFORE `ok`, because archive-table.ts folds them into `ok` and a refusal is
+ * a deliberate decline, not a breakage — so this is a straight mapping. `archived` and `quiet` are
+ * both clean runs; whether anything was stored is the BODY's question, and the body no longer takes
+ * its answer from the runs at all.
+ */
+export function archiveCode(sr: { state: ArchiveCellState }): OutcomeCode {
+  if (sr.state === "failed") return "failed";
+  if (sr.state === "attention") return "attention";
+  return "ok";
+}
 
 /**
  * Assemble the archive block: one Map per week row (index-aligned with BackupGrid.rows), keyed by
  * short table name. Returns null when the profile archives nothing — the caller then renders the
  * page exactly as it did before this feature existed.
+ *
+ * Each cell has two channels with two different subjects, and a cell exists when EITHER has
+ * something to say:
+ *
+ *   data  the rows DATED this week, placed by their ISO week label (`_index/`)
+ *   runs  the archiver runs that EXECUTED during this week, placed by their timestamp
+ *
+ * They are rarely the same week. The run that archives W30's rows happens weeks later — five rows
+ * above W30's body on this grid — which is why the tooltip splits the two halves with a rule.
+ * Putting the runs on the week they ran is still right: it is what keeps an archive record on the
+ * same row as the weekly backup it follows a few hours later.
  */
 export function buildArchiveColumns(payload: PublicPayload, now: Date, weeks = 52): ArchiveColumns | null {
   const archive = payload.archive;
@@ -360,53 +453,61 @@ export function buildArchiveColumns(payload: PublicPayload, now: Date, weeks = 5
   const known = new Set(tables);
   const currentWeekStart = currentWeekStartOrdinal(now);
 
-  // row → table → records
-  const byRow = new Map<number, Map<string, ArchiveSlotRun[]>>();
-  for (const run of archive.runs) {
-    if (!known.has(run.table)) continue; // build-dashboard unions log-only tables in, so this is a guard
-    const d = new Date(run.t);
-    const { row } = weekRowOf(d, currentWeekStart);
-    if (row < 0 || row >= weeks) continue;
+  // row → table → the two channels, accumulated independently.
+  interface Channels {
+    runs: ArchiveSlotRun[];
+    data: ArchiveCell["data"];
+  }
+  const byRow = new Map<number, Map<string, Channels>>();
+  const channelsAt = (row: number, table: string): Channels => {
     let byTable = byRow.get(row);
     if (!byTable) {
       byTable = new Map();
       byRow.set(row, byTable);
     }
-    let arr = byTable.get(run.table);
-    if (!arr) {
-      arr = [];
-      byTable.set(run.table, arr);
+    let ch = byTable.get(table);
+    if (!ch) {
+      ch = { runs: [], data: null };
+      byTable.set(table, ch);
     }
-    arr.push({ run, state: deriveArchiveState(run), whenLabel: formatInTz(d) });
+    return ch;
+  };
+
+  for (const run of archive.runs) {
+    if (!known.has(run.table)) continue; // build-dashboard unions log-only tables in, so this is a guard
+    const d = new Date(run.t);
+    const { row } = weekRowOf(d, currentWeekStart);
+    if (row < 0 || row >= weeks) continue;
+    channelsAt(row, run.table).runs.push({ run, state: deriveArchiveState(run), whenLabel: formatInTz(d) });
+  }
+
+  // `weeks` absent = the index was not read this build; `[]` = it was read and is empty. Neither
+  // draws a body, but only the second is knowledge.
+  for (const w of archive.weeks ?? []) {
+    if (!known.has(w.table)) continue;
+    let monday: number;
+    try {
+      monday = isoWeekMondayOrdinal(w.week);
+    } catch {
+      continue; // an impossible label costs its own week, not the block
+    }
+    const row = (currentWeekStart - monday) / DAYS_PER_WEEK;
+    if (row < 0 || row >= weeks) continue;
+    channelsAt(row, w.table).data = { state: w.state, rows: w.rows };
   }
 
   const rows: Map<string, ArchiveCell>[] = [];
   for (let r = 0; r < weeks; r++) {
     const cells = new Map<string, ArchiveCell>();
     rows.push(cells);
-    const byTable = byRow.get(r);
-    if (!byTable) continue;
-    for (const [table, runsIn] of byTable) {
-      runsIn.sort((a, b) => Date.parse(a.run.t) - Date.parse(b.run.t));
-      let successState: ArchiveCellState | null = null;
-      let problemState: ArchiveCellState | null = null;
-      for (const sr of runsIn) {
-        if (sr.state === "failed" || sr.state === "attention") {
-          if (!problemState || ARCHIVE_PROBLEM_RANK[sr.state] > ARCHIVE_PROBLEM_RANK[problemState]) problemState = sr.state;
-        } else if (!successState || ARCHIVE_SUCCESS_RANK[sr.state] > ARCHIVE_SUCCESS_RANK[successState]) {
-          successState = sr.state;
-        }
-      }
+    for (const [table, ch] of byRow.get(r) ?? []) {
+      ch.runs.sort((a, b) => Date.parse(a.run.t) - Date.parse(b.run.t));
       cells.set(table, {
         row: r,
         table,
-        runs: runsIn,
-        // Headline follows the backup grid's convention: the success is the colour, the problem
-        // shows as the split triangle. With no success at all, the problem IS the cell.
-        state: successState ?? problemState ?? "failed",
-        successState,
-        problemState,
-        multiple: runsIn.length > 1,
+        runs: ch.runs,
+        data: ch.data,
+        mark: summarizeOutcomes(ch.runs.map(archiveCode)),
       });
     }
   }
@@ -416,9 +517,15 @@ export function buildArchiveColumns(payload: PublicPayload, now: Date, weeks = 5
 
 /** Row/issue totals over the VISIBLE window, matching `summarize`'s scope for the backup cards. */
 export function summarizeArchives(cols: ArchiveColumns): ArchiveStats {
-  const stats: ArchiveStats = { rowsArchived: 0, rowsPruned: 0, issues: 0 };
+  const stats: ArchiveStats = { rowsArchived: 0, rowsPruned: 0, issues: 0, weeksArchived: 0, weeksPruned: 0 };
   for (const row of cols.rows) {
     for (const cell of row.values()) {
+      // The data channel: a week counted here is one whose ROWS are in the archive, which is a
+      // different question from how many rows the runs in the window moved.
+      if (cell.data) {
+        stats.weeksArchived++;
+        if (cell.data.state === "pruned") stats.weeksPruned++;
+      }
       for (const sr of cell.runs) {
         if (sr.state === "failed" || sr.state === "attention") stats.issues++;
         if (sr.run.dryRun !== "none") continue; // a dry run moved nothing; don't count phantom rows

@@ -21,7 +21,16 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadDashboardConfig, retentionFromConfig, joinObjectKey } from "./lib/config.js";
 import { readLogDir, downloadLogsFromR2 } from "./lib/logStore.js";
-import { shortTableName } from "./lib/archive.js";
+import { downloadArchiveIndexFromR2, readArchiveIndexDir, scrubArchiveWeek } from "./lib/archiveIndex.js";
+import {
+  shortTableName,
+  eligibleWeeks,
+  isWeekEligible,
+  parseWeekLabel,
+  WEEK_MS,
+  type ArchivedPart,
+  type WeekState,
+} from "./lib/archive.js";
 import { HOURS_PER_SLOT, SLOT_MINUTES } from "./lib/backupTypes.js";
 import type {
   LogRun,
@@ -30,6 +39,7 @@ import type {
   PublicPayload,
   PublicArchiveRun,
   PublicArchiveTable,
+  PublicArchiveWeek,
   BackupTier,
 } from "./lib/backupTypes.js";
 
@@ -86,11 +96,44 @@ function publishedTableNames(fullNames: string[]): Map<string, string> {
   return new Map(fullNames.map((full) => [full, claims.get(shortTableName(full))!.size > 1 ? full : shortTableName(full)]));
 }
 
+/**
+ * Column order: the profile's tables first, then any table seen only in the log — a table dropped
+ * from `archive.tables` keeps its column, because the rows it moved are still out there. Fully
+ * qualified, as the profile and the run-log spell them.
+ */
+function archiveTableOrder(archives: LogArchive[], archiveSpecs: ArchiveSpec[]): string[] {
+  return [...new Set([...archiveSpecs.map((t) => t.table), ...archives.map((a) => a.table)])];
+}
+
+/**
+ * The SHORT names to fetch `_index/` under — that is the form the archiver writes its object keys
+ * in. Two tables in different schemas sharing a short name already share one `_index/` path in R2
+ * (an archiver-level problem, not a dashboard one), so both are skipped with a warning rather than
+ * one table being shown another's weeks.
+ */
+function archiveIndexTables(order: string[]): string[] {
+  const claims = new Map<string, string[]>();
+  for (const full of order) {
+    const short = shortTableName(full);
+    claims.set(short, [...(claims.get(short) ?? []), full]);
+  }
+  const out: string[] = [];
+  for (const [short, fulls] of claims) {
+    if (fulls.length > 1) {
+      console.warn(`dashboard: WARNING ${fulls.join(" and ")} share the _index/ path "${short}" — skipping their week states`);
+      continue;
+    }
+    out.push(short);
+  }
+  return out;
+}
+
 function scrub(
   runs: LogRun[],
   verifications: LogVerification[],
   archives: LogArchive[],
   archiveSpecs: ArchiveSpec[],
+  archiveWeeks: PublicArchiveWeek[] | null,
 ): PublicPayload {
   const payload: PublicPayload = {
     label,
@@ -102,9 +145,7 @@ function scrub(
     verifications: verifications.map((v) => ({ vt: v.verifiedTs, ok: v.ok, ratio: v.ratio, kind: v.kind })),
   };
 
-  // Column order: the profile's tables first, then any table seen only in the log — a table dropped
-  // from `archive.tables` keeps its column, because the rows it moved are still out there.
-  const order = [...new Set([...archiveSpecs.map((t) => t.table), ...archives.map((a) => a.table)])];
+  const order = archiveTableOrder(archives, archiveSpecs);
   if (order.length === 0) return payload; // no archive block → a page identical to the pre-archive one
 
   const specByTable = new Map(archiveSpecs.map((t) => [t.table, t]));
@@ -131,7 +172,41 @@ function scrub(
     anomalies: a.anomalies,
     runUrl: hideLinks ? null : a.runUrl,
   }));
-  return { ...payload, archive: { tables, runs: archiveRuns } };
+  // `weeks` is omitted entirely when the index was not read, so the browser can tell "we did not
+  // look" from "we looked and there is nothing there".
+  const published = new Set(tables.map((t) => t.table));
+  return {
+    ...payload,
+    archive: {
+      tables,
+      runs: archiveRuns,
+      ...(archiveWeeks ? { weeks: archiveWeeks.filter((w) => published.has(w.table)) } : {}),
+    },
+  };
+}
+
+/**
+ * The `_index/` view of what happened to each week's ROWS — the archive cells' body channel.
+ *
+ * null means "not read this build", which the payload keeps distinct from "read and empty". The
+ * whole call is wrapped: this is a second, later-added source, and a dashboard that fails to build
+ * because an index could not be listed would be a worse outcome than one drawn from runs alone.
+ * --sample carries its own weeks, so it never comes through here.
+ */
+function readArchiveIndex(archives: LogArchive[], archiveSpecs: ArchiveSpec[]): PublicArchiveWeek[] | null {
+  if (useSample) return null; // the sample carries its own weeks
+  const tables = archiveIndexTables(archiveTableOrder(archives, archiveSpecs));
+  if (tables.length === 0) return null;
+  const prefix = cfg.archive.storePrefix;
+  try {
+    if (logdir) return readArchiveIndexDir(logdir, tables);
+    if (!prefix) return null; // nothing archives here, so there is no store to read
+    if (!cfg.credentials.r2.bucket) return null;
+    return downloadArchiveIndexFromR2(cfg.credentials.r2.bucket, prefix, tables);
+  } catch (e) {
+    console.warn(`dashboard: WARNING could not read the archive index (${(e as Error).message}) — runs only`);
+    return null;
+  }
 }
 
 function escHtml(s: string): string {
@@ -145,8 +220,11 @@ async function main(): Promise<void> {
   // --sample has no profile to read windows from, so it carries its own; the real paths take theirs
   // from `archive.tables`.
   let archiveSpecs: ArchiveSpec[];
+  // The sample builds its own index alongside its own runs, from one simulation — so a preview can
+  // never show a body and a run history that contradict each other.
+  let sampleIndex: SampleIndexRecord[] = [];
   if (useSample) {
-    ({ runs, verifications, archives, archiveSpecs } = makeSample(new Date()));
+    ({ runs, verifications, archives, archiveSpecs, index: sampleIndex } = makeSample(new Date()));
   } else if (logdir) {
     ({ runs, verifications, archives } = readLogDir(logdir));
     archiveSpecs = profileArchiveSpecs();
@@ -155,9 +233,17 @@ async function main(): Promise<void> {
     ({ runs, verifications, archives } = downloadLogsFromR2(cfg.credentials.r2.bucket, cfg.name));
     archiveSpecs = profileArchiveSpecs();
   }
-  const payload = scrub(runs, verifications, archives, archiveSpecs);
+  // The sample's records go through the same scrub as R2's, so the preview exercises the privacy
+  // boundary rather than stepping around it.
+  const archiveWeeks = useSample
+    ? sampleIndex
+        .map(({ table, record }) => scrubArchiveWeek(table, record))
+        .filter((w): w is PublicArchiveWeek => w != null)
+    : readArchiveIndex(archives, archiveSpecs);
+  const payload = scrub(runs, verifications, archives, archiveSpecs, archiveWeeks);
   const archiveNote = payload.archive
-    ? `, ${payload.archive.runs.length} archive records over ${payload.archive.tables.length} table(s)`
+    ? `, ${payload.archive.runs.length} archive records over ${payload.archive.tables.length} table(s)` +
+      (payload.archive.weeks ? `, ${payload.archive.weeks.length} indexed week(s)` : ", no _index/ read")
     : "";
   console.log(
     `dashboard: ${payload.runs.length} runs, ${payload.verifications.length} verifications${archiveNote} (label="${label}")`,
@@ -224,11 +310,24 @@ const SAMPLE_ARCHIVE_SPECS: ArchiveSpec[] = [
   { table: "public.api_logs", archiveAfterWeeks: 4, pruneAfterWeeks: 13 },
   { table: "public.audit_events", archiveAfterWeeks: 8, pruneAfterWeeks: 26 },
 ];
+/** Weeks of history already in the tables when archiving started — the backlog to work off. */
+const SAMPLE_BACKLOG_WEEKS = 26;
+/** A run's `max-weeks-per-run` and its pruning equivalent: enough to catch up, not in one go. */
+const SAMPLE_MAX_WEEKS_PER_RUN = 2;
+const SAMPLE_MAX_PRUNES_PER_RUN = 2;
+
+/** One private index line as archive-table.ts would have written it, and the table it belongs to. */
+interface SampleIndexRecord {
+  table: string;
+  record: WeekState & { updatedAt: string };
+}
+
 function makeSample(now: Date): {
   runs: LogRun[];
   verifications: LogVerification[];
   archives: LogArchive[];
   archiveSpecs: ArchiveSpec[];
+  index: SampleIndexRecord[];
 } {
   let seed = 20260619;
   const rand = () => {
@@ -311,12 +410,26 @@ function makeSample(now: Date): {
     if (drillRan.getTime() > end) continue;
     verifications.push({ ts: drillRan.toISOString().replace(".000", ""), verifiedTs, ok: rand() < 0.97, ratio: 0.97 + rand() * 0.03, runId: null, runUrl: null });
   }
+  // Pin ONE failed drill, on a copy still inside its retention window. At 97% the preview usually
+  // has none, and "a backup we hold whose restore did not verify" — a green body under an amber
+  // bar — is the case the two-channel grammar exists to be able to say.
+  const pinned = verifications[verifications.length - 2];
+  if (pinned) {
+    pinned.ok = false;
+    pinned.ratio = 0.41;
+  }
 
   // ── Archive history ────────────────────────────────────────────────────────
-  // The archive runs weekly at Sunday 19:30 UTC — 3.5 h after the 16:00 UTC anchor that becomes the
-  // weekly backup — so in any display timezone the two land in the same week row. That alignment is
-  // the whole point of the sibling columns, so the sample must reproduce it exactly.
+  // Simulated rather than hand-set, because the two channels a cell now draws come from two
+  // sources: if the run records and the index were written independently, the preview could show a
+  // pruned week that no run ever pruned. So one state machine per table emits both — the runs are
+  // what it DID, and the index is where it ENDED UP.
+  //
+  // The archiver runs weekly at Sunday 19:30 UTC — 3.5 h after the 16:00 UTC anchor that becomes
+  // the weekly backup — so in any display timezone the two land in the same week row. That
+  // alignment is the whole point of the sibling columns, so the sample reproduces it exactly.
   const archives: LogArchive[] = [];
+  const index: SampleIndexRecord[] = [];
   const lastArchive = (() => {
     const d = new Date(end);
     d.setUTCHours(19, 30, 0, 0);
@@ -325,7 +438,7 @@ function makeSample(now: Date): {
   })();
   const archiveRecord = (t: number, table: string, over: Partial<LogArchive> = {}): LogArchive => ({
     ts: iso(t), ok: true, table, mode: "both", dryRun: "none",
-    weeksArchived: 1, rowsArchived: 0, weeksPruned: 0, rowsPruned: 0,
+    weeksArchived: 0, rowsArchived: 0, weeksPruned: 0, rowsPruned: 0,
     bytes: 0, refusals: 0, anomalies: 0, error: null, durationMs: 41_000, runId: null, runUrl: ghRun(t),
     ...over,
   });
@@ -334,53 +447,124 @@ function makeSample(now: Date): {
     "public.api_logs": { rows: 45_000, spread: 10_000, bytesPerRow: 64 },
     "public.audit_events": { rows: 8_000, spread: 4_000, bytesPerRow: 88 },
   };
+  /** A plausible fingerprint. Never published — the scrub drops it — but the record carries one. */
+  const fakeDigest = (label: string): string =>
+    [...label].reduce((h, c) => (Math.imul(h ^ c.charCodeAt(0), 16_777_619) >>> 0), 2_166_136_261).toString(16).padStart(16, "0");
+  const fullPart = (part: number, rows: number, label: string): ArchivedPart => ({
+    part, role: "full", rowCount: rows, fingerprint: { n: rows, digest: fakeDigest(`${label}#${part}`) },
+  });
 
-  for (let w = 0; w < SAMPLE_ARCHIVE_WEEKS; w++) {
-    const t = lastArchive - w * 7 * 86_400_000;
-    // The whole run failed this week — every table's record is marked not-ok, as archive-table.ts
-    // does (one `failure` stamps all of them).
-    const runFailed = w === 10;
-    for (const spec of SAMPLE_ARCHIVE_SPECS) {
-      const v = VOLUME[spec.table];
+  /** What one table's store knows about one week, as the simulation walks forward. */
+  interface SampleWeek {
+    rows: number;
+    state: "archived" | "pruned";
+    parts: ArchivedPart[];
+  }
+  const books = new Map<string, Map<string, SampleWeek>>(SAMPLE_ARCHIVE_SPECS.map((s) => [s.table, new Map()]));
+  // Rows go back further than archiving does, so the first runs work off a backlog — which is what
+  // makes the oldest rows archived-and-pruned while the newest are not archived at all.
+  const oldestRowAt = new Date(lastArchive - (SAMPLE_ARCHIVE_WEEKS + SAMPLE_BACKLOG_WEEKS) * WEEK_MS);
+
+  /** Archive up to `maxWeeks` outstanding weeks; returns what the run would record. */
+  const archiveSome = (spec: ArchiveSpec, at: Date, maxWeeks: number, commit: boolean) => {
+    const book = books.get(spec.table)!;
+    const v = VOLUME[spec.table];
+    const weeks = eligibleWeeks({
+      now: at, oldestRowAt, afterWeeks: spec.archiveAfterWeeks, maxWeeks, done: new Set(book.keys()),
+    });
+    let rowsArchived = 0;
+    let bytes = 0;
+    for (const w of weeks) {
       const rows = Math.round(v.rows + rand() * v.spread);
+      rowsArchived += rows;
+      bytes += rows * v.bytesPerRow;
+      if (commit) book.set(w.label, { rows, state: "archived", parts: [fullPart(1, rows, w.label)] });
+    }
+    return { weeksArchived: weeks.length, rowsArchived, bytes };
+  };
+
+  for (let w = SAMPLE_ARCHIVE_WEEKS - 1; w >= 0; w--) {
+    // Oldest run first: the store's state accumulates, so what a later run finds outstanding is
+    // whatever the earlier ones did not get to.
+    const t = lastArchive - w * WEEK_MS;
+    const at = new Date(t);
+    const runFailed = w === 10; // one `failure` in archive-table.ts stamps every table's record
+    const dryRun = w === 8 ? ("source" as const) : ("none" as const);
+
+    for (const spec of SAMPLE_ARCHIVE_SPECS) {
       if (runFailed) {
         archives.push(archiveRecord(t, spec.table, {
-          ok: false, weeksArchived: 0, weeksPruned: 0, bytes: 0, durationMs: 12_000,
-          error: "archive: could not acquire the store lock",
+          ok: false, durationMs: 12_000, error: "archive: could not acquire the store lock",
         }));
         continue;
       }
-      // Nothing was eligible this week — it ran, the database did not change.
-      if (w === 3) {
-        archives.push(archiveRecord(t, spec.table, { weeksArchived: 0, bytes: 0, durationMs: 9_000 }));
-        continue;
-      }
-      // The fingerprint gate declined to delete: not a breakage, but somebody must look.
+      const book = books.get(spec.table)!;
+      // A dry run reports what it WOULD have done and changes nothing; w === 3 is the week where
+      // nothing was eligible at all — it ran, the database did not change, and the tooltip says so.
+      const nothingEligible = w === 3;
+      const { weeksArchived, rowsArchived, bytes } = nothingEligible
+        ? { weeksArchived: 0, rowsArchived: 0, bytes: 0 }
+        : archiveSome(spec, at, SAMPLE_MAX_WEEKS_PER_RUN, dryRun === "none");
+
+      // The fingerprint gate declining to delete: not a breakage, but somebody must look.
       const refusing = w === 6 && spec.table === "public.api_logs";
-      // Pruning only starts once the first archived weeks have aged past prune-after-weeks.
-      const pruning = w <= SAMPLE_ARCHIVE_WEEKS - 10;
+      const prunable = [...book.entries()]
+        .filter(([label, b]) => b.state === "archived" && isWeekEligible(parseWeekLabel(label), at, spec.pruneAfterWeeks))
+        .slice(0, SAMPLE_MAX_PRUNES_PER_RUN);
+      let weeksPruned = 0;
+      let rowsPruned = 0;
+      if (!refusing && dryRun === "none" && !nothingEligible) {
+        for (const [, b] of prunable) {
+          b.state = "pruned";
+          weeksPruned++;
+          rowsPruned += b.rows;
+        }
+      }
+
       archives.push(archiveRecord(t, spec.table, {
         ok: !refusing,
-        rowsArchived: rows,
-        bytes: rows * v.bytesPerRow,
-        weeksPruned: pruning && !refusing ? 1 : 0,
-        rowsPruned: pruning && !refusing ? Math.round(v.rows + rand() * v.spread) : 0,
+        dryRun,
+        weeksArchived,
+        rowsArchived,
+        bytes,
+        weeksPruned,
+        rowsPruned,
         refusals: refusing ? 2 : 0,
         error: refusing ? "prune refused: live fingerprint does not match the manifest" : null,
       }));
     }
-    // A manual backfill alongside the scheduled run — exercises the multi-run chooser in a column.
+
+    // A manual backfill alongside the scheduled run — exercises the multi-run chooser in a column,
+    // and eats into the backlog faster than the weekly cap allows.
     if (w === 14) {
+      const spec = SAMPLE_ARCHIVE_SPECS[0];
       const backfill = t + 3 * 3_600_000;
-      const v = VOLUME["public.api_logs"];
-      const rows = Math.round(v.rows * 3 + rand() * v.spread);
-      archives.push(archiveRecord(backfill, "public.api_logs", {
-        mode: "archive", weeksArchived: 3, rowsArchived: rows, bytes: rows * v.bytesPerRow, durationMs: 156_000,
-      }));
+      const done = archiveSome(spec, new Date(backfill), 3, true);
+      archives.push(archiveRecord(backfill, spec.table, { mode: "archive", ...done, durationMs: 156_000 }));
     }
   }
 
-  return { runs, verifications, archives, archiveSpecs: SAMPLE_ARCHIVE_SPECS };
+  // One week that was re-archived: the original part is superseded and the newer `full` part is
+  // what the week now holds. The scrub publishes only the active part's count, which is exactly
+  // the property archiveIndex.test.ts pins.
+  const superseded = [...books.get("public.api_logs")!.entries()].find(([, b]) => b.state === "archived");
+  if (superseded) {
+    const [label, b] = superseded;
+    const grown = b.rows + 137;
+    b.parts = [{ ...fullPart(1, b.rows, label), role: "superseded" }, fullPart(2, grown, label)];
+    b.rows = grown;
+  }
+
+  for (const [table, book] of books) {
+    for (const [label, b] of book) {
+      index.push({
+        table: shortTableName(table),
+        record: { label, state: b.state, parts: b.parts, updatedAt: iso(lastArchive) },
+      });
+    }
+  }
+
+  return { runs, verifications, archives, archiveSpecs: SAMPLE_ARCHIVE_SPECS, index };
 }
 
 main().catch((e) => {

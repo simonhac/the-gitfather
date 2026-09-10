@@ -10,6 +10,9 @@ import {
   buildArchiveColumns,
   summarize,
   summarizeArchives,
+  backupCode,
+  archiveCode,
+  runBodyState,
   archiveStoredBytes,
   formatInTz,
   slotApproxDate,
@@ -34,6 +37,7 @@ import {
   type BackupCell,
   type SlotRun,
   type ArchiveCellState,
+  type ArchiveBodyState,
   type ArchiveCell,
   type ArchiveSlotRun,
 } from "../scripts/lib/backupTypes.js";
@@ -45,12 +49,7 @@ import {
   PITCH_Y,
   ARCHIVE_PITCH,
   cellOps,
-  backupBody,
-  backupMark,
-  backupCode,
-  archiveBody,
-  archiveMark,
-  archiveCode,
+  bodyClass,
   type BodyClass,
   type RectOp,
 } from "../scripts/lib/cellGlyph.js";
@@ -192,8 +191,21 @@ const statDefs: { label: string; value: string | number; hint?: string; cls?: st
 // Postgres, so they stay out of the backup counts above: an archive run is not a backup run.
 if (archiveStats) {
   statDefs.push(
-    { label: "Rows archived", value: archiveStats.rowsArchived.toLocaleString("en-GB"), hint: `Rows written to archive objects over the last ${WEEKS} weeks.` },
-    { label: "Rows pruned", value: archiveStats.rowsPruned.toLocaleString("en-GB"), hint: `Rows deleted from the database after archiving, over the last ${WEEKS} weeks.` },
+    {
+      label: "Rows archived",
+      value: archiveStats.rowsArchived.toLocaleString("en-GB"),
+      // Two subjects, so the second one is a hint rather than a fourth row of cards: the value
+      // counts rows the RUNS in this window moved; the hint counts table-weeks whose rows are in
+      // the archive, which is what the blue cells show.
+      hint: `Rows written to archive objects over the last ${WEEKS} weeks. ` +
+        `${archiveStats.weeksArchived.toLocaleString("en-GB")} table-week(s) in the visible window are archived.`,
+    },
+    {
+      label: "Rows pruned",
+      value: archiveStats.rowsPruned.toLocaleString("en-GB"),
+      hint: `Rows deleted from the database after archiving, over the last ${WEEKS} weeks. ` +
+        `${archiveStats.weeksPruned.toLocaleString("en-GB")} table-week(s) in the visible window are pruned.`,
+    },
     { label: "Archive stored", value: formatBytes(archiveStoredBytes(payload)), hint: "Every archive object ever written. Archives have no lifecycle rule — nothing here expires." },
     { label: "Archive issues", value: archiveStats.issues, cls: archiveStats.issues ? "bad" : undefined },
   );
@@ -254,7 +266,7 @@ const dataItems: [string, BodyClass | null, CellMark][] = [
   ["Expired", "b-expired", NO_MARK],
 ];
 // The archive body entries only exist when the profile archives something.
-if (archiveCols) dataItems.push(["Archived", "b-archived", NO_MARK]);
+if (archiveCols) dataItems.push(["Archived", "b-archived", NO_MARK], ["Pruned", "b-pruned", NO_MARK]);
 dataItems.push(["Nothing", null, NO_MARK]);
 legendGroup("Data", dataItems);
 
@@ -262,7 +274,10 @@ legendGroup("Runs", [
   ["Failed", null, one("failed")],
   ["Needs a look", "b-ok", one("attention")],
   ["Mixed outcomes", "b-ok", { worst: "failed", second: "ok", codes: 2 }],
-  ["Ran, stored nothing", null, one("ok")],
+  // A clean run with nothing beneath it. Under the two-channel split this no longer means "stored
+  // nothing" — an archiver run stores some OTHER week's rows — it means the run went clean and the
+  // body has nothing of its own to say.
+  ["Ran clean", null, one("ok")],
 ]);
 
 // The Tn → table-name key. Mono, so it reads as the label it is rather than as prose.
@@ -380,7 +395,7 @@ function drawGlyph(body: BodyClass | null, mark: CellMark, x: number, y: number)
 
 grid.rows.forEach((row, r) => {
   for (const cell of row.cells.values()) {
-    drawGlyph(backupBody(cell), backupMark(cell), backupCellX(cell.col), cellY(r));
+    drawGlyph(bodyClass(cell.body), cell.mark, backupCellX(cell.col), cellY(r));
   }
 });
 
@@ -388,7 +403,8 @@ archiveCols?.rows.forEach((cells, r) => {
   for (const cell of cells.values()) {
     const i = archiveIndex.get(cell.table);
     // Cells stay cell-sized and centred in the wider archive column; only the row pitch is shared.
-    if (i != null) drawGlyph(archiveBody(cell), archiveMark(cell), archiveCellX(i), cellY(r));
+    // The body is the rows DATED this week; the mark is the runs that happened in it.
+    if (i != null) drawGlyph(bodyClass(cell.data?.state ?? null), cell.mark, archiveCellX(i), cellY(r));
   }
 });
 
@@ -488,7 +504,7 @@ root.addEventListener("mousemove", (e) => {
     const cell = archiveCols.rows[r]?.get(table) ?? null;
     anchor = anchorAt(archiveCellX(acol));
     hover = cell ? { kind: "archive", cell, anchor } : null;
-    html = cell ? archiveCellHtml(cell) : archiveEmptyHtml(r, table);
+    html = archiveTipHtml(r, table, cell);
   } else {
     hide(); // the gutter between the blocks, or past either edge
     return;
@@ -568,7 +584,7 @@ function markDot(code: OutcomeCode): string {
 }
 /** The body class a single run would paint, or null when it painted none (a failed run). */
 function runBody(state: BackupCellState): BodyClass | null {
-  return backupBody({ successState: state === "failed" || state === "empty" ? null : state });
+  return bodyClass(runBodyState(state));
 }
 function esc(s: string): string {
   return s.replace(/[&<>]/g, (c) => (c === "&" ? "&amp;" : c === "<" ? "&lt;" : "&gt;"));
@@ -655,22 +671,21 @@ const weeksWord = (n: number): string => `${n} week${n === 1 ? "" : "s"}`;
 const rowsWord = (n: number): string => `${n.toLocaleString("en-GB")} row${n === 1 ? "" : "s"}`;
 
 /**
- * An archive run's glyph. A run that STORED something gets the blue data square — that is the thing
- * the cell's body shows; anything else gets its outcome pill, because a run that stored nothing has
- * no body to point at.
+ * An archive run's glyph. Always an outcome pill, never a data square: a run belongs to the mark
+ * channel, and the week it moved rows for is almost never the week it ran in.
  */
 function archiveDot(state: ArchiveCellState): string {
-  return state === "archived" ? dot("b-archived") : markDot(archiveCode({ state }));
+  return markDot(archiveCode({ state }));
 }
 
 /** What this run actually did, in one line. */
 function archiveHeadline(sr: ArchiveSlotRun): string {
   const r = sr.run;
   if (sr.state === "quiet") {
-    return r.dryRun !== "none" ? `Dry run (${r.dryRun})` : "Ran — nothing eligible this week";
+    return r.dryRun !== "none" ? `Dry run (${r.dryRun})` : "Ran — nothing eligible";
   }
   if (r.weeksArchived > 0) {
-    return `Archived · ${weeksWord(r.weeksArchived)} · ${rowsWord(r.rowsArchived)} · ${formatBytes(r.bytes)}`;
+    return `Archived ${weeksWord(r.weeksArchived)} · ${rowsWord(r.rowsArchived)} · ${formatBytes(r.bytes)}`;
   }
   return ARCHIVE_STATE_LABEL[sr.state];
 }
@@ -683,19 +698,44 @@ function archiveProblem(r: PublicArchiveRun): string {
   return bits.join(" · ");
 }
 
-function archiveCellHtml(cell: ArchiveCell): string {
-  const name = esc(archiveLabel.get(cell.table) ?? cell.table);
-  const lines: string[] = [];
-  const multiple = cell.runs.length > 1;
-  if (multiple) {
-    lines.push(`<div class="tip-when">${name} — ${cell.runs.length} runs this week</div>`);
-    for (const sr of cell.runs) {
-      lines.push(`<div class="tip-state">${archiveDot(sr.state)}${esc(sr.whenLabel)} · ${archiveHeadline(sr)}</div>`);
-    }
-  } else {
-    const sr = cell.runs[0];
-    lines.push(`<div class="tip-when">${esc(sr.whenLabel)} · ${name}</div>`);
-    lines.push(`<div class="tip-state">${archiveDot(sr.state)}${archiveHeadline(sr)}</div>`);
+const ARCHIVE_DATA_LABEL: Record<ArchiveBodyState, string> = {
+  archived: "Archived",
+  pruned: "Pruned (verified at prune)",
+};
+
+/**
+ * One archive tooltip, in two sections split by a rule — and the rule is the anti-ambiguity device,
+ * not styling. Above it: what happened to the rows DATED this week. Below it: the archiver runs that
+ * EXECUTED during this week, which are almost certainly about some other week's rows. A reader will
+ * assume a clean mark beneath a pruned body means "that run pruned these rows" unless we stop them.
+ *
+ * Handles the empty cell too (no data, no runs), so both halves are always said, and "we have no
+ * index for this week" never looks like "these rows are gone".
+ */
+function archiveTipHtml(r: number, table: string, cell: ArchiveCell | null): string {
+  const name = esc(archiveLabel.get(table) ?? table);
+  const lines = [`<div class="tip-when">Week of ${esc(grid.rows[r].weekStartLabel)} · ${name}</div>`];
+
+  const data = cell?.data ?? null;
+  lines.push(
+    data
+      ? `<div class="tip-state">${dot(bodyClass(data.state)!)}${ARCHIVE_DATA_LABEL[data.state]} · ${rowsWord(data.rows)}</div>`
+      : `<div class="tip-muted">No rows archived for this week</div>`,
+  );
+
+  lines.push(`<hr class="tip-rule">`);
+
+  const runs = cell?.runs ?? [];
+  if (runs.length === 0) {
+    lines.push(`<div class="tip-muted">No archiver run this week</div>`);
+    return lines.join("");
+  }
+  lines.push(`<div class="tip-muted">Archiver runs this week · ${runs.length}</div>`);
+  for (const sr of runs) {
+    lines.push(`<div class="tip-state">${archiveDot(sr.state)}${esc(sr.whenLabel)} · ${archiveHeadline(sr)}</div>`);
+  }
+  if (runs.length === 1) {
+    const sr = runs[0];
     if (sr.run.weeksPruned > 0) {
       lines.push(
         `<div class="tip-muted">Pruned ${weeksWord(sr.run.weeksPruned)} · ${rowsWord(sr.run.rowsPruned)} deleted from the database</div>`,
@@ -703,20 +743,13 @@ function archiveCellHtml(cell: ArchiveCell): string {
     }
     if (sr.state === "attention") lines.push(`<div class="tip-fail">${archiveProblem(sr.run)} — needs a look</div>`);
     if (sr.state === "failed") lines.push(`<div class="tip-fail">Archive run failed.</div>`);
+  } else {
+    lines.push(actionsLine(runs.map(archiveCode)));
   }
-  if (multiple) lines.push(actionsLine(cell.runs.map(archiveCode)));
   if (clickable(cell)) {
-    lines.push(`<div class="tip-hint">${multiple ? "Click to choose a run to open ↗" : "Click to open the GitHub run ↗"}</div>`);
+    lines.push(`<div class="tip-hint">${runs.length > 1 ? "Click to choose a run to open ↗" : "Click to open the GitHub run ↗"}</div>`);
   }
   return lines.join("");
-}
-
-function archiveEmptyHtml(r: number, table: string): string {
-  const name = esc(archiveLabel.get(table) ?? table);
-  return (
-    `<div class="tip-when">Week of ${esc(grid.rows[r].weekStartLabel)} · ${name}</div>` +
-    `<div class="tip-muted">No archive run this week</div>`
-  );
 }
 
 function archiveChooserHtml(cell: ArchiveCell): string {

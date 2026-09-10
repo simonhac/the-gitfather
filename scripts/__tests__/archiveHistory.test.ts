@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { deriveArchiveState, buildArchiveColumns, summarizeArchives, archiveStoredBytes } from "../lib/backupHistory.js";
 import { archiveBlurb } from "../lib/backupTypes.js";
-import type { PublicArchiveRun, PublicArchiveTable, PublicPayload } from "../lib/backupTypes.js";
+import type { PublicArchiveRun, PublicArchiveTable, PublicArchiveWeek, PublicPayload } from "../lib/backupTypes.js";
 
 // This file runs in the default DISPLAY_TZ (UTC) — backupHistory.ts captures it at module load.
 // The non-UTC alignment case lives in archiveHistory-tz.test.ts for that reason.
@@ -64,6 +64,7 @@ const NOW = new Date("2026-09-10T02:00:00Z");
 const payloadWith = (
   runs: PublicArchiveRun[],
   tables: PublicArchiveTable[] = [{ table: "api_logs", archiveAfterWeeks: 4, pruneAfterWeeks: 13 }],
+  weeks?: PublicArchiveWeek[],
 ): PublicPayload => ({
   label: "db",
   generatedAt: NOW.toISOString(),
@@ -75,7 +76,7 @@ const payloadWith = (
   },
   runs: [],
   verifications: [],
-  archive: { tables, runs },
+  archive: weeks ? { tables, runs, weeks } : { tables, runs },
 });
 
 test("buildArchiveColumns: null when the profile archives nothing", () => {
@@ -90,7 +91,7 @@ test("buildArchiveColumns: the Sunday 19:30 archive shares a row with the 16:00 
   // the anchor that becomes the weekly backup, so both must land in the same week row.
   const cols = buildArchiveColumns(payloadWith([run({ t: "2026-09-06T19:30:00Z" })]), NOW)!;
   const anchorRow = 1; // 6 Sep 2026 is a Sunday, in the week starting Mon 31 Aug; now is Thu 10 Sep
-  assert.equal(cols.rows[anchorRow].get("api_logs")?.state, "archived");
+  assert.equal(cols.rows[anchorRow].get("api_logs")?.runs.length, 1);
   assert.equal(cols.rows[0].size, 0, "the current week has no archive run yet");
 
   // ...and the backup that anchors it resolves to the same row through the same helper.
@@ -115,10 +116,10 @@ test("buildArchiveColumns: a table seen only in the log still gets a column", ()
     NOW,
   )!;
   assert.deepEqual(cols.tables, ["api_logs", "audit_events"]);
-  assert.equal(cols.rows[1].get("audit_events")?.state, "archived");
+  assert.equal(cols.rows[1].get("audit_events")?.runs.length, 1);
 });
 
-test("buildArchiveColumns: two runs in one week land in one cell and keep both outcomes", () => {
+test("buildArchiveColumns: two runs in one week land in one cell, and the mark keeps both", () => {
   const cols = buildArchiveColumns(
     payloadWith([
       run({ t: "2026-09-06T19:30:00Z" }),
@@ -127,14 +128,12 @@ test("buildArchiveColumns: two runs in one week land in one cell and keep both o
     NOW,
   )!;
   const cell = cols.rows[1].get("api_logs")!;
-  assert.equal(cell.multiple, true);
-  assert.equal(cell.successState, "archived");
-  assert.equal(cell.problemState, "attention");
-  assert.equal(cell.state, "archived", "the headline is the success; the problem is the split");
+  assert.deepEqual(cell.mark, { worst: "attention", second: "ok", codes: 2 }, "two dashes");
+  assert.equal(cell.data, null, "no index was read, so the week holds no body");
   assert.deepEqual(cell.runs.map((r) => r.run.t), ["2026-09-06T19:30:00Z", "2026-09-06T22:30:00Z"], "time-sorted");
 });
 
-test("buildArchiveColumns: a failure outranks a refusal as the week's problem", () => {
+test("buildArchiveColumns: a failure outranks a refusal in the mark", () => {
   const cols = buildArchiveColumns(
     payloadWith([
       run({ t: "2026-09-06T19:30:00Z", ok: false, refusals: 1 }),
@@ -142,10 +141,74 @@ test("buildArchiveColumns: a failure outranks a refusal as the week's problem", 
     ]),
     NOW,
   )!;
+  assert.deepEqual(cols.rows[1].get("api_logs")!.mark, { worst: "failed", second: "attention", codes: 2 });
+});
+
+// ── The data channel (_index/) ───────────────────────────────────────────────
+// The body is about the rows DATED a week; the mark is about the runs that happened in it. These
+// are different weeks, and the tests are written to keep them apart.
+
+const week = (over: Partial<PublicArchiveWeek> = {}): PublicArchiveWeek => ({
+  table: "api_logs", week: "2026-W36", state: "archived", rows: 1_671, ...over,
+});
+
+test("buildArchiveColumns: a week's rows land on the row of the week they are DATED", () => {
+  // 2026-W36 is the week of Mon 31 Aug 2026 — row 1 with now = Thu 10 Sep.
+  const cols = buildArchiveColumns(payloadWith([], undefined, [week()]), NOW)!;
+  assert.deepEqual(cols.rows[1].get("api_logs")!.data, { state: "archived", rows: 1_671 });
+  assert.equal(cols.rows[0].size, 0);
+  assert.equal(cols.rows[2].size, 0);
+});
+
+test("buildArchiveColumns: a cell can be data with NO run — that is the normal case", () => {
+  // The run that archives a week happens weeks later, so most bodies have no run beneath them.
+  const cols = buildArchiveColumns(payloadWith([], undefined, [week({ week: "2026-W20", state: "pruned", rows: 9 })]), NOW)!;
+  const cell = [...cols.rows.flatMap((r) => [...r.values()])][0];
+  assert.deepEqual(cell.data, { state: "pruned", rows: 9 });
+  assert.deepEqual(cell.runs, []);
+  assert.deepEqual(cell.mark, { worst: null, second: null, codes: 0 }, "nothing ran — nothing to mark");
+});
+
+test("buildArchiveColumns: a pruned body and a refusing run coexist in one cell", () => {
+  // Two correct views of two different subjects: those rows ARE pruned, and this week's run
+  // declined to delete some other week's. Neither overrides the other.
+  const cols = buildArchiveColumns(
+    payloadWith(
+      [run({ t: "2026-09-06T19:30:00Z", ok: false, refusals: 2, weeksArchived: 0, weeksPruned: 0 })],
+      undefined,
+      [week({ state: "pruned" })],
+    ),
+    NOW,
+  )!;
   const cell = cols.rows[1].get("api_logs")!;
-  assert.equal(cell.successState, null);
-  assert.equal(cell.problemState, "failed");
-  assert.equal(cell.state, "failed", "with no success at all, the problem IS the cell");
+  assert.deepEqual(cell.data, { state: "pruned", rows: 1_671 });
+  assert.deepEqual(cell.mark, { worst: "attention", second: null, codes: 1 });
+});
+
+test("buildArchiveColumns: weeks outside the window, of unknown tables, or impossible are dropped", () => {
+  const cols = buildArchiveColumns(
+    payloadWith([], undefined, [
+      week({ week: "2024-W36" }),          // before the window
+      week({ week: "2027-W01" }),          // after it
+      week({ table: "ghost_table" }),      // no such column
+      week({ week: "2025-W53" }),          // well-formed, but 2025 has no 53rd week
+      week({ week: "not-a-week" }),
+    ]),
+    NOW,
+  )!;
+  assert.equal(cols.rows.reduce((n, r) => n + r.size, 0), 0, "one bad label must not cost the block");
+});
+
+test("buildArchiveColumns: an absent index means no bodies, and is not the same as an empty one", () => {
+  // `weeks` absent = we did not read the index this build; [] = we read it and it was empty. Both
+  // draw nothing, but only the second is knowledge — the distinction lives in the payload.
+  const absent = payloadWith([run()]);
+  const empty = payloadWith([run()], undefined, []);
+  assert.equal(absent.archive!.weeks, undefined);
+  assert.deepEqual(empty.archive!.weeks, []);
+  for (const p of [absent, empty]) {
+    assert.equal(buildArchiveColumns(p, NOW)!.rows[1].get("api_logs")!.data, null);
+  }
 });
 
 // ── summaries ────────────────────────────────────────────────────────────────
@@ -162,7 +225,24 @@ test("summarizeArchives: counts rows for real runs only, and every troubled run 
       NOW,
     )!,
   );
-  assert.deepEqual(stats, { rowsArchived: 150, rowsPruned: 10, issues: 2 });
+  assert.deepEqual(stats, { rowsArchived: 150, rowsPruned: 10, issues: 2, weeksArchived: 0, weeksPruned: 0 });
+});
+
+test("summarizeArchives: counts table-weeks from the DATA channel, not from the runs", () => {
+  const stats = summarizeArchives(
+    buildArchiveColumns(
+      payloadWith([], undefined, [
+        week({ week: "2026-W36", state: "pruned" }),
+        week({ week: "2026-W35", state: "archived" }),
+        week({ week: "2026-W34", state: "pruned" }),
+        week({ week: "2019-W02", state: "pruned" }), // outside the visible window
+      ]),
+      NOW,
+    )!,
+  );
+  assert.equal(stats.weeksArchived, 3, "every week whose rows are in the archive");
+  assert.equal(stats.weeksPruned, 2, "of which these are also gone from the database");
+  assert.equal(stats.rowsArchived, 0, "rows are a RUN figure — no runs here moved any");
 });
 
 test("archiveStoredBytes: cumulative over real successful runs; nothing here expires", () => {

@@ -55,7 +55,10 @@ test("no stylesheet rule resolves a palette at load — every colour token is de
 // Every class cellOps() can emit, plus the chrome classes the renderer hardcodes. If the glyph
 // gains a body colour and the stylesheet does not, this is what says so.
 const BODIES: BodyClass[] = ["b-ok", "b-verified", "b-expired", "b-archived", "b-pruned"];
-const CHROME = ["backdrop", "gridline", "axis", "moat", "cell-hit", "dot", "theme-btn", "header-text"];
+const CHROME = ["backdrop", "gridline", "axis", "moat", "cell-hit", "dot", "theme-btn", "header-text",
+                // The rule between an archive tooltip's two halves is the anti-ambiguity device, so
+                // it is chrome the renderer depends on, not decoration.
+                "tip-rule"];
 
 test("every class the glyph can emit has a selector in the template", () => {
   const emitted = new Set<string>();
