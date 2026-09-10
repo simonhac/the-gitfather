@@ -4,10 +4,10 @@
 > driven by GitHub Actions, stored on Cloudflare R2.
 
 <p align="center">
-  <img src="docs/dashboard.png" alt="the-gitfather backup-history dashboard — GFS heatmap with per-tier retention, per-table archive columns, storage and R2 cost" width="900">
+  <img src="docs/dashboard.png" alt="the-gitfather backup-history dashboard — GFS heatmap with per-tier retention, per-table archive columns showing which weeks' rows are archived and pruned, an open tooltip, storage and R2 cost" width="900">
 </p>
 
-<p align="center"><sub>The static <a href="#backup-history-dashboard">backup-history dashboard</a> — every 8-hourly backup over a 1-year window, with restore-verified drills, storage and estimated R2 cost.</sub></p>
+<p align="center"><sub>The static <a href="#backup-history-dashboard">backup-history dashboard</a> — every 8-hourly backup over a 1-year window, with restore-verified drills, row-retirement columns, storage and estimated R2 cost. The tooltip splits what a week <em>holds</em> from what ran <em>during</em> it.</sub></p>
 
 A small, **profile-driven** tool any project can adopt: point it at a Postgres connection string and an
 R2 bucket and you get the **off-site, immutable, restore-verified** pillars of the **3-2-1-1-0** backup
