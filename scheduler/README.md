@@ -4,8 +4,8 @@ A single Cloudflare Worker that **replaces GitHub Actions cron** for the-gitfath
 (`*/10 * * * *`) wakes the Worker every 10 minutes; it works out which cadences are due and fires each
 client's caller workflow via GitHub's REST [`workflow_dispatch`][dispatch] API.
 
-Only the *trigger* moves. The backup, durable-verify, and **self-healing staleness watchdog** still run
-inside GitHub Actions exactly as before — this Worker just dispatches them on a schedule.
+Only the *trigger* moves. The backup, durable-verify, table archive, and **self-healing staleness
+watchdog** still run inside GitHub Actions exactly as before — this Worker just dispatches them on a schedule.
 
 ```
 */10 tick ──▶ dueCadences(scheduledTime) ──▶ POST …/workflows/<file>/dispatches  (per client)
@@ -26,7 +26,13 @@ missed backup) plus the external `HEARTBEAT_URL` dead-man's-switch (pages if bac
 | `staleness`     | every 10 min      | `pg-staleness-check.yml`  | —                   |
 | `backup`        | every 8h (`00/08/16` UTC) | `pg-backup.yml`       | `reason: schedule`  |
 | `durableVerify` | daily `18:30`     | `pg-durable-verify.yml`   | —                   |
+| `archive`       | Sundays `19:30` (opt-in)  | `pg-archive.yml`      | —                   |
 | `restoreDrill`  | manual only       | `pg-restore-drill.yml`    | —                   |
+
+`archive` is the one **opt-in** cadence: a client runs it only if its roster entry names `"archive"` in
+`cadences`. `19:30` on a Sunday is ~3.5 h after the Sunday anchor-hour backup that gets promoted to
+`weekly/`, and after that day's `durableVerify` — so a fresh, hash-checked, WORM-locked weekly dump
+exists before the archiver prunes a single row.
 
 `durableVerify` must run **after** every client's `anchor-hour-utc` (so the day's `daily/` object exists
 to verify). `18:30` suits anchor hours earlier in the day — adjust `dueCadences()` in `src/index.ts` if
@@ -66,8 +72,9 @@ in the Worker (`DEFAULT_WORKFLOWS` in `src/index.ts`) — you don't repeat them 
 - `id` — opaque label; the **only** client identifier that ever reaches the logs (the shared bucket is public).
 - `installationId` — the App's installation id on this owner's account (see setup step 4). Not secret, but it
   rides in `CLIENTS` so the public source carries no owner/repo/install identifiers.
-- `cadences` (optional) — restrict which cadences a client runs. Omit to run them all (the default).
-  `beta` above opts out of `durableVerify`.
+- `cadences` (optional) — restrict which cadences a client runs. Omit it and the client runs every
+  cadence **except** the opt-in ones (`archive`); name a cadence explicitly to opt in. `beta` above
+  opts out of `durableVerify`, and a client that wants the archiver must list `"archive"` itself.
 - `workflows` (optional) — per-client filename overrides, only if a client named a caller file differently,
   e.g. `"workflows": { "backup": "pg-backup-eu.yml" }`.
 
@@ -134,15 +141,15 @@ Worker's first tick. With only a few small backups that's fine — bridge it wit
    everything else verbatim:
    ```yaml
    on:
-     schedule:                 # ← delete these two lines
-       - cron: "0 */2 * * *"   # ←
+     schedule:                    # ← delete these two lines
+       - cron: "0 0,8,16 * * *"   # ←
      workflow_dispatch:        # keep
        inputs: { ... }         # keep (the backup caller's `reason` input is required by self-heal)
    ```
-   Apply to `pg-backup.yml`, `pg-staleness-check.yml`, `pg-durable-verify.yml` (and `pg-restore-drill.yml`
-   if present). **Do not** touch `name:` (the dashboard's `workflow_run` matches it) or `pg-dashboard.yml`
+   Apply to `pg-backup.yml`, `pg-staleness-check.yml`, `pg-durable-verify.yml` (and `pg-archive.yml` /
+   `pg-restore-drill.yml` if present). **Do not** touch `name:` (the dashboard's `workflow_run` matches it) or `pg-dashboard.yml`
    (stays `workflow_run`). GitHub now schedules nothing.
-3. **(optional) confirm dispatch still works** with cron gone, and avoid waiting up to 2h for the first
+3. **(optional) confirm dispatch still works** with cron gone, and avoid waiting up to 8h for the first
    backup: `gh workflow run pg-backup.yml -R your-org/alpha-app -f reason=schedule`.
 4. **Deploy the Worker** (above). Its `*/10` cron is now the sole scheduler.
 5. **Validate** — every run from here is Worker-originated:
@@ -178,9 +185,10 @@ and cron resumes within a tick.
 ## Free-tier math
 
 Workers Free: 100k req/day · 5 cron triggers/account · 10 ms CPU/invocation · 50 subrequests/request.
-This Worker uses **1** cron trigger, **144** invocations/day (~0.15%), **≤ ~12 subrequests on a cold
-busiest tick** (6 `workflow_dispatch` + up to 6 installation-token mints, dropping to ~6 once the
-per-isolate token cache is warm), and sub-millisecond CPU (one RS256 sign per cold mint). R2 binding
-reads/writes are in-network/free. Dispatch uses the same GitHub Actions minutes cron did. **Zero new charges.**
+This Worker uses **1** cron trigger and **144** invocations/day (~0.15%). On the busiest tick it makes
+about **2 subrequests per client** cold (one `workflow_dispatch` plus one installation-token mint) and
+about **1** once the per-isolate token cache is warm — so N clients cost ~2N / ~N of the 50-subrequest
+budget. CPU is sub-millisecond (one RS256 sign per cold mint), and R2 binding reads/writes are
+in-network/free. Dispatch uses the same GitHub Actions minutes cron did. **Zero new charges.**
 
 [dispatch]: https://docs.github.com/en/rest/actions/workflows#create-a-workflow-dispatch-event

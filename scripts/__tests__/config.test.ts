@@ -103,13 +103,32 @@ test("drill: min-row-ratio in 0..1; max-row-ratio default 2 (>=1); max-row-drop 
 
 test("staleness: max-age-hours positive; slot/grace defaults; min-bytes default + coercion", () => {
   const s = stalenessSchema.safeParse(stalenessBase).data?.staleness;
-  assert.equal(s?.maxAgeHours, 3);
+  // Unset → derived from the cadence, not a fixed number: 1.5 slots at the 480/25 default.
+  assert.equal(s?.maxAgeHours, 12);
   // One number, not two: the schema default IS the display constant (see DEFAULT_SLOT_MINUTES).
   assert.equal(s?.slotMinutes, DEFAULT_SLOT_MINUTES);
   assert.equal(s?.slotMinutes, 480);
   assert.equal(s?.graceMinutes, 25);
   assert.ok(!stalenessSchema.safeParse({ ...stalenessBase, staleness: { maxAgeHours: 0 } }).success);
   assert.equal(stalenessSchema.safeParse({ ...stalenessBase, dump: { minBytes: 2048 } }).data?.dump.minBytes, 2048);
+});
+
+test("staleness: max-age-hours is derived per cadence, and refused when it sits inside a slot", () => {
+  const parse = (staleness: Record<string, number>) =>
+    stalenessSchema.safeParse({ ...stalenessBase, staleness });
+
+  // Derived: 1.5 slots, floored at one slot + grace + 1h.
+  assert.equal(parse({ slotMinutes: 120, graceMinutes: 25 }).data?.staleness.maxAgeHours, 4);
+  assert.equal(parse({ slotMinutes: 60, graceMinutes: 25 }).data?.staleness.maxAgeHours, 3);
+  assert.equal(parse({ slotMinutes: 720, graceMinutes: 25 }).data?.staleness.maxAgeHours, 18);
+
+  // An explicit value inside the slot window pages on every healthy tick — refuse it.
+  const bad = parse({ slotMinutes: 480, graceMinutes: 25, maxAgeHours: 5 });
+  assert.ok(!bad.success);
+  assert.match(bad.error!.issues.map((i) => i.message).join(" "), /must exceed staleness.slot-minutes/);
+
+  // Just outside the window is fine.
+  assert.ok(parse({ slotMinutes: 480, graceMinutes: 25, maxAgeHours: 9 }).success);
 });
 
 test("staleness: slot-minutes must divide a whole day (else slot buckets mis-file runs)", () => {

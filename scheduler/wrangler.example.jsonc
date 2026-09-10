@@ -2,7 +2,7 @@
   // ─────────────────────────────────────────────────────────────────────────────
   // Template — copy to wrangler.jsonc (gitignored) and fill in the real bucket name.
   //   cp wrangler.example.jsonc wrangler.jsonc
-  // Everything secret (GitHub token, client roster, trigger secret) is set OUT of band with
+  // Everything secret (GitHub App id + private key, client roster, trigger secret) is set OUT of band with
   // `wrangler secret put …` — see README.md. The only per-deployment value here is the R2 bucket name.
   // ─────────────────────────────────────────────────────────────────────────────
   "$schema": "node_modules/wrangler/config-schema.json",

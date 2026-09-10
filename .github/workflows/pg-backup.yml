@@ -3,7 +3,7 @@ name: pg-backup (reusable)
 # Reusable off-site backup of a Postgres DB → Cloudflare R2 with GFS tiering. A consuming repo calls
 # this from a thin caller workflow that owns the cron schedule + secrets and passes its profile path.
 # GFS: every run → 2hourly/; the anchor-hour run is promoted to daily/weekly/monthly. Retention +
-# immutability are enforced by R2 lifecycle rules + bucket locks (see README), not by this workflow.
+# immutability are enforced by R2 lifecycle rules + bucket locks (see docs/r2-setup.md), not by this workflow.
 
 on:
   workflow_call:

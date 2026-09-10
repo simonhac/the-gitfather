@@ -2,7 +2,7 @@ name: pg-restore-drill (reusable)
 
 # Reusable weekly proof that the latest off-site R2 dump actually restores — the "0 restore errors"
 # leg of 3-2-1-1-0. Pulls the newest object, pg_restores it into a throwaway postgres service, and
-# asserts the restored sentinel-table count is within tolerance of live. See README.
+# asserts the restored sentinel-table count is within tolerance of live. See docs/verify-and-restore.md.
 
 on:
   workflow_call:
