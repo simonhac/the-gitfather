@@ -19,7 +19,7 @@
 // cell size, because the draw loop and the mouse hit-test both read it and must never disagree.
 // ─────────────────────────────────────────────────────────────────────────────
 
-import type { BackupCell, ArchiveCell, ArchiveCellState } from "./backupTypes.js";
+import type { ArchiveCell, ArchiveCellState, BackupBodyState, ArchiveBodyState } from "./backupTypes.js";
 import { summarizeOutcomes, type CellMark, type OutcomeCode } from "./outcomes.js";
 
 // ── Geometry ─────────────────────────────────────────────────────────────────
@@ -121,42 +121,29 @@ export function cellOps(body: BodyClass | null, mark: CellMark, x = 0, y = 0): R
   return ops;
 }
 
-// ── Backup slots ─────────────────────────────────────────────────────────────
+// ── Bodies ───────────────────────────────────────────────────────────────────
 
 /**
- * One run's outcome code. Read from the run and its matched verification rather than from
- * `SlotRun.state`, because `deriveState` reports `expired` before it looks at the verification —
- * an aged-out dump whose drill failed would otherwise lose its amber.
- *
- * Folding the drill into its run is deliberate: a lone backup whose drill failed is ONE action that
- * went half-right, so it reads as a single amber bar rather than as "mixed".
+ * The class for a body state — the ONE place a lifecycle state becomes a colour, for both cell
+ * kinds. Backups run `ok → verified` with `expired` as the recessive end; archives run
+ * `archived → pruned`, where the brighter step means "verified at prune" for the same reason the
+ * brighter green does. null (nothing held) draws nothing at all.
  */
-export function backupCode(sr: { run: { ok: boolean }; verification: { ok: boolean } | null }): OutcomeCode {
-  if (!sr.run.ok) return "failed";
-  if (sr.verification && !sr.verification.ok) return "attention";
-  return "ok";
-}
-
-/**
- * The body of a backup slot: the best success among its runs. A run whose drill FAILED still paints
- * a plain body — the amber has moved to the mark, where it can coexist with the green.
- */
-export function backupBody(cell: Pick<BackupCell, "successState">): BodyClass | null {
-  switch (cell.successState) {
+export function bodyClass(state: BackupBodyState | ArchiveBodyState | null): BodyClass | null {
+  switch (state) {
+    case "ok":
+      return "b-ok";
     case "verified":
       return "b-verified";
-    case "ok":
-    case "unverified":
-      return "b-ok";
     case "expired":
       return "b-expired";
+    case "archived":
+      return "b-archived";
+    case "pruned":
+      return "b-pruned";
     default:
-      return null; // no successful run in this slot — a failed run has no body, only a mark
+      return null;
   }
-}
-
-export function backupMark(cell: Pick<BackupCell, "runs">): CellMark {
-  return summarizeOutcomes(cell.runs.map(backupCode));
 }
 
 // ── Archive weeks ────────────────────────────────────────────────────────────
@@ -183,7 +170,7 @@ export function archiveCode(sr: { state: ArchiveCellState }): OutcomeCode {
  * and it replaces the source here without touching the glyph.
  */
 export function archiveBody(cell: Pick<ArchiveCell, "successState">): BodyClass | null {
-  return cell.successState === "archived" ? "b-archived" : null;
+  return bodyClass(cell.successState === "archived" ? "archived" : null);
 }
 
 export function archiveMark(cell: Pick<ArchiveCell, "runs">): CellMark {

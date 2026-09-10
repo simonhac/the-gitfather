@@ -4,14 +4,13 @@ import {
   CELL_W,
   CELL_H,
   cellOps,
-  backupBody,
-  backupCode,
-  backupMark,
+  bodyClass,
   archiveBody,
   archiveCode,
   archiveMark,
   type RectOp,
 } from "../lib/cellGlyph.js";
+import { backupCode, runBodyState } from "../lib/backupHistory.js";
 import { summarizeOutcomes, NO_MARK, type OutcomeCode } from "../lib/outcomes.js";
 
 // The glyph is asserted as an op LIST rather than as rendered SVG: the grid, the legend swatches and
@@ -27,12 +26,22 @@ const run = (ok: boolean, ver: boolean | null = null) => ({
 
 // ── The body channel ─────────────────────────────────────────────────────────
 
-test("backupBody: a failed drill still paints a plain body — the amber lives in the mark", () => {
-  assert.equal(backupBody({ successState: "verified" }), "b-verified");
-  assert.equal(backupBody({ successState: "ok" }), "b-ok");
-  assert.equal(backupBody({ successState: "unverified" }), "b-ok");
-  assert.equal(backupBody({ successState: "expired" }), "b-expired");
-  assert.equal(backupBody({ successState: null }), null);
+test("runBodyState: a failed drill still paints a plain body — the amber lives in the mark", () => {
+  assert.equal(runBodyState("verified"), "verified");
+  assert.equal(runBodyState("ok"), "ok");
+  assert.equal(runBodyState("unverified"), "ok");
+  assert.equal(runBodyState("expired"), "expired");
+  assert.equal(runBodyState("failed"), null, "a failed run produced no data — the mark carries it");
+  assert.equal(runBodyState("empty"), null);
+});
+
+test("bodyClass: one mapping from lifecycle state to colour, for both cell kinds", () => {
+  assert.equal(bodyClass("ok"), "b-ok");
+  assert.equal(bodyClass("verified"), "b-verified");
+  assert.equal(bodyClass("expired"), "b-expired");
+  assert.equal(bodyClass("archived"), "b-archived");
+  assert.equal(bodyClass("pruned"), "b-pruned");
+  assert.equal(bodyClass(null), null);
 });
 
 test("archiveBody: only a week that stored something has a body", () => {
@@ -63,10 +72,7 @@ test("archiveCode: a refusal is attention, not failure — the gate declined on 
   assert.equal(archiveCode({ state: "quiet" }), "ok");
 });
 
-test("backupMark / archiveMark: fold a cell's runs down to distinct codes", () => {
-  assert.deepEqual(backupMark({ runs: [run(true), run(false)] as never }), {
-    worst: "failed", second: "ok", codes: 2,
-  });
+test("archiveMark: folds a week's runs down to distinct codes", () => {
   assert.deepEqual(archiveMark({ runs: [{ state: "archived" }, { state: "attention" }] as never }), {
     worst: "attention", second: "ok", codes: 2,
   });

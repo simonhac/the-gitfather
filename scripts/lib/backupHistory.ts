@@ -16,6 +16,7 @@ import {
   type PublicPayload,
   type PublicArchiveRun,
   type BackupCellState,
+  type BackupBodyState,
   type SlotRun,
   type BackupCell,
   type BackupRow,
@@ -27,6 +28,7 @@ import {
   type ArchiveColumns,
   type ArchiveStats,
 } from "./backupTypes.js";
+import { summarizeOutcomes, type OutcomeCode } from "./outcomes.js";
 import { tzAbbrev } from "./tzAbbrev.js";
 
 export const WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
@@ -167,6 +169,44 @@ export function deriveState(
 }
 
 /**
+ * One run's outcome CODE — the mark channel's atom.
+ *
+ * Read from the run and its matched verification rather than from `SlotRun.state`, because
+ * `deriveState` reports `expired` before it ever looks at the verification: an aged-out dump whose
+ * drill failed would otherwise lose its amber.
+ *
+ * Folding the drill into its run is deliberate: a lone backup whose drill failed is ONE action that
+ * went half-right, so it reads as a single amber bar rather than as "mixed".
+ */
+export function backupCode(sr: { run: { ok: boolean }; verification: { ok: boolean } | null }): OutcomeCode {
+  if (!sr.run.ok) return "failed";
+  if (sr.verification && !sr.verification.ok) return "attention";
+  return "ok";
+}
+
+/**
+ * What one run contributes to the BODY — what we hold because of it, or null when it produced
+ * nothing. `unverified` maps to `ok` because a dump whose drill failed is still a dump; the amber
+ * has moved to the mark, where it can coexist with the green.
+ */
+export function runBodyState(state: BackupCellState): BackupBodyState | null {
+  switch (state) {
+    case "verified":
+      return "verified";
+    case "ok":
+    case "unverified":
+      return "ok";
+    case "expired":
+      return "expired";
+    default:
+      return null; // failed | empty — no data to show
+  }
+}
+
+/** Best of two bodies: a verified copy outranks a plain one, which outranks an expired one. */
+const BODY_RANK: Record<BackupBodyState, number> = { verified: 3, ok: 2, expired: 1 };
+
+/**
  * Bytes currently sitting in R2. Each tier a run was promoted to is a separate object
  * (the backup is server-side copied into 2hourly/daily/weekly/monthly), and each copy
  * expires independently by its own lifecycle rule — so a run still contributes one
@@ -261,19 +301,18 @@ export function buildBackupGrid(payload: PublicPayload, now: Date, weeks = 52): 
     arr.push({ run, verification, state: deriveState(run, verification, nowMs, retention), whenLabel: formatInTz(d) });
   }
 
-  // Reduce each slot to one cell. Headline state = best success (verified > ok > expired), which
-  // becomes the cell's BODY; the runs' outcomes become its mark (see cellGlyph.ts).
-  const SUCCESS_RANK: Record<string, number> = { verified: 4, ok: 3, unverified: 2, expired: 1 };
+  // Reduce each slot to one cell, in the two channels the glyph draws: the BODY is the best thing
+  // the slot holds (verified > ok > expired, null when every run failed), and the MARK is how the
+  // runs went. Neither is derivable from the other — which is the point of having both.
   for (let r = 0; r < weeks; r++) {
     const byCol = slotRuns.get(r);
     if (!byCol) continue;
     for (const [col, runsIn] of byCol) {
       runsIn.sort((a, b) => Date.parse(a.run.t) - Date.parse(b.run.t));
-      let successState: BackupCellState | null = null;
-      let hasFailure = false;
+      let body: BackupBodyState | null = null;
       for (const sr of runsIn) {
-        if (sr.state === "failed") hasFailure = true;
-        else if (!successState || SUCCESS_RANK[sr.state] > SUCCESS_RANK[successState]) successState = sr.state;
+        const b = runBodyState(sr.state);
+        if (b && (!body || BODY_RANK[b] > BODY_RANK[body])) body = b;
       }
       rows[r].cells.set(col, {
         row: r,
@@ -281,10 +320,8 @@ export function buildBackupGrid(payload: PublicPayload, now: Date, weeks = 52): 
         weekday: Math.floor(col / SLOTS_PER_DAY),
         slot: col % SLOTS_PER_DAY,
         runs: runsIn,
-        state: successState ?? "failed",
-        successState,
-        hasFailure,
-        multiple: runsIn.length > 1,
+        body,
+        mark: summarizeOutcomes(runsIn.map(backupCode)),
       });
     }
   }

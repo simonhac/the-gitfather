@@ -12,6 +12,8 @@
 // bundle only ever sees scrubbed data.
 // ─────────────────────────────────────────────────────────────────────────────
 
+import type { CellMark } from "./outcomes.js";
+
 export type BackupTier = "2hourly" | "daily" | "weekly" | "monthly";
 
 /**
@@ -306,6 +308,14 @@ export interface SlotRun {
   whenLabel: string;
 }
 
+/**
+ * What a backup slot HOLDS — the body channel. A strict subset of BackupCellState: `failed` is not
+ * a body (a failed run produced no data, so the square stays blank and the mark carries it), and
+ * `unverified` is not either (a dump whose drill failed is still a dump — the amber lives in the
+ * mark, where it can coexist with the green).
+ */
+export type BackupBodyState = "ok" | "verified" | "expired";
+
 export interface BackupCell {
   row: number; // 0 = most-recent week (top)
   col: number; // 0..COLS_PER_WEEK-1
@@ -313,14 +323,10 @@ export interface BackupCell {
   slot: number; // 0..SLOTS_PER_DAY-1
   /** All runs that fell in this slot, time-sorted (length >= 1). */
   runs: SlotRun[];
-  /** Headline state — the best success among the runs, else "failed". Drives summary/legend. */
-  state: BackupCellState;
-  /** Best of verified/ok/expired among the successful runs (null if all failed). */
-  successState: BackupCellState | null;
-  /** True if any run in the slot failed. */
-  hasFailure: boolean;
-  /** True if the slot holds more than one run. */
-  multiple: boolean;
+  /** The body: the best thing this slot holds, or null when every run failed. */
+  body: BackupBodyState | null;
+  /** The mark: did the runs in this slot go clean? See outcomes.ts. */
+  mark: CellMark;
 }
 
 export interface BackupRow {
@@ -360,6 +366,15 @@ export interface BackupStats {
  */
 export type ArchiveCellState = "archived" | "quiet" | "attention" | "failed";
 
+/**
+ * What an archive week HOLDS — the body channel, as opposed to how a run went.
+ *
+ * `pruned` is the brighter step of the blue ramp because a prune is gated on a fingerprint re-check
+ * of the stored object: a pruned week is BY CONSTRUCTION a verified one, which is exactly what the
+ * brighter green means on the backup side.
+ */
+export type ArchiveBodyState = "archived" | "pruned";
+
 /** One archive record within a week/table cell (a cell can hold several — a manual backfill). */
 export interface ArchiveSlotRun {
   run: PublicArchiveRun;
@@ -379,9 +394,9 @@ export interface ArchiveCell {
   /** Best of archived/quiet among the untroubled runs (null if every run had a problem). */
   successState: ArchiveCellState | null;
   /**
-   * Worst of failed/attention among the troubled runs (null if none). BackupCell gets away with a
-   * `hasFailure` boolean because failure has one colour and archives have two — a refusal and a
-   * breakage are different things, and the cell has to know which one it is showing.
+   * Worst of failed/attention among the troubled runs (null if none). A backup cell needs no
+   * equivalent because failure has one colour and archives have two — a refusal and a breakage are
+   * different things, and the cell has to know which one it is showing.
    */
   problemState: ArchiveCellState | null;
   /** True if the week holds more than one record for this table. */

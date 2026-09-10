@@ -10,6 +10,8 @@ import {
   buildArchiveColumns,
   summarize,
   summarizeArchives,
+  backupCode,
+  runBodyState,
   archiveStoredBytes,
   formatInTz,
   slotApproxDate,
@@ -45,9 +47,7 @@ import {
   PITCH_Y,
   ARCHIVE_PITCH,
   cellOps,
-  backupBody,
-  backupMark,
-  backupCode,
+  bodyClass,
   archiveBody,
   archiveMark,
   archiveCode,
@@ -380,7 +380,7 @@ function drawGlyph(body: BodyClass | null, mark: CellMark, x: number, y: number)
 
 grid.rows.forEach((row, r) => {
   for (const cell of row.cells.values()) {
-    drawGlyph(backupBody(cell), backupMark(cell), backupCellX(cell.col), cellY(r));
+    drawGlyph(bodyClass(cell.body), cell.mark, backupCellX(cell.col), cellY(r));
   }
 });
 
@@ -568,7 +568,7 @@ function markDot(code: OutcomeCode): string {
 }
 /** The body class a single run would paint, or null when it painted none (a failed run). */
 function runBody(state: BackupCellState): BodyClass | null {
-  return backupBody({ successState: state === "failed" || state === "empty" ? null : state });
+  return bodyClass(runBodyState(state));
 }
 function esc(s: string): string {
   return s.replace(/[&<>]/g, (c) => (c === "&" ? "&amp;" : c === "<" ? "&lt;" : "&gt;"));
