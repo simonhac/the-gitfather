@@ -25,6 +25,7 @@ import { capture, commandExists } from "./lib/proc.js";
 import { stampToEpochMs } from "./lib/schedule.js";
 import { loadLog, stampFromKey, type LogStore } from "./lib/logStore.js";
 import { DURABLE_TIERS, expectedDurableKeys } from "./lib/durableCensus.js";
+import { credentialVerdicts, needsAttention } from "./lib/credentialAge.js";
 import { drillObject, drillCoreFromProfile, isDumpObject, stampToIso, type DrillGate } from "./restore-drill-pg.js";
 import { appendVerify } from "./runlog.js";
 import { slackOneoff, alertWebhook, failAlertText } from "./lib/slack.js";
@@ -254,6 +255,20 @@ async function main(): Promise<void> {
       }
       await recordRestore(o, "nonempty");
     }
+  }
+
+  // ── Credential age ─────────────────────────────────────────────────────────
+  // Hygiene, not integrity, so it never fails the run — an R2 token nobody has rotated cannot
+  // corrupt a backup. It rides on this job because this is the daily one that already has the
+  // run-log open, and because a credential that silently ages out is exactly the kind of thing
+  // that is only ever noticed at the worst moment.
+  const creds = credentialVerdicts(log.credentials, cfg.credentialRotation.track, cfg.credentialRotation.maxAgeDays, nowMs);
+  for (const v of creds) console.log(`  credential ${v.message}`);
+  const stale = needsAttention(creds);
+  if (stale.length) {
+    const summary = stale.map((v) => v.message).join("; ");
+    process.stderr.write(`credential rotation: ${summary}\n`);
+    await slackOneoff(`⚠️ *${fileBasename} credential rotation* — ${summary}`, false).catch(() => {});
   }
 
   cleanup();

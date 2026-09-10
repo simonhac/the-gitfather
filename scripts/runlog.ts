@@ -29,6 +29,7 @@ import { fileURLToPath } from "node:url";
 import { buildRawProfile } from "./lib/profile.js";
 import { githubRunInfo } from "./lib/github.js";
 import type { LogRun, LogVerification, LogArchive, BackupTier } from "./lib/backupTypes.js";
+import type { LogCredential } from "./lib/credentialAge.js";
 
 function warn(msg: string): void {
   process.stderr.write(`runlog: ${msg}\n`);
@@ -112,9 +113,9 @@ export function pickLatestRun(body: string): LogRun | null {
  * clobbering history with a truncated write). Never throws.
  */
 function appendRecord(
-  fileBase: "runs" | "verifications" | "archives",
+  fileBase: "runs" | "verifications" | "archives" | "credentials",
   ts: string,
-  record: LogRun | LogVerification | LogArchive,
+  record: LogRun | LogVerification | LogArchive | LogCredential,
 ): void {
   const remote = process.env.RUNLOG_RCLONE_REMOTE ?? "r2";
   const bucket = process.env.R2_BUCKET; // credential (env)
@@ -295,6 +296,16 @@ function isEntrypoint(): boolean {
 }
 
 if (isEntrypoint()) main();
+
+/**
+ * Append a credential-rotation record. Holds NO secret — the key-id tail is 4 characters, enough to
+ * tell two rotations apart and useless as a credential. This is the only durable trace that a
+ * rotation happened: a GitHub secret cannot be read back, and listing repository secrets needs a
+ * token more privileged than the workflow that would do the checking.
+ */
+export function appendCredential(input: LogCredential): void {
+  appendRecord("credentials", input.ts, input);
+}
 
 /**
  * Append an archive-task record. Best-effort like the rest of this module: a logging hiccup must

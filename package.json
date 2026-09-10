@@ -3,10 +3,11 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "description": "Off-site, GFS-retained, monitored, restore-verified Postgres backups → Cloudflare R2 (profile-driven, project-agnostic).",
+  "description": "Off-site, GFS-retained, monitored, restore-verified Postgres backups \u2192 Cloudflare R2 (profile-driven, project-agnostic).",
   "scripts": {
     "dashboard": "tsx scripts/build-dashboard.ts",
     "doctor": "tsx scripts/doctor.ts",
+    "roll-r2": "tsx scripts/roll-r2-token.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "test": "tsx --test scripts/__tests__/*.test.ts",
