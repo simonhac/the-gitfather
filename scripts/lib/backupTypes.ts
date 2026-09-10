@@ -59,12 +59,35 @@ function intervalPhrase(slotMinutes: number): string {
 }
 
 /**
- * The cadence as a sentence fragment: "a fresh one every 8 hours, 3 a day".
- * At one slot a day the count is dropped — "1 a day" adds nothing once the interval IS a day.
+ * The cadence split for rendering: a plain `lead` and the `emphasis` the subtitle highlights.
+ * At one slot a day the count is dropped — "1 a day" adds nothing once the interval IS a day —
+ * and the whole fragment moves into `emphasis`, because "every once a day" is not a sentence.
  */
+export function slotCadence(slotMinutes: number = SLOT_MINUTES): { lead: string; emphasis: string } {
+  if (slotMinutes >= 1440) return { lead: "a fresh one", emphasis: "once a day" };
+  const interval = intervalPhrase(slotMinutes).replace(/^every /, "");
+  return { lead: "a fresh one every", emphasis: `${interval}, ${slotsPerDayFrom(slotMinutes)} a day` };
+}
+
+/** The cadence as one flat fragment: "a fresh one every 8 hours, 3 a day". */
 export function slotCadencePhrase(slotMinutes: number = SLOT_MINUTES): string {
-  if (slotMinutes >= 1440) return "a fresh one once a day";
-  return `a fresh one ${intervalPhrase(slotMinutes)}, ${slotsPerDayFrom(slotMinutes)} a day`;
+  const { lead, emphasis } = slotCadence(slotMinutes);
+  return `${lead} ${emphasis}`;
+}
+
+/**
+ * The GFS ladder as one bullet per tier, oldest last, connectives included ("…, then", "…, and").
+ * The subtitle renders these as a list; keeping the strings here means the tier windows, the
+ * cadence adjective and the ordering are all covered by unit tests rather than by looking at a
+ * rendered page.
+ */
+export function retentionBullets(r: RetentionMap, slotMinutes: number = SLOT_MINUTES): string[] {
+  return [
+    `the ${slotCadenceAdjective(slotMinutes)} “grandsons” are kept for ${r["2hourly"].label}, then`,
+    `one “son” per day for ${r.daily.label},`,
+    `one “father” per week for ${r.weekly.label}, and`,
+    `one “grandfather” per month for ${r.monthly.label}`,
+  ];
 }
 
 /** The cadence as an adjective for the grandson tier: "8-hourly" / "hourly" / "daily" / "90-minute". */
