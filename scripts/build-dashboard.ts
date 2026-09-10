@@ -287,19 +287,20 @@ function makeSample(now: Date): {
     runs.push({ ts, ok: true, tiers, bytes, key: null, sha256: null, counts: null, runId: null, runUrl: ghRun(t), error: null, errorCode: null, durationMs: 92_000 });
   }
 
-  // A couple of slots with more than one run, to exercise the multi-run rendering: when two
-  // runs land in the same display slot (a manual rerun, or a failure that's retried),
-  // the cell gets a corner notch — and a mix of success + failure splits it diagonally. Placed
-  // in the last ~2 days so the 2hourly copies are still retained (green), not aged-out grey.
+  // A couple of slots with more than one run, to exercise the multi-run rendering: when two runs
+  // land in the same display slot (a manual rerun, or a failure that's retried), the cell's mark
+  // splits into two dashes if they disagreed. Placed in the last ~2 days so the 2hourly copies are
+  // still retained (green), not aged-out grey.
   const iso = (ms: number) => new Date(ms).toISOString().replace(".000", "");
   const bucket = (hoursAgo: number) => Math.floor((end - hoursAgo * 3_600_000) / slotMs) * slotMs;
 
   // (a) Mixed slot: the scheduled run (already added by the loop, OK) plus a manual rerun ~40 min
-  //     later that failed → diagonal split (green/red) + notch.
+  //     later that failed → a green body with a two-dash mark (red + muted).
   const mixed = bucket(20) + 40 * 60_000;
   runs.push({ ts: iso(mixed), ok: false, tiers: [], bytes: null, key: null, sha256: null, counts: null, runId: null, runUrl: ghRun(mixed), error: "pg_dump: canceled statement due to lock_timeout", errorCode: null, durationMs: 31_000 });
 
-  // (b) Multi-success slot: the scheduled run plus a successful manual rerun ~50 min later → notch.
+  // (b) Multi-success slot: the scheduled run plus a successful manual rerun ~50 min later. Both
+  //     clean, so under the grammar the cell stays a plain green body — the count is in the tooltip.
   const rerun = bucket(40) + 50 * 60_000;
   runs.push({ ts: iso(rerun), ok: true, tiers: ["2hourly"], bytes: 4_840_000_000, key: null, sha256: null, counts: null, runId: null, runUrl: ghRun(rerun), error: null, errorCode: null, durationMs: 88_000 });
 
@@ -368,7 +369,7 @@ function makeSample(now: Date): {
         error: refusing ? "prune refused: live fingerprint does not match the manifest" : null,
       }));
     }
-    // A manual backfill alongside the scheduled run — exercises the notch + chooser in a column.
+    // A manual backfill alongside the scheduled run — exercises the multi-run chooser in a column.
     if (w === 14) {
       const backfill = t + 3 * 3_600_000;
       const v = VOLUME["public.api_logs"];

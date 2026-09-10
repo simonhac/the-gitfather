@@ -37,34 +37,37 @@ import {
   type ArchiveCell,
   type ArchiveSlotRun,
 } from "../scripts/lib/backupTypes.js";
+import {
+  CELL_W,
+  CELL_H,
+  GAP,
+  PITCH_X,
+  PITCH_Y,
+  ARCHIVE_PITCH,
+  cellOps,
+  backupBody,
+  backupMark,
+  backupCode,
+  archiveBody,
+  archiveMark,
+  archiveCode,
+  type BodyClass,
+  type RectOp,
+} from "../scripts/lib/cellGlyph.js";
+import { summarizeOutcomes, type CellMark, type OutcomeCode, NO_MARK } from "../scripts/lib/outcomes.js";
+import { themeControl } from "./theme.js";
 
 const SVGNS = "http://www.w3.org/2000/svg";
-const CELL = 11;
-const GAP = 2;
-const PITCH = CELL + GAP;
-const LEFT_AXIS = 62; // fits "DD MMM YY" in monospace
-const TOP_AXIS = 20;
+// Cell geometry lives in cellGlyph.ts — the draw loop, the legend swatches and the mouse hit-test
+// all read it from there, so they cannot drift apart. Only the axes belong to this file.
+const LEFT_AXIS = 72; // fits "DD MMM YY" at the 11px monospace axis size
+const TOP_AXIS = 24;
 const WEEKS = 52;
-const NOTCH = 3.5; // top-right corner bite that marks a multi-run slot
 const ARCHIVE_GUTTER = 10; // breathing room between the backup grid and the archive block
-// Wider than the grid's PITCH: an archive column carries a "T1" header, and at the grid pitch two
-// of those headers touch. Only the ROW pitch has to match the grid — the columns are free.
-const ARCHIVE_PITCH = CELL + 6;
-const MONO = "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
 
-const DARK = typeof matchMedia === "function" && matchMedia("(prefers-color-scheme: dark)").matches;
-
-const FILL: Record<Exclude<BackupCellState, "empty">, string> = {
-  failed: "#e5484d",
-  expired: DARK ? "#3a414e" : "#cdd3dc", // aged-out slot — recedes into the grid
-  ok: DARK ? "#2a9d63" : "#1f8a54", // succeeded, still retained
-  verified: DARK ? "#41d586" : "#2fb872", // brighter green — restore-verified
-  unverified: DARK ? "#e0a23a" : "#d9911f", // amber — backup OK but a restore/hash drill FAILED (≠ red failed backup)
-};
-const EMPTY_FILL = DARK ? "#20242d" : "#eef0f4";
-const GRID_BORDER = DARK ? "#2a2f3a" : "#e3e6ec";
-const MUTED = DARK ? "#949cad" : "#677085";
-const CELL_STROKE = DARK ? "rgba(255,255,255,0.06)" : "rgba(16,24,40,0.08)";
+// Colours are CSS classes, not values — see template.html. Nothing in this file may resolve a
+// palette at module load: that is what used to freeze the grid in its load-time theme while the
+// rest of the page followed the OS.
 
 // The `2hourly` key is the frozen R2 prefix, not the cadence — label it from the profile's slot
 // width so a tooltip cannot say "2-hourly" about an 8-hourly backup.
@@ -76,15 +79,6 @@ const STATE_LABEL: Record<BackupCellState, string> = {
   verified: "Restore-verified", unverified: "Drill failed",
 };
 
-// An archive is not a backup — it is where rows LIVE once they have left Postgres, and it never
-// expires — so it gets a hue of its own rather than a shade of the backup greens. Amber and red keep
-// the meanings they already have on this page, so the legend gains no duplicate entries.
-const ARCHIVE_FILL: Record<ArchiveCellState, string> = {
-  archived: DARK ? "#5b9cf0" : "#3b7dd8",
-  quiet: EMPTY_FILL, // hollow — the archive hue is the outline, see drawArchiveCell
-  attention: FILL.unverified,
-  failed: FILL.failed,
-};
 const ARCHIVE_STATE_LABEL: Record<ArchiveCellState, string> = {
   archived: "Archived", quiet: "Nothing to archive", attention: "Needs a look", failed: "Failed",
 };
@@ -127,8 +121,10 @@ const archiveIndex = new Map<string, number>((archiveCols?.tables ?? []).map((t,
 const app = document.getElementById("app")!;
 
 // ── Header ───────────────────────────────────────────────────────────────────
+// A flex row: the prose column on the left, the theme pill top-right.
 const header = elem("header", "header");
-header.appendChild(elem("h1", undefined, `${payload.label} — backup history`));
+const headerText = elem("div", "header-text");
+headerText.appendChild(elem("h1", undefined, `${payload.label} — backup history`));
 const R = payload.retention ?? DEFAULT_RETENTION;
 
 // The GFS ladder is four parallel clauses, which is one clause too many for a sentence — as a
@@ -142,26 +138,22 @@ intro.append(
   elem("em", undefined, emphasis),
   ".",
 );
-header.appendChild(intro);
-header.appendChild(elem("p", "subtitle", "Older copies thin out on a Grandfather–Father–Son schedule:"));
+headerText.appendChild(intro);
+headerText.appendChild(elem("p", "subtitle", "Older copies thin out on a Grandfather–Father–Son schedule:"));
 const ladder = elem("ul", "tiers");
 for (const bullet of retentionBullets(R)) ladder.appendChild(elem("li", undefined, bullet));
-header.appendChild(ladder);
-header.appendChild(elem("p", "subtitle", `…at its fullest about ${maxRetained(R)} backups at once.`));
+headerText.appendChild(ladder);
+headerText.appendChild(elem("p", "subtitle", `…at its fullest about ${maxRetained(R)} backups at once.`));
 if (archiveCols && payload.archive) {
   const { lead, emphasis, tail } = archiveBlurb(payload.archive.tables);
   const blurb = elem("p", "subtitle");
   blurb.append(lead, elem("em", undefined, emphasis), tail);
-  header.appendChild(blurb);
+  headerText.appendChild(blurb);
 }
-header.appendChild(
-  elem(
-    "p",
-    "subtitle",
-    `Greens are retained (brighter = restore-verified), amber flags a failed verification drill, ` +
-      `grey has aged out. Times per ${DISPLAY_TZ}.`,
-  ),
-);
+// The paragraph that used to explain the colours here is gone: the legend is now the explanation,
+// and a key that has to be paraphrased in prose above it is a key that has not done its job.
+header.appendChild(headerText);
+header.appendChild(themeControl());
 app.appendChild(header);
 
 // ── Summary stats ────────────────────────────────────────────────────────────
@@ -220,41 +212,73 @@ const card = elem("div", "card");
 app.appendChild(card);
 
 // ── Legend ───────────────────────────────────────────────────────────────────
+// Two headed groups, then the table key. The heads carry the grammar: DATA is about what we hold,
+// RUNS is about how the jobs went, and every cell answers both in the same two places.
 const legend = elem("div", "legend");
-const MIXED_SWATCH = `linear-gradient(to top right, ${FILL.failed} 0 50%, ${FILL.ok} 50% 100%)`;
-/** One legend entry. `border` is the outline colour for a hollow swatch (null = filled). */
-function addLegendItem(label: string, background: string, border: string | null): void {
-  const item = elem("div", "legend-item");
-  const sw = elem("span", "swatch");
-  sw.style.background = background;
-  if (border) sw.style.border = `1px solid ${border}`;
-  item.appendChild(sw);
-  item.appendChild(document.createTextNode(label));
-  legend.appendChild(item);
+
+/**
+ * One key swatch: the SAME cellOps() the grid uses, on a backdrop tile, scaled to 16px. Drawing it
+ * from the glyph rather than from a CSS square is the point — a swatch is then by construction what
+ * the grid draws, so the key cannot quietly stop matching the picture. The tile matters too: without
+ * it "None" would be invisible on a white card, and so would grey "Expired".
+ */
+function swatch(body: BodyClass | null, mark: CellMark): SVGElement {
+  // Rendered at the grid's own size rather than scaled down: the marks are 3px tall, and shrinking
+  // them to fit a smaller swatch is exactly the thing that makes a key stop matching its picture.
+  const el = svg("svg", {
+    class: "legend-swatch", width: CELL_W, height: CELL_H, viewBox: `0 0 ${CELL_W} ${CELL_H}`, "aria-hidden": "true",
+  });
+  el.appendChild(svg("rect", { class: "backdrop", x: 0, y: 0, width: CELL_W, height: CELL_H, rx: 4 }));
+  appendOps(el, cellOps(body, mark));
+  return el;
 }
-const legendItems: [string, string, string | null][] = [
-  ["Verified", FILL.verified, null],
-  ["Backup OK", FILL.ok, null],
-  ["Drill failed", FILL.unverified, null],
-  ["Mixed (ok + failed)", MIXED_SWATCH, null],
-  ["Expired", FILL.expired, null],
-  ["Failed", FILL.failed, null],
-  ["No backup", EMPTY_FILL, GRID_BORDER],
+
+/** A mark of exactly one code — what most legend entries need. */
+const one = (code: OutcomeCode): CellMark => ({ worst: code, second: null, codes: 1 });
+
+function legendGroup(head: string, items: [string, BodyClass | null, CellMark][]): void {
+  const group = elem("div", "legend-group");
+  group.appendChild(elem("span", "legend-head", head));
+  for (const [label, body, mark] of items) {
+    const item = elem("div", "legend-item");
+    item.appendChild(swatch(body, mark));
+    item.appendChild(document.createTextNode(label));
+    group.appendChild(item);
+  }
+  legend.appendChild(group);
+}
+
+const dataItems: [string, BodyClass | null, CellMark][] = [
+  ["Backup", "b-ok", NO_MARK],
+  ["Verified", "b-verified", NO_MARK],
+  ["Expired", "b-expired", NO_MARK],
 ];
-for (const [label, color, border] of legendItems) addLegendItem(label, color, border);
-// The archive keys sit past a divider: red, amber and empty already mean the same thing on both
-// sides of it, so only the two archive-specific swatches and the column key are added.
+// The archive body entries only exist when the profile archives something.
+if (archiveCols) dataItems.push(["Archived", "b-archived", NO_MARK]);
+dataItems.push(["Nothing", null, NO_MARK]);
+legendGroup("Data", dataItems);
+
+legendGroup("Runs", [
+  ["Failed", null, one("failed")],
+  ["Needs a look", "b-ok", one("attention")],
+  ["Mixed outcomes", "b-ok", { worst: "failed", second: "ok", codes: 2 }],
+  ["Ran, stored nothing", null, one("ok")],
+]);
+
+// The Tn → table-name key. Mono, so it reads as the label it is rather than as prose.
 if (archiveCols) {
-  legend.appendChild(elem("span", "legend-sep"));
-  addLegendItem("Archived", ARCHIVE_FILL.archived, null);
-  addLegendItem("Nothing to archive", EMPTY_FILL, ARCHIVE_FILL.archived);
-  for (const table of archiveCols.tables) legend.appendChild(elem("div", "legend-item", archiveLabel.get(table)!));
+  const group = elem("div", "legend-group");
+  group.appendChild(elem("span", "legend-head", "Tables"));
+  for (const table of archiveCols.tables) {
+    group.appendChild(elem("div", "legend-item legend-table", archiveLabel.get(table)!));
+  }
+  legend.appendChild(group);
 }
 card.appendChild(legend);
 
 // ── Heatmap SVG ──────────────────────────────────────────────────────────────
-const gridWidth = COLS_PER_WEEK * PITCH;
-const gridHeight = grid.weeks * PITCH;
+const gridWidth = COLS_PER_WEEK * PITCH_X;
+const gridHeight = grid.weeks * PITCH_Y;
 // The archive block shares the row pitch but sits on its own backdrop past a gutter, so it reads as
 // a sibling panel rather than an eighth day. With no archived tables it takes no width at all and
 // the viewBox is byte-for-byte what it was.
@@ -271,12 +295,22 @@ const root = svg("svg", {
 }) as SVGSVGElement;
 root.style.maxWidth = `${totalWidth}px`;
 root.style.height = "auto";
+// The page column is sized to the grid rather than to a fixed 1220px, and centred. A heatmap is
+// only as wide as its data — at an 8-hourly cadence about 620px — and letting the card run to 1220
+// left two thirds of it as blank white to the right of the last column, which reads as a rendering
+// fault rather than as space.
+//
+// CSS cannot measure the SVG, so the width is handed over as a token. It goes on #app, not on the
+// card, because the header, the stat cards, the legend and the footer all have to end up the same
+// width as the grid and aligned with it: one column, sized by the one thing on the page that has an
+// intrinsic width. The `min()` in the rule keeps a denser cadence from overflowing the page.
+app.style.setProperty("--grid-w", `${totalWidth}px`);
 
 // Weekday headers
 WEEKDAY_LABELS.forEach((label, day) => {
   const t = svg("text", {
-    x: LEFT_AXIS + (day * SLOTS_PER_DAY + SLOTS_PER_DAY / 2) * PITCH,
-    y: TOP_AXIS - 8, "text-anchor": "middle", fill: MUTED, "font-size": 10, "font-family": MONO,
+    x: LEFT_AXIS + (day * SLOTS_PER_DAY + SLOTS_PER_DAY / 2) * PITCH_X,
+    y: TOP_AXIS - 9, "text-anchor": "middle", class: "axis",
   });
   t.textContent = label;
   root.appendChild(t);
@@ -285,7 +319,7 @@ WEEKDAY_LABELS.forEach((label, day) => {
 // Week-start row labels
 grid.rows.forEach((row, r) => {
   const t = svg("text", {
-    x: LEFT_AXIS - 8, y: TOP_AXIS + r * PITCH + CELL - 1, "text-anchor": "end", fill: MUTED, "font-size": 9, "font-family": MONO,
+    x: LEFT_AXIS - 9, y: TOP_AXIS + r * PITCH_Y + CELL_H - 6, "text-anchor": "end", class: "axis",
   });
   t.textContent = row.weekStartLabel;
   root.appendChild(t);
@@ -293,23 +327,22 @@ grid.rows.forEach((row, r) => {
 
 // Backdrop + day-delineation lines
 root.appendChild(svg("rect", {
-  x: LEFT_AXIS, y: TOP_AXIS, width: gridWidth, height: gridHeight, fill: EMPTY_FILL, stroke: GRID_BORDER, "stroke-width": 1, rx: 3,
+  class: "backdrop", x: LEFT_AXIS, y: TOP_AXIS, width: gridWidth, height: gridHeight, rx: 5,
 }));
 for (let i = 1; i < DAYS_PER_WEEK; i++) {
-  const x = LEFT_AXIS + i * SLOTS_PER_DAY * PITCH - GAP / 2;
-  root.appendChild(svg("line", { x1: x, y1: TOP_AXIS, x2: x, y2: TOP_AXIS + gridHeight, stroke: GRID_BORDER, "stroke-width": 1 }));
+  const x = LEFT_AXIS + i * SLOTS_PER_DAY * PITCH_X - GAP / 2;
+  root.appendChild(svg("line", { class: "gridline", x1: x, y1: TOP_AXIS, x2: x, y2: TOP_AXIS + gridHeight }));
 }
 
 // Archive backdrop + T1…Tn column headers (same style and baseline as Mon…Sun).
 if (archiveCols) {
   root.appendChild(svg("rect", {
-    x: archiveX0, y: TOP_AXIS, width: archiveWidth, height: gridHeight,
-    fill: EMPTY_FILL, stroke: GRID_BORDER, "stroke-width": 1, rx: 3,
+    class: "backdrop", x: archiveX0, y: TOP_AXIS, width: archiveWidth, height: gridHeight, rx: 5,
   }));
   archiveCols.tables.forEach((_table, i) => {
     const t = svg("text", {
-      x: archiveX0 + (i + 0.5) * ARCHIVE_PITCH, y: TOP_AXIS - 8,
-      "text-anchor": "middle", fill: MUTED, "font-size": 10, "font-family": MONO,
+      x: archiveX0 + (i + 0.5) * ARCHIVE_PITCH, y: TOP_AXIS - 9,
+      "text-anchor": "middle", class: "axis",
     });
     t.textContent = `T${i + 1}`;
     root.appendChild(t);
@@ -318,80 +351,44 @@ if (archiveCols) {
 
 // Where a cell sits, in viewBox user units. The draw loops and the hover anchor both go through
 // these, so the beak can never point somewhere the cell isn't.
-const backupCellX = (col: number): number => LEFT_AXIS + col * PITCH + GAP / 2;
-const archiveCellX = (i: number): number => archiveX0 + i * ARCHIVE_PITCH + (ARCHIVE_PITCH - CELL) / 2;
-const cellY = (r: number): number => TOP_AXIS + r * PITCH + GAP / 2;
+const backupCellX = (col: number): number => LEFT_AXIS + col * PITCH_X + GAP / 2;
+const archiveCellX = (i: number): number => archiveX0 + i * ARCHIVE_PITCH + (ARCHIVE_PITCH - CELL_W) / 2;
+const cellY = (r: number): number => TOP_AXIS + r * PITCH_Y + GAP / 2;
 
-// Cells (only non-empty slots are drawn).
-//   single run        → rounded square
-//   multi, all same   → square with a top-right notch (the notch = "more than one run here")
-//   multi, mixed      → diagonal split: top-right = best success, bottom-left = red, notched
-function colorOf(state: BackupCellState): string {
-  return FILL[state as Exclude<BackupCellState, "empty">];
+// Cells. One glyph for both grids — see cellGlyph.ts for what the body and the mark each say.
+// A cell is drawn whenever it has anything to say: a failed-only slot has no body at all, just a
+// red bar in an otherwise blank square.
+
+/** Paint a list of rectangles into an SVG parent. */
+function appendOps(target: SVGElement, ops: RectOp[]): void {
+  for (const op of ops) {
+    target.appendChild(svg("rect", { class: op.cls, x: op.x, y: op.y, width: op.w, height: op.h, rx: op.rx }));
+  }
 }
-const notchedSquare = (x: number, y: number) =>
-  `${x},${y} ${x + CELL - NOTCH},${y} ${x + CELL},${y + NOTCH} ${x + CELL},${y + CELL} ${x},${y + CELL}`;
-const successTriNotched = (x: number, y: number) =>
-  `${x},${y} ${x + CELL - NOTCH},${y} ${x + CELL},${y + NOTCH} ${x + CELL},${y + CELL}`;
-const failTri = (x: number, y: number) => `${x},${y} ${x + CELL},${y + CELL} ${x},${y + CELL}`;
 
 /**
- * The one cell shape, shared by both grids: a rounded square, a notched square when the slot holds
- * more than one run, and a diagonal split when those runs disagree. Only the colours differ between
- * a backup cell and an archive cell, so the notch/split geometry lives here once.
- *
- * `stroke` overrides the hairline outline — it is how a hollow cell gets its coloured border.
+ * One cell, wrapped in a `<g>` so CSS can style it as a unit on hover, with a transparent hit rect
+ * on top. The hit rect is last (so it is over everything) and full-size (so a cell whose body is
+ * blank — a failed run, a quiet archive week — is still hoverable across its whole square).
  */
-function drawShape(
-  x: number,
-  y: number,
-  o: { fill: string; stroke?: string; notched: boolean; splitFill?: string | null },
-): void {
-  const outline = o.stroke ?? CELL_STROKE;
-  const sw = o.stroke ? 1 : 0.5;
-  if (!o.notched) {
-    root.appendChild(svg("rect", { x, y, width: CELL, height: CELL, rx: 2, fill: o.fill, stroke: outline, "stroke-width": sw }));
-    return;
-  }
-  if (!o.splitFill) {
-    root.appendChild(svg("polygon", { points: notchedSquare(x, y), fill: o.fill, stroke: outline, "stroke-width": sw }));
-    return;
-  }
-  // mixed → split diagonally: top-right the good outcome, bottom-left the bad one
-  root.appendChild(svg("polygon", { points: successTriNotched(x, y), fill: o.fill, stroke: outline, "stroke-width": sw }));
-  root.appendChild(svg("polygon", { points: failTri(x, y), fill: o.splitFill, stroke: outline, "stroke-width": sw }));
-}
-
-function drawCell(cell: BackupCell, x: number, y: number) {
-  const successColor = cell.successState ? colorOf(cell.successState) : null;
-  drawShape(x, y, {
-    fill: cell.multiple && !successColor ? FILL.failed : colorOf(cell.state),
-    notched: cell.multiple,
-    splitFill: cell.multiple && cell.hasFailure && successColor ? FILL.failed : null,
-  });
-}
-
-function drawArchiveCell(cell: ArchiveCell, x: number, y: number) {
-  // A quiet week is hollow: it must be distinguishable from a week with no run at all (which draws
-  // nothing and lets the backdrop show), without reading as work that happened.
-  const hollow = cell.state === "quiet";
-  drawShape(x, y, {
-    fill: ARCHIVE_FILL[cell.state],
-    stroke: hollow ? ARCHIVE_FILL.archived : undefined,
-    notched: cell.multiple,
-    splitFill: cell.multiple && cell.problemState && cell.successState ? ARCHIVE_FILL[cell.problemState] : null,
-  });
+function drawGlyph(body: BodyClass | null, mark: CellMark, x: number, y: number): void {
+  const g = svg("g", { class: "cell" });
+  appendOps(g, cellOps(body, mark, x, y));
+  g.appendChild(svg("rect", { class: "cell-hit", x, y, width: CELL_W, height: CELL_H, rx: 4 }));
+  root.appendChild(g);
 }
 
 grid.rows.forEach((row, r) => {
-  for (const cell of row.cells.values()) drawCell(cell, backupCellX(cell.col), cellY(r));
+  for (const cell of row.cells.values()) {
+    drawGlyph(backupBody(cell), backupMark(cell), backupCellX(cell.col), cellY(r));
+  }
 });
 
 archiveCols?.rows.forEach((cells, r) => {
   for (const cell of cells.values()) {
     const i = archiveIndex.get(cell.table);
-    // Cells stay CELL-sized and centred in the wider archive column; only the row pitch is shared.
-    if (i != null) drawArchiveCell(cell, archiveCellX(i), cellY(r));
+    // Cells stay cell-sized and centred in the wider archive column; only the row pitch is shared.
+    if (i != null) drawGlyph(archiveBody(cell), archiveMark(cell), archiveCellX(i), cellY(r));
   }
 });
 
@@ -465,19 +462,19 @@ root.addEventListener("mousemove", (e) => {
   // The SVG may be scaled to fit; map cursor px back into viewBox user units.
   const scale = rect.width / totalWidth || 1;
   const ux = (e.clientX - rect.left) / scale;
-  const r = Math.floor(((e.clientY - rect.top) / scale - TOP_AXIS) / PITCH);
+  const r = Math.floor(((e.clientY - rect.top) / scale - TOP_AXIS) / PITCH_Y);
   if (r < 0 || r >= grid.weeks) {
     hide();
     return;
   }
   // The cell's own box, in client px — the panel and its beak hang off this, not off the pointer.
   const anchorAt = (cellUx: number): Anchor => ({
-    cx: rect.left + (cellUx + CELL / 2) * scale,
+    cx: rect.left + (cellUx + CELL_W / 2) * scale,
     top: rect.top + cellY(r) * scale,
-    bottom: rect.top + (cellY(r) + CELL) * scale,
+    bottom: rect.top + (cellY(r) + CELL_H) * scale,
   });
 
-  const col = Math.floor((ux - LEFT_AXIS) / PITCH);
+  const col = Math.floor((ux - LEFT_AXIS) / PITCH_X);
   const acol = Math.floor((ux - archiveX0) / ARCHIVE_PITCH);
   let html: string;
   let anchor: Anchor;
@@ -541,9 +538,13 @@ function closeChooser() {
 interface Linked {
   runs: { run: { runUrl: string | null } }[];
 }
-/** Run link of the latest run in a cell (cells are time-sorted), for the single-run click. */
+/**
+ * Run link of the latest run in a cell (cells are time-sorted), for the single-run click. `.at(-1)`
+ * rather than `[length - 1]`: a cell is about to be able to exist with data but NO runs, and the
+ * indexed form throws on that rather than returning null.
+ */
 function latestUrl(cell: Linked | null): string | null {
-  return cell ? cell.runs[cell.runs.length - 1].run.runUrl : null;
+  return cell?.runs.at(-1)?.run.runUrl ?? null;
 }
 /** A cell is clickable if any of its runs has a GitHub run link. */
 function clickable(cell: Linked | null): boolean {
@@ -555,28 +556,51 @@ function hide() {
   hover = null;
 }
 
-function dot(state: BackupCellState): string {
-  const c = state === "empty" ? "#cbd2da" : FILL[state as Exclude<BackupCellState, "empty">];
-  return `<span class="dot" style="background:${c}"></span>`;
+// Tooltip glyphs take the SAME classes as the grid, so a dot and the cell it describes can never
+// disagree about colour — and both follow the theme switch, because neither carries a value.
+/** A data dot: a small square in a body colour. */
+function dot(cls: BodyClass): string {
+  return `<span class="dot ${cls}"></span>`;
+}
+/** A run mark: the same pill the grid draws, in the run's outcome colour. */
+function markDot(code: OutcomeCode): string {
+  return `<span class="dot mark m-${code}"></span>`;
+}
+/** The body class a single run would paint, or null when it painted none (a failed run). */
+function runBody(state: BackupCellState): BodyClass | null {
+  return backupBody({ successState: state === "failed" || state === "empty" ? null : state });
 }
 function esc(s: string): string {
   return s.replace(/[&<>]/g, (c) => (c === "&" ? "&amp;" : c === "<" ? "&lt;" : "&gt;"));
 }
 
+/**
+ * The "N actions · M not clean" summary for a period holding more than one run — the line the cell's
+ * two-dash mark is short for. Its pill is the worst code, which is the dash the eye lands on first.
+ */
+function actionsLine(codes: OutcomeCode[]): string {
+  const worst = summarizeOutcomes(codes).worst ?? "ok";
+  const bad = codes.filter((c) => c !== "ok").length;
+  const tail = bad > 0 ? `${bad} not clean` : "all clean";
+  return `<div class="tip-state">${markDot(worst)}<span class="tip-count">${codes.length} actions · ${tail}</span></div>`;
+}
+
 function cellHtml(cell: BackupCell): string {
   const lines: string[] = [];
-  if (cell.multiple) {
-    // Multiple runs in one slot — list each so nothing is hidden by the headline colour.
-    const mixed = cell.hasFailure && cell.successState;
-    lines.push(`<div class="tip-when">${cell.runs.length} runs this slot${mixed ? " — mixed" : ""}</div>`);
+  const multiple = cell.runs.length > 1;
+  if (multiple) {
+    // Several runs in one slot — list each, so nothing is hidden behind a single mark.
+    lines.push(`<div class="tip-when">${cell.runs.length} runs this slot</div>`);
     for (const sr of cell.runs) {
       const size = sr.run.bytes != null ? ` · ${formatBytes(sr.run.bytes)}` : "";
-      lines.push(`<div class="tip-state">${dot(sr.state)}${esc(sr.whenLabel)} · ${STATE_LABEL[sr.state]}${size}</div>`);
+      lines.push(`<div class="tip-state">${markDot(backupCode(sr))}${esc(sr.whenLabel)} · ${STATE_LABEL[sr.state]}${size}</div>`);
     }
   } else {
     const sr = cell.runs[0];
+    const b = runBody(sr.state);
     lines.push(`<div class="tip-when">${esc(sr.whenLabel)}</div>`);
-    lines.push(`<div class="tip-state">${dot(sr.state)}${STATE_LABEL[sr.state]}</div>`);
+    // The body line first (what we HOLD), then what the run did — the same order as the cell.
+    lines.push(`<div class="tip-state">${b ? dot(b) : markDot(backupCode(sr))}${STATE_LABEL[sr.state]}</div>`);
     if (sr.run.ok) lines.push(`<div class="tip-muted">${formatBytes(sr.run.bytes)} · ${sr.run.tiers.map((t) => TIER_LABEL[t] ?? t).join(", ")}</div>`);
     if (sr.state === "expired") lines.push(`<div class="tip-muted">Object has aged out of R2 retention.</div>`);
     const v = sr.verification;
@@ -590,8 +614,9 @@ function cellHtml(cell: BackupCell): string {
     }
     if (!sr.run.ok) lines.push(`<div class="tip-fail">Backup failed.</div>`);
   }
+  if (multiple) lines.push(actionsLine(cell.runs.map(backupCode)));
   if (clickable(cell)) {
-    lines.push(`<div class="tip-hint">${cell.multiple ? "Click to choose a run to open ↗" : "Click to open the GitHub run ↗"}</div>`);
+    lines.push(`<div class="tip-hint">${multiple ? "Click to choose a run to open ↗" : "Click to open the GitHub run ↗"}</div>`);
   }
   return lines.join("");
 }
@@ -612,12 +637,11 @@ function linkRow(dotHtml: string, text: string, runUrl: string | null): string {
 }
 function runLink(sr: SlotRun): string {
   const size = sr.run.bytes != null ? ` · ${formatBytes(sr.run.bytes)}` : "";
-  return linkRow(dot(sr.state), `${esc(sr.whenLabel)} · ${STATE_LABEL[sr.state]}${size}`, sr.run.runUrl);
+  return linkRow(markDot(backupCode(sr)), `${esc(sr.whenLabel)} · ${STATE_LABEL[sr.state]}${size}`, sr.run.runUrl);
 }
 function chooserHtml(cell: BackupCell): string {
-  const mixed = cell.hasFailure && cell.successState;
   const lines = [
-    `<div class="tip-when">${cell.runs.length} runs this slot${mixed ? " — mixed" : ""}</div>`,
+    `<div class="tip-when">${cell.runs.length} runs this slot</div>`,
     `<div class="tip-muted">Open a run on GitHub:</div>`,
     ...cell.runs.map(runLink),
     `<div class="tip-hint">Esc or click away to dismiss</div>`,
@@ -630,10 +654,13 @@ function chooserHtml(cell: BackupCell): string {
 const weeksWord = (n: number): string => `${n} week${n === 1 ? "" : "s"}`;
 const rowsWord = (n: number): string => `${n.toLocaleString("en-GB")} row${n === 1 ? "" : "s"}`;
 
+/**
+ * An archive run's glyph. A run that STORED something gets the blue data square — that is the thing
+ * the cell's body shows; anything else gets its outcome pill, because a run that stored nothing has
+ * no body to point at.
+ */
 function archiveDot(state: ArchiveCellState): string {
-  // The hollow state has to survive as a 9px dot too, or the tooltip contradicts the cell.
-  const border = state === "quiet" ? `;border:1px solid ${ARCHIVE_FILL.archived};box-sizing:border-box` : "";
-  return `<span class="dot" style="background:${ARCHIVE_FILL[state]}${border}"></span>`;
+  return state === "archived" ? dot("b-archived") : markDot(archiveCode({ state }));
 }
 
 /** What this run actually did, in one line. */
@@ -659,7 +686,8 @@ function archiveProblem(r: PublicArchiveRun): string {
 function archiveCellHtml(cell: ArchiveCell): string {
   const name = esc(archiveLabel.get(cell.table) ?? cell.table);
   const lines: string[] = [];
-  if (cell.multiple) {
+  const multiple = cell.runs.length > 1;
+  if (multiple) {
     lines.push(`<div class="tip-when">${name} — ${cell.runs.length} runs this week</div>`);
     for (const sr of cell.runs) {
       lines.push(`<div class="tip-state">${archiveDot(sr.state)}${esc(sr.whenLabel)} · ${archiveHeadline(sr)}</div>`);
@@ -676,8 +704,9 @@ function archiveCellHtml(cell: ArchiveCell): string {
     if (sr.state === "attention") lines.push(`<div class="tip-fail">${archiveProblem(sr.run)} — needs a look</div>`);
     if (sr.state === "failed") lines.push(`<div class="tip-fail">Archive run failed.</div>`);
   }
+  if (multiple) lines.push(actionsLine(cell.runs.map(archiveCode)));
   if (clickable(cell)) {
-    lines.push(`<div class="tip-hint">${cell.multiple ? "Click to choose a run to open ↗" : "Click to open the GitHub run ↗"}</div>`);
+    lines.push(`<div class="tip-hint">${multiple ? "Click to choose a run to open ↗" : "Click to open the GitHub run ↗"}</div>`);
   }
   return lines.join("");
 }
@@ -702,5 +731,5 @@ function archiveChooserHtml(cell: ArchiveCell): string {
 }
 
 // Footer: generated-at
-const footer = elem("footer", "footer", `Updated ${formatInTz(now)}`);
+const footer = elem("footer", "footer", `Updated ${formatInTz(now)} · times in ${DISPLAY_TZ}`);
 app.appendChild(footer);

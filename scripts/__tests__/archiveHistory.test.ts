@@ -118,7 +118,7 @@ test("buildArchiveColumns: a table seen only in the log still gets a column", ()
   assert.equal(cols.rows[1].get("audit_events")?.state, "archived");
 });
 
-test("buildArchiveColumns: two runs in one week notch the cell and keep both outcomes", () => {
+test("buildArchiveColumns: two runs in one week land in one cell and keep both outcomes", () => {
   const cols = buildArchiveColumns(
     payloadWith([
       run({ t: "2026-09-06T19:30:00Z" }),
@@ -134,7 +134,7 @@ test("buildArchiveColumns: two runs in one week notch the cell and keep both out
   assert.deepEqual(cell.runs.map((r) => r.run.t), ["2026-09-06T19:30:00Z", "2026-09-06T22:30:00Z"], "time-sorted");
 });
 
-test("buildArchiveColumns: a failure outranks a refusal for the split colour", () => {
+test("buildArchiveColumns: a failure outranks a refusal as the week's problem", () => {
   const cols = buildArchiveColumns(
     payloadWith([
       run({ t: "2026-09-06T19:30:00Z", ok: false, refusals: 1 }),

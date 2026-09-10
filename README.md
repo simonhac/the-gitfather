@@ -638,9 +638,21 @@ backup pings it on success, so its absence pages independently of GitHub.
 
 ## Backup-history dashboard
 
-A static, self-contained page visualises **every 8-hourly run over the 1-year window** as a heatmap
-(green = healthy & retained, brighter green = restore-verified, **amber = restore/hash drill failed**,
-grey = aged out of retention, red = failed backup, blank = no run). It reads an **append-only run-log in
+A static, self-contained page visualises **every 8-hourly run over the 1-year window** as a heatmap.
+Every cell — backup slot or archive week — says two things in the same two places:
+
+- the **body** (the square) answers *do we have data for this period?* — green = healthy & retained,
+  brighter green = restore-verified, grey = aged out of retention, blue = rows archived, blank = none;
+- the **mark** (a small bar along the bottom) answers *did the runs in this period go clean?* —
+  nothing = clean, **red = failed**, **amber = a restore/hash drill failed or a prune was refused**,
+  two dashes = the runs disagreed, a muted bar on a blank body = it ran and stored nothing.
+
+So a failed backup is a red bar in an empty square (it produced no data), while a backup whose drill
+failed is a green square with an amber bar (the dump is fine; the drill is not). Counts, sizes, times
+and run links are in the tooltip. A **theme control** in the header offers Auto / Light / Dark, and
+remembers the choice; Auto follows the operating system.
+
+It reads an **append-only run-log in
 R2** (no server, no DB) that the backup + drill + durable-verify scripts write via `runlog.ts`:
 
 ```
@@ -665,10 +677,11 @@ bucket + custom domain, e.g. `https://ops.example.com/backups/<name>/index.html`
 narrow **sibling block appears to the right of the heatmap** — one column per archived table, labelled
 `T1`, `T2`, … (the key from `Tn` to the table name is in the legend, the header sentence and every
 tooltip). It shares the heatmap's row pitch, so each archive run sits on the row of the **week it ran
-in** — beside the weekly backup it follows a few hours later. Cells read: **blue** = rows archived
-(and pruned), **hollow** = it ran but nothing was eligible (or it was a dry run), **amber** = prune
-refusals or anomalies, a human must look, **red** = the run failed, **nothing** = no archive run that
-week. Multiple runs in one week notch the cell and click to a chooser, exactly as backup slots do.
+in** — beside the weekly backup it follows a few hours later. It uses the same body/mark grammar as
+the backup grid: **blue body** = rows were archived that week, **muted bar on a blank cell** = it ran
+but nothing was eligible (or it was a dry run), **amber bar** = prune refusals or anomalies, a human
+must look, **red bar** = the run failed, **nothing at all** = no archive run that week. A week holding
+several runs shows two dashes when they disagreed, and clicks to a chooser, exactly as backup slots do.
 A third row of stat cards appears alongside — `Rows archived`, `Rows pruned`, `Archive stored`,
 `Archive issues` — and `Stored` / `Est. cost` fold in the archive objects, since they share the bucket
 and the bill. Archive runs do **not** count toward `Total runs` / `Failed`: those cards are about
