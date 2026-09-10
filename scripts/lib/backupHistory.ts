@@ -116,10 +116,10 @@ function ordinalToDate(ordinal: number): { y: number; mo: number; day: number } 
   return { y: d.getUTCFullYear(), mo: d.getUTCMonth() + 1, day: d.getUTCDate() };
 }
 
-/** Week-start label in DD MMM YY, e.g. "07 Jun 27". */
+/** Week-start label in D MMM YY, e.g. "7 Jun 27" — no leading zero, the labels are right-aligned. */
 export function weekStartLabel(ordinal: number): string {
   const { y, mo, day } = ordinalToDate(ordinal);
-  return `${String(day).padStart(2, "0")} ${MONTH_SHORT[mo - 1]} ${String(y).slice(-2)}`;
+  return `${day} ${MONTH_SHORT[mo - 1]} ${String(y).slice(-2)}`;
 }
 
 /**
