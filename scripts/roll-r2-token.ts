@@ -27,6 +27,7 @@
 
 import { createInterface } from "node:readline";
 import { capture, commandExists } from "./lib/proc.js";
+import { appendCredential } from "./runlog.js";
 import { secretFromTokenValue, isMate, opItemNames, parseRollArgs, type RollArgs } from "./lib/r2Token.js";
 
 function die(msg: string): never {
@@ -212,6 +213,19 @@ async function main(): Promise<void> {
     if (before[n] && after[n] === before[n]) die(`${n} on ${args.repo} did not change (still ${before[n]}) — the write did not land`);
     console.log(`✓ ${n}: ${before[n] ?? "(new)"} → ${after[n]}`);
   }
+  // Record the rotation. This is the ONLY durable trace that it happened: a GitHub secret cannot be
+  // read back, and listing repository secrets needs a token more privileged than the workflow that
+  // would do the checking. Best-effort by design — a logging hiccup must not fail a rotation that
+  // has already landed. Requires R2_BUCKET + a profile name; without them the record is skipped and
+  // the credential simply reports `unknown` until the next rotation, which is the honest answer.
+  appendCredential({
+    ts: new Date().toISOString(),
+    prefix: args.prefix,
+    bucket: args.bucket,
+    repo: args.repo,
+    keyIdTail: accessKeyId.slice(-4),
+  });
+
   console.log(
     `\nDone. The value was published from the escrow, not from your paste buffer, so ${args.vault} is\n` +
       "correct by construction. Now run the workflow that uses it and watch it succeed — a secret\n" +

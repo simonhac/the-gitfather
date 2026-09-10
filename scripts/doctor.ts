@@ -24,6 +24,8 @@ import {
   loadDashboardConfig,
   type Profile,
 } from "./lib/config.js";
+import { downloadLogsFromR2 } from "./lib/logStore.js";
+import { credentialVerdicts, type LogCredential } from "./lib/credentialAge.js";
 import {
   type ProbeResult,
   checkBinary,
@@ -91,7 +93,34 @@ async function probeArchive(): Promise<ProbeResult[]> {
 }
 
 const probeDrill = (): Promise<ProbeResult[]> => probeRestore(loadDrillConfig());
-const probeVerifyDurable = (): Promise<ProbeResult[]> => probeRestore(loadVerifyDurableConfig());
+/**
+ * Credential-rotation age, from the run-log. OPTIONAL probes: an ageing R2 token cannot corrupt a
+ * backup, so it warns rather than failing the preflight — but `unknown` warns too, because a
+ * credential nobody has ever rotated through the tool is the one most likely to be ancient.
+ */
+function probeCredentialAge(cfg: Profile): ProbeResult[] {
+  const { track, maxAgeDays } = cfg.credentialRotation;
+  if (maxAgeDays <= 0) return [];
+  const r2 = cfg.credentials.r2;
+  if (!r2.bucket || !cfg.name) return [];
+  let records: LogCredential[];
+  try {
+    records = downloadLogsFromR2(r2.bucket, cfg.name).credentials;
+  } catch {
+    return [{ name: "credential age", ok: false, detail: "could not read the run-log from R2", optional: true }];
+  }
+  return credentialVerdicts(records, track, maxAgeDays, Date.now()).map((v) => ({
+    name: `credential age (${v.prefix})`,
+    ok: v.state === "ok",
+    detail: v.message,
+    optional: true,
+  }));
+}
+
+async function probeVerifyDurable(): Promise<ProbeResult[]> {
+  const cfg = loadVerifyDurableConfig();
+  return [...(await probeRestore(cfg)), ...probeCredentialAge(cfg)];
+}
 
 async function probeStaleness(): Promise<ProbeResult[]> {
   const cfg = loadStalenessConfig();

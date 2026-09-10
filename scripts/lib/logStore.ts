@@ -14,10 +14,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getProfile } from "./config.js";
 import type { LogRun, LogVerification } from "./backupTypes.js";
+import type { LogCredential } from "./credentialAge.js";
 
 export interface RawLog {
   runs: LogRun[];
   verifications: LogVerification[];
+  /** Credential-rotation records — see lib/credentialAge.ts. */
+  credentials: LogCredential[];
 }
 
 export interface LogStore extends RawLog {
@@ -45,11 +48,12 @@ export function compactStamp(iso: string): string {
 export function readLogDir(dir: string): RawLog {
   const runs: LogRun[] = [];
   const verifications: LogVerification[] = [];
+  const credentials: LogCredential[] = [];
   let files: string[];
   try {
     files = readdirSync(dir);
   } catch {
-    return { runs, verifications };
+    return { runs, verifications, credentials };
   }
   for (const f of files) {
     if (!f.endsWith(".jsonl")) continue;
@@ -59,12 +63,13 @@ export function readLogDir(dir: string): RawLog {
         const o = JSON.parse(ln);
         if (f.startsWith("runs-")) runs.push(o as LogRun);
         else if (f.startsWith("verifications-")) verifications.push(o as LogVerification);
+        else if (f.startsWith("credentials-")) credentials.push(o as LogCredential);
       } catch {
         /* skip malformed line */
       }
     }
   }
-  return { runs, verifications };
+  return { runs, verifications, credentials };
 }
 
 /** rclone-copy every _log/<basename>/*.jsonl to a tmpdir and parse it. Uses the `r2` remote. */

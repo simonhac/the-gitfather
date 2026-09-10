@@ -161,6 +161,20 @@ const verifyDurableGroup = z
   })
   .strict().prefault({} as never);
 
+const credentialRotationGroup = z
+  .object({
+    // Days before a credential counts as due for rotation. 0 disables the check.
+    // Deliberately generous: this is hygiene, not an incident — the point is that a credential
+    // nobody has touched since the day it was minted stops being invisible.
+    maxAgeDays: intIn(365, 0, 3650),
+    // Credential prefixes to age-check, matching the env-var names (R2_ACCESS_KEY_ID → "R2").
+    // A prefix listed here with NO recorded rotation reports `unknown`, which is the state that
+    // makes this worth running — see lib/credentialAge.ts.
+    track: z.array(z.string().min(1)).prefault(["R2"]),
+  })
+  .strict()
+  .prefault({} as never);
+
 const stalenessGroup = z
   .object({
     // Primary trigger is slot-based (slotMinutes/graceMinutes); maxAgeHours is a backstop that still
@@ -300,6 +314,7 @@ export const profileSchema = z.object({
   integrity: integrityGroup,
   archive: archiveGroup,
   retention: retentionGroup,
+  credentialRotation: credentialRotationGroup,
   drill: drillGroup,
   verifyDurable: verifyDurableGroup,
   staleness: stalenessGroup,

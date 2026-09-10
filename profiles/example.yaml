@@ -92,6 +92,17 @@ verify-durable:                # daily durable-tier verification (verify-durable
   retest-days: 14              # age at which a weekly/monthly is aged-due (13 to stay inside the WORM lock)
   max-restores: 2              # cap full restores per run (hash-checks uncapped)
 
+# Credential-rotation ageing. The rotation date is recorded by roll-r2-token.ts when it publishes —
+# that is the only durable trace, since a GitHub secret cannot be read back and listing repository
+# secrets needs a token more privileged than the job that would do the checking. Reported daily by
+# verify-durable (a Slack note, never a failure — an old token cannot corrupt a backup) and on
+# demand by `npm run doctor -- verify-durable`.
+credential-rotation:
+  max-age-days: 365            # 0 disables. Generous on purpose: this is hygiene, not an incident.
+  track: [R2]                  # credential prefixes, matching the env-var names (R2_ACCESS_KEY_ID → R2).
+                               # A tracked prefix with NO recorded rotation reports `unknown` — which
+                               # is the case this check exists for, so it is reported, not skipped.
+
 staleness:                     # check-staleness.ts
   slot-minutes: 120            # backup cadence in minutes — MUST match the backup cron interval (0 */2 = 120)
   grace-minutes: 25            # minutes past a slot boundary before it's "overdue" — trades faster recovery

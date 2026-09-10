@@ -74,6 +74,24 @@ Two flags carry real meaning rather than convenience:
 - **`--dry-run`** runs the mate and connect checks and writes nothing anywhere. It answers "is this
   credential any good?" without a vault, and it is how the guards themselves are tested.
 
+### Knowing when a rotation is overdue
+
+`roll-r2-token.ts` records each rotation into the run-log (`_log/<name>/credentials-YYYY-MM.jsonl`,
+holding no secret — the key-id tail is four characters). That record is the only durable trace a
+rotation happened: a GitHub secret cannot be read back, and listing repository secrets needs a token
+more privileged than the job that would do the checking.
+
+From it, two read-outs — configure with `credential-rotation:` in the profile:
+
+- **daily**, in `verify-durable`: one line per tracked credential, and a Slack note when any is
+  overdue. Never a failure — an ageing token cannot corrupt a backup.
+- **on demand**: `npm run doctor -- verify-durable`, as an optional ⚠ check.
+
+The rule that makes it worth running: **absence is not health**. A tracked credential with no
+recorded rotation reports `unknown`, and `unknown` is grouped with `due`, not with `ok` — otherwise
+the check would be loudest about the credentials someone is already looking after and silent about
+the one that has sat untouched since the day it was minted.
+
 ### The three values Cloudflare shows you
 
 Only two are independent ([R2 API tokens](https://developers.cloudflare.com/r2/api/tokens/)):
