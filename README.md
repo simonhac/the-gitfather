@@ -29,8 +29,9 @@ the-gitfather/
     verify-durable-pg.ts  # DAILY: hash-check each durable object + restore freshest daily + re-restore aged weekly/monthly
     check-staleness.ts    # alert if no fresh backup landed recently; self-heal a missed tick
     build-dashboard.ts    # render the static backup-history dashboard from the R2 run-logs
+    roll-r2-token.ts      # escrow a rolled/minted R2 token: verify → 1Password → GitHub secrets
     runlog.ts             # append-only run/verification log in R2 (the dashboard's source of truth)
-    lib/                  # config, profile, duration, pgconn, slack, proc, logStore, pgRestore, preflight, bootEnv, schedule, backupTypes, backupHistory (all .ts)
+    lib/                  # config, profile, duration, pgconn, slack, proc, logStore, pgRestore, preflight, bootEnv, schedule, backupTypes, backupHistory, r2Token (all .ts)
     __tests__/            # unit + bash-parity tests (node:test via tsx)
   dashboard/              # single-file static dashboard (template + SVG heatmap renderer)
   profiles/example.yaml    # copy this into YOUR repo and edit
@@ -41,6 +42,52 @@ the-gitfather/
 ```
 
 Built as a GitHub-Actions toolkit (TypeScript run via `tsx`), but every script is runnable locally for testing.
+
+---
+
+## Rotating an R2 token — `npm run roll-r2`
+
+Rolling an R2 API token is the only way to **learn** its credential: neither Cloudflare nor GitHub
+will show you an existing one again. So the roll is simultaneously the one moment escrow is
+possible and the one moment it is easy to get wrong — the old credential dies immediately, the new
+one is displayed once, and nothing downstream can be read back to check what you stored.
+
+```bash
+npm run roll-r2 -- --vault <1password-vault> --bucket <r2-bucket> --account-id <cf-account> \
+  [--prefix R2] [--repo owner/name] [--dry-run]
+```
+
+It does the checks in the order that fails cheapest, and writes nothing until they pass:
+
+| | |
+|---|---|
+| **1. Mate** | `SHA-256(token value)` must equal the Secret Access Key you were shown. Halves of two different tokens is otherwise a silent failure deferred to the next backup. |
+| **2. Connect** | the credential must actually list the bucket — **before** anything is stored. A credential proven at rest is not a credential proven to work. |
+| **3. Escrow** | write 1Password, then read it **back** and compare bytes. |
+| **4. Publish** | set the GitHub secrets from what 1Password returned, never from the paste buffer, and assert the `updatedAt` timestamps moved. |
+
+Two flags carry real meaning rather than convenience:
+
+- **`--repo` is optional.** An operator credential (a read-only token for DR listing) must never
+  reach CI, so "escrow without publishing" is a first-class mode rather than a step you remember
+  not to run.
+- **`--dry-run`** runs the mate and connect checks and writes nothing anywhere. It answers "is this
+  credential any good?" without a vault, and it is how the guards themselves are tested.
+
+### The three values Cloudflare shows you
+
+Only two are independent ([R2 API tokens](https://developers.cloudflare.com/r2/api/tokens/)):
+
+| value | what it is |
+|---|---|
+| **Token value** | the credential itself, shown once on create or roll |
+| **Access Key ID** | the token's `id` — a roll reissues the *value*, so this survives a roll |
+| **Secret Access Key** | `SHA-256(token value)`, hex |
+
+Two consequences the dashboard does not spell out. The **token value is strictly more recoverable
+than the secret** — keep it and the secret can always be recomputed, so escrowing only the secret
+throws information away. And the derivation gives a **free mate check**, the same shape as
+`age-keygen -y` proving an age identity is the mate of its recipient.
 
 ---
 
