@@ -48,6 +48,9 @@
   .legend { display: flex; flex-wrap: wrap; gap: 16px; margin: 0 0 14px; font-size: 12px; color: var(--muted); }
   .legend-item { display: flex; align-items: center; gap: 6px; }
   .swatch { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+  /* Divides the backup keys from the archive keys. Red, amber and empty mean the same on both
+     sides of it, so it separates two vocabularies rather than introducing a third. */
+  .legend-sep { width: 1px; height: 14px; background: var(--border); align-self: center; }
   .scroll { overflow-x: auto; padding-bottom: 6px; }
   .heatmap { display: block; }
   .footer { margin-top: 18px; font-size: 12px; color: var(--muted); }
@@ -56,6 +59,23 @@
     background: var(--card); color: var(--fg); border: 1px solid var(--border);
     border-radius: 8px; padding: 9px 11px; font-size: 12px; line-height: 1.45;
     box-shadow: 0 8px 28px rgba(16,24,40,0.16);
+  }
+  /* Beak: a 9px square rotated 45°, half-buried in the panel so only its outer two edges show. Its
+     background covers the panel border it straddles, so the two read as one outline. `--beak-x` is
+     set per-panel from the cell's centre, so a panel clamped against the viewport edge still points
+     at the right cell. It matters more than it looks: a screenshot has no cursor in it, and a tip
+     floating near an 11px square would otherwise be about nothing in particular. */
+  .tip::after {
+    content: ""; position: absolute; width: 9px; height: 9px;
+    left: var(--beak-x, 20px); margin-left: -4.5px;
+    background: var(--card); transform: rotate(45deg);
+    top: -5px; border-left: 1px solid var(--border); border-top: 1px solid var(--border);
+  }
+  /* Flipped above the cell (no room below) — the beak moves to the bottom edge and points down. */
+  .tip.above::after {
+    top: auto; bottom: -5px;
+    border-left: 0; border-top: 0;
+    border-right: 1px solid var(--border); border-bottom: 1px solid var(--border);
   }
   .tip-when { font-weight: 620; margin-bottom: 3px; }
   .tip-state { display: flex; align-items: center; gap: 6px; }

@@ -182,6 +182,16 @@ function joinKey(...segments: string[]): string {
 
 const partTag = (part: number): string => `p${String(part).padStart(3, "0")}`;
 
+/**
+ * The schema-stripped table name: "public.api_logs" → "api_logs". This is the form that appears in
+ * object keys (a key already carries the project name, so the schema adds nothing but length) and
+ * the form published to the dashboard — the profile's schema layout is not the dashboard's business.
+ * Callers pass this as `KeyParts.table`; the run-log keeps the fully-qualified name.
+ */
+export function shortTableName(table: string): string {
+  return table.includes(".") ? table.split(".").pop()! : table;
+}
+
 export interface KeyParts {
   prefix: string;
   name: string;

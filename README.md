@@ -4,7 +4,7 @@
 > driven by GitHub Actions, stored on Cloudflare R2.
 
 <p align="center">
-  <img src="docs/dashboard.png" alt="the-gitfather backup-history dashboard — GFS heatmap with per-tier retention, storage and R2 cost" width="900">
+  <img src="docs/dashboard.png" alt="the-gitfather backup-history dashboard — GFS heatmap with per-tier retention, per-table archive columns, storage and R2 cost" width="900">
 </p>
 
 <p align="center"><sub>The static <a href="#backup-history-dashboard">backup-history dashboard</a> — every 8-hourly backup over a 1-year window, with restore-verified drills, storage and estimated R2 cost.</sub></p>
@@ -660,6 +660,22 @@ bucket + custom domain, e.g. `https://ops.example.com/backups/<name>/index.html`
 > ratio + run links; it **drops raw error text** (set `dashboard.hide-run-links: true` to also drop run
 > links). The rich raw logs never leave the private bucket. To make the page itself private, front the
 > public bucket with a custom domain + Cloudflare Access — no code change.
+
+**Archive columns.** When the profile has an [`archive:`](#archiving-a-table-out-of-postgres) block, a
+narrow **sibling block appears to the right of the heatmap** — one column per archived table, labelled
+`T1`, `T2`, … (the key from `Tn` to the table name is in the legend, the header sentence and every
+tooltip). It shares the heatmap's row pitch, so each archive run sits on the row of the **week it ran
+in** — beside the weekly backup it follows a few hours later. Cells read: **blue** = rows archived
+(and pruned), **hollow** = it ran but nothing was eligible (or it was a dry run), **amber** = prune
+refusals or anomalies, a human must look, **red** = the run failed, **nothing** = no archive run that
+week. Multiple runs in one week notch the cell and click to a chooser, exactly as backup slots do.
+A third row of stat cards appears alongside — `Rows archived`, `Rows pruned`, `Archive stored`,
+`Archive issues` — and `Stored` / `Est. cost` fold in the archive objects, since they share the bucket
+and the bill. Archive runs do **not** count toward `Total runs` / `Failed`: those cards are about
+backups. It reads `_log/<basename>/archives-YYYY-MM.jsonl` (one record per **table** per run, written
+by `archive-table.ts` since day one) and scrubs it the same way — no `error`, no `runId`, schema
+stripped from the table name; row counts and object sizes are published, like dump sizes already are.
+A profile with no `archive:` block renders exactly the page it did before.
 
 Set **`dashboard.url`** in the profile to hyperlink the "`<basename> DB backup`" title — in the daily
 Slack header **and in every failure alert** — to the published page. The public hostname isn't derivable from the bucket name — fetch it once with

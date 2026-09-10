@@ -88,10 +88,19 @@ test("readLogDir picks up the file appendCredential writes — the writer/reader
   const month = rec.ts.slice(0, 7);
   writeFileSync(join(dir, `credentials-${month}.jsonl`), `${JSON.stringify(rec)}\n`);
   writeFileSync(join(dir, `runs-${month}.jsonl`), `${JSON.stringify({ ts: rec.ts, ok: true, tiers: [] })}\n`);
+  // Same seam for the archive log: it shares the directory, and every kind must land in its own
+  // bucket — a record read into the WRONG array would render as a malformed cell rather than
+  // simply going missing, which is harder to notice.
+  writeFileSync(
+    join(dir, `archives-${month}.jsonl`),
+    `${JSON.stringify({ ts: rec.ts, ok: true, table: "public.api_logs", mode: "both", dryRun: "none", weeksArchived: 1, rowsArchived: 10, weeksPruned: 0, rowsPruned: 0, bytes: 99, refusals: 0, anomalies: 0, error: null, durationMs: 1, runId: null, runUrl: null })}\n`,
+  );
 
   const log = readLogDir(dir);
   assert.equal(log.credentials.length, 1, "the credential record was read");
   assert.equal(log.credentials[0].prefix, "R2");
   assert.equal(log.runs.length, 1, "and runs still parse alongside it");
+  assert.equal(log.archives.length, 1, "and the archive record lands in its own array");
+  assert.equal(log.archives[0].table, "public.api_logs");
   assert.equal(credentialVerdicts(log.credentials, ["R2"], 365, NOW)[0].ageDays, 3);
 });

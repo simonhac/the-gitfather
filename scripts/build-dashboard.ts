@@ -21,8 +21,17 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadDashboardConfig, retentionFromConfig, joinObjectKey } from "./lib/config.js";
 import { readLogDir, downloadLogsFromR2 } from "./lib/logStore.js";
+import { shortTableName } from "./lib/archive.js";
 import { HOURS_PER_SLOT, SLOT_MINUTES } from "./lib/backupTypes.js";
-import type { LogRun, LogVerification, PublicPayload, BackupTier } from "./lib/backupTypes.js";
+import type {
+  LogRun,
+  LogVerification,
+  LogArchive,
+  PublicPayload,
+  PublicArchiveRun,
+  PublicArchiveTable,
+  BackupTier,
+} from "./lib/backupTypes.js";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const HEATMAP = join(SCRIPT_DIR, "../dashboard/heatmap.ts");
@@ -43,8 +52,47 @@ const label = cfg.dashboard.label ?? cfg.name ?? "database";
 const hideLinks = cfg.dashboard.hideRunLinks;
 const retention = retentionFromConfig(cfg.retention);
 
-function scrub(runs: LogRun[], verifications: LogVerification[]): PublicPayload {
-  return {
+/** One archived table as the profile declares it — the fully-qualified name plus its windows. */
+interface ArchiveSpec {
+  table: string;
+  archiveAfterWeeks: number;
+  pruneAfterWeeks: number;
+}
+
+/** The profile's `archive.tables`, in profile order. Empty when the profile archives nothing. */
+function profileArchiveSpecs(): ArchiveSpec[] {
+  return cfg.archive.tables.map((t) => ({
+    table: t.table,
+    archiveAfterWeeks: t.archiveAfterWeeks,
+    pruneAfterWeeks: t.pruneAfterWeeks,
+  }));
+}
+
+/**
+ * Fully-qualified table name → the name published to the dashboard. Normally the schema-stripped
+ * short name (the schema is a detail of the profile's layout, not the dashboard's business); but
+ * two tables in different schemas can share a short name — the config only rejects duplicate
+ * FULLY-QUALIFIED names — and one column silently merging two tables would be a worse outcome than
+ * one published schema name, so a collision leaves BOTH fully qualified.
+ */
+function publishedTableNames(fullNames: string[]): Map<string, string> {
+  const claims = new Map<string, Set<string>>();
+  for (const full of fullNames) {
+    const short = shortTableName(full);
+    const set = claims.get(short) ?? new Set<string>();
+    set.add(full);
+    claims.set(short, set);
+  }
+  return new Map(fullNames.map((full) => [full, claims.get(shortTableName(full))!.size > 1 ? full : shortTableName(full)]));
+}
+
+function scrub(
+  runs: LogRun[],
+  verifications: LogVerification[],
+  archives: LogArchive[],
+  archiveSpecs: ArchiveSpec[],
+): PublicPayload {
+  const payload: PublicPayload = {
     label,
     generatedAt: process.env.DASHBOARD_NOW || new Date().toISOString(),
     retention, // per-tier windows in effect (from the profile; defaults otherwise) — drives expiry + subtitle
@@ -53,6 +101,37 @@ function scrub(runs: LogRun[], verifications: LogVerification[]): PublicPayload 
     // kind drives the tooltip wording (restore vs byte-check); counts/reason/key/tier stay private.
     verifications: verifications.map((v) => ({ vt: v.verifiedTs, ok: v.ok, ratio: v.ratio, kind: v.kind })),
   };
+
+  // Column order: the profile's tables first, then any table seen only in the log — a table dropped
+  // from `archive.tables` keeps its column, because the rows it moved are still out there.
+  const order = [...new Set([...archiveSpecs.map((t) => t.table), ...archives.map((a) => a.table)])];
+  if (order.length === 0) return payload; // no archive block → a page identical to the pre-archive one
+
+  const specByTable = new Map(archiveSpecs.map((t) => [t.table, t]));
+  const nameOf = publishedTableNames(order);
+  const tables: PublicArchiveTable[] = order.map((full) => ({
+    table: nameOf.get(full)!,
+    archiveAfterWeeks: specByTable.get(full)?.archiveAfterWeeks ?? null,
+    pruneAfterWeeks: specByTable.get(full)?.pruneAfterWeeks ?? null,
+  }));
+  // Privacy: drop raw error text + runId + durationMs, and publish the short table name. Row counts
+  // and bytes are kept, under the same decision that already publishes dump sizes.
+  const archiveRuns: PublicArchiveRun[] = archives.map((a) => ({
+    t: a.ts,
+    ok: a.ok,
+    table: nameOf.get(a.table)!,
+    mode: a.mode,
+    dryRun: a.dryRun,
+    weeksArchived: a.weeksArchived,
+    rowsArchived: a.rowsArchived,
+    weeksPruned: a.weeksPruned,
+    rowsPruned: a.rowsPruned,
+    bytes: a.bytes,
+    refusals: a.refusals,
+    anomalies: a.anomalies,
+    runUrl: hideLinks ? null : a.runUrl,
+  }));
+  return { ...payload, archive: { tables, runs: archiveRuns } };
 }
 
 function escHtml(s: string): string {
@@ -62,16 +141,27 @@ function escHtml(s: string): string {
 async function main(): Promise<void> {
   let runs: LogRun[];
   let verifications: LogVerification[];
+  let archives: LogArchive[];
+  // --sample has no profile to read windows from, so it carries its own; the real paths take theirs
+  // from `archive.tables`.
+  let archiveSpecs: ArchiveSpec[];
   if (useSample) {
-    ({ runs, verifications } = makeSample(new Date()));
+    ({ runs, verifications, archives, archiveSpecs } = makeSample(new Date()));
   } else if (logdir) {
-    ({ runs, verifications } = readLogDir(logdir));
+    ({ runs, verifications, archives } = readLogDir(logdir));
+    archiveSpecs = profileArchiveSpecs();
   } else {
     if (!cfg.credentials.r2.bucket || !cfg.name) throw new Error("R2_BUCKET / profile name must be set to read logs from R2");
-    ({ runs, verifications } = downloadLogsFromR2(cfg.credentials.r2.bucket, cfg.name));
+    ({ runs, verifications, archives } = downloadLogsFromR2(cfg.credentials.r2.bucket, cfg.name));
+    archiveSpecs = profileArchiveSpecs();
   }
-  const payload = scrub(runs, verifications);
-  console.log(`dashboard: ${payload.runs.length} runs, ${payload.verifications.length} verifications (label="${label}")`);
+  const payload = scrub(runs, verifications, archives, archiveSpecs);
+  const archiveNote = payload.archive
+    ? `, ${payload.archive.runs.length} archive records over ${payload.archive.tables.length} table(s)`
+    : "";
+  console.log(
+    `dashboard: ${payload.runs.length} runs, ${payload.verifications.length} verifications${archiveNote} (label="${label}")`,
+  );
 
   const bundled = await build({
     entryPoints: [HEATMAP],
@@ -125,7 +215,21 @@ async function main(): Promise<void> {
 // failures, and one believable outage. Spans a bit more than the 52-week grid so daily/weekly
 // anchors visibly age to grey within the visible window.
 const SAMPLE_DAYS = 380;
-function makeSample(now: Date): { runs: LogRun[]; verifications: LogVerification[] } {
+// The archive columns need their own sample: two tables on DIFFERENT windows (so the header
+// sentence's harder "each on its own schedule" branch is the one you actually look at), starting
+// part-way into the window so the empty band before archiving began is visible as a band rather
+// than as a bug.
+const SAMPLE_ARCHIVE_WEEKS = 30;
+const SAMPLE_ARCHIVE_SPECS: ArchiveSpec[] = [
+  { table: "public.api_logs", archiveAfterWeeks: 4, pruneAfterWeeks: 13 },
+  { table: "public.audit_events", archiveAfterWeeks: 8, pruneAfterWeeks: 26 },
+];
+function makeSample(now: Date): {
+  runs: LogRun[];
+  verifications: LogVerification[];
+  archives: LogArchive[];
+  archiveSpecs: ArchiveSpec[];
+} {
   let seed = 20260619;
   const rand = () => {
     seed = (seed + 0x6d2b79f5) | 0;
@@ -206,7 +310,76 @@ function makeSample(now: Date): { runs: LogRun[]; verifications: LogVerification
     if (drillRan.getTime() > end) continue;
     verifications.push({ ts: drillRan.toISOString().replace(".000", ""), verifiedTs, ok: rand() < 0.97, ratio: 0.97 + rand() * 0.03, runId: null, runUrl: null });
   }
-  return { runs, verifications };
+
+  // ── Archive history ────────────────────────────────────────────────────────
+  // The archive runs weekly at Sunday 19:30 UTC — 3.5 h after the 16:00 UTC anchor that becomes the
+  // weekly backup — so in any display timezone the two land in the same week row. That alignment is
+  // the whole point of the sibling columns, so the sample must reproduce it exactly.
+  const archives: LogArchive[] = [];
+  const lastArchive = (() => {
+    const d = new Date(end);
+    d.setUTCHours(19, 30, 0, 0);
+    while (d.getUTCDay() !== 0 || d.getTime() > end) d.setUTCDate(d.getUTCDate() - 1);
+    return d.getTime();
+  })();
+  const archiveRecord = (t: number, table: string, over: Partial<LogArchive> = {}): LogArchive => ({
+    ts: iso(t), ok: true, table, mode: "both", dryRun: "none",
+    weeksArchived: 1, rowsArchived: 0, weeksPruned: 0, rowsPruned: 0,
+    bytes: 0, refusals: 0, anomalies: 0, error: null, durationMs: 41_000, runId: null, runUrl: ghRun(t),
+    ...over,
+  });
+  // Per-table weekly volume: a chatty log table and a much smaller audit trail.
+  const VOLUME: Record<string, { rows: number; spread: number; bytesPerRow: number }> = {
+    "public.api_logs": { rows: 45_000, spread: 10_000, bytesPerRow: 64 },
+    "public.audit_events": { rows: 8_000, spread: 4_000, bytesPerRow: 88 },
+  };
+
+  for (let w = 0; w < SAMPLE_ARCHIVE_WEEKS; w++) {
+    const t = lastArchive - w * 7 * 86_400_000;
+    // The whole run failed this week — every table's record is marked not-ok, as archive-table.ts
+    // does (one `failure` stamps all of them).
+    const runFailed = w === 10;
+    for (const spec of SAMPLE_ARCHIVE_SPECS) {
+      const v = VOLUME[spec.table];
+      const rows = Math.round(v.rows + rand() * v.spread);
+      if (runFailed) {
+        archives.push(archiveRecord(t, spec.table, {
+          ok: false, weeksArchived: 0, weeksPruned: 0, bytes: 0, durationMs: 12_000,
+          error: "archive: could not acquire the store lock",
+        }));
+        continue;
+      }
+      // Nothing was eligible this week — it ran, the database did not change.
+      if (w === 3) {
+        archives.push(archiveRecord(t, spec.table, { weeksArchived: 0, bytes: 0, durationMs: 9_000 }));
+        continue;
+      }
+      // The fingerprint gate declined to delete: not a breakage, but somebody must look.
+      const refusing = w === 6 && spec.table === "public.api_logs";
+      // Pruning only starts once the first archived weeks have aged past prune-after-weeks.
+      const pruning = w <= SAMPLE_ARCHIVE_WEEKS - 10;
+      archives.push(archiveRecord(t, spec.table, {
+        ok: !refusing,
+        rowsArchived: rows,
+        bytes: rows * v.bytesPerRow,
+        weeksPruned: pruning && !refusing ? 1 : 0,
+        rowsPruned: pruning && !refusing ? Math.round(v.rows + rand() * v.spread) : 0,
+        refusals: refusing ? 2 : 0,
+        error: refusing ? "prune refused: live fingerprint does not match the manifest" : null,
+      }));
+    }
+    // A manual backfill alongside the scheduled run — exercises the notch + chooser in a column.
+    if (w === 14) {
+      const backfill = t + 3 * 3_600_000;
+      const v = VOLUME["public.api_logs"];
+      const rows = Math.round(v.rows * 3 + rand() * v.spread);
+      archives.push(archiveRecord(backfill, "public.api_logs", {
+        mode: "archive", weeksArchived: 3, rowsArchived: rows, bytes: rows * v.bytesPerRow, durationMs: 156_000,
+      }));
+    }
+  }
+
+  return { runs, verifications, archives, archiveSpecs: SAMPLE_ARCHIVE_SPECS };
 }
 
 main().catch((e) => {

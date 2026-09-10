@@ -241,6 +241,38 @@ export interface PublicVerification {
   kind?: "restore" | "hash"; // for the dashboard tooltip; counts/reason/key/tier stay private
 }
 
+/**
+ * One archive-task record, scrubbed for publication. Drops `error` (raw failure text is never
+ * published, exactly as for LogRun), `runId` and `durationMs`, and publishes the SHORT table name —
+ * the profile's schema layout is nobody else's business. Row counts and byte sizes ARE published,
+ * following the same decision that already publishes dump sizes.
+ */
+export interface PublicArchiveRun {
+  t: string; // ts
+  ok: boolean;
+  /** Schema-stripped table name (see lib/archive.ts shortTableName). */
+  table: string;
+  mode: "archive" | "prune" | "both";
+  dryRun: "none" | "source" | "store";
+  weeksArchived: number;
+  rowsArchived: number;
+  weeksPruned: number;
+  rowsPruned: number;
+  bytes: number | null;
+  refusals: number;
+  anomalies: number;
+  runUrl: string | null;
+}
+
+/** One archived table and its windows — drives the column order and the header sentence. */
+export interface PublicArchiveTable {
+  /** Schema-stripped table name. */
+  table: string;
+  /** null when the table appears only in the log (dropped from the profile since it last ran). */
+  archiveAfterWeeks: number | null;
+  pruneAfterWeeks: number | null;
+}
+
 export interface PublicPayload {
   /** Generic project label, e.g. "mydb" (the profile's name / dashboard.label). */
   label: string;
@@ -250,6 +282,12 @@ export interface PublicPayload {
   retention: RetentionMap;
   runs: PublicRun[];
   verifications: PublicVerification[];
+  /**
+   * Row-retirement history, present only when the profile archives tables (or the log holds archive
+   * records). Absent → the dashboard renders exactly as it did before archive columns existed: no
+   * columns, no legend keys, no stats row, no blurb.
+   */
+  archive?: { tables: PublicArchiveTable[]; runs: PublicArchiveRun[] };
 }
 
 // ── Derived grid types ───────────────────────────────────────────────────────
@@ -305,4 +343,100 @@ export interface BackupStats {
   expired: number;
   latestLabel: string | null;
   latestState: BackupCellState | null;
+}
+
+// ── Derived archive-column types ─────────────────────────────────────────────
+// The archive block is a SIBLING of the backup grid, not an eighth day: same row pitch (so a run
+// sits on the row of the week it happened in), one narrow column per table, its own states.
+
+/**
+ * An archive cell's state. Deliberately NOT reusing BackupCellState — an archive is not a backup,
+ * it is the permanent home of rows that have left Postgres, and the two must not share a colour.
+ *
+ *   archived  — ran and moved work (bright archive hue)
+ *   quiet     — ran, nothing was eligible, or it was a dry run (hollow)
+ *   attention — prune refusals or anomalies: a human must look (amber, as for a failed drill)
+ *   failed    — the run itself failed (red)
+ */
+export type ArchiveCellState = "archived" | "quiet" | "attention" | "failed";
+
+/** One archive record within a week/table cell (a cell can hold several — a manual backfill). */
+export interface ArchiveSlotRun {
+  run: PublicArchiveRun;
+  state: ArchiveCellState;
+  /** Display-timezone wall-clock label, e.g. "Mon 7 Sep 2026, 5:30 am AEST". */
+  whenLabel: string;
+}
+
+export interface ArchiveCell {
+  row: number; // 0 = most-recent week (top) — the same row index as the backup grid
+  /** Short table name; the key into ArchiveColumns.tables. */
+  table: string;
+  /** All records for this table in this week, time-sorted (length >= 1). */
+  runs: ArchiveSlotRun[];
+  /** Headline state — the best success among the runs, else the worst problem. */
+  state: ArchiveCellState;
+  /** Best of archived/quiet among the untroubled runs (null if every run had a problem). */
+  successState: ArchiveCellState | null;
+  /**
+   * Worst of failed/attention among the troubled runs (null if none). BackupCell gets away with a
+   * `hasFailure` boolean because failure has one colour; archives have two, and the diagonal split
+   * needs to know which one to paint.
+   */
+  problemState: ArchiveCellState | null;
+  /** True if the week holds more than one record for this table (→ notch + possible split). */
+  multiple: boolean;
+}
+
+export interface ArchiveColumns {
+  /** Short table names in column order: profile order first, then log-only stragglers. */
+  tables: string[];
+  /** One entry per week row, index-aligned with BackupGrid.rows: table → cell. */
+  rows: Map<string, ArchiveCell>[];
+}
+
+export interface ArchiveStats {
+  rowsArchived: number;
+  rowsPruned: number;
+  /** Runs that failed or need a look — the one number an operator should want to be zero. */
+  issues: number;
+}
+
+/**
+ * The archive header sentence, split the way slotCadence splits the cadence: `emphasis` is the bit
+ * the subtitle renders in <em>, so the wording stays a unit-tested pure string instead of markup
+ * assembled in the renderer. Tables are referenced by their column label ("T1 api_logs") so the
+ * sentence doubles as the key to the columns.
+ */
+export function archiveBlurb(tables: PublicArchiveTable[]): { lead: string; emphasis: string; tail: string } {
+  const weeks = (n: number): string => `${n} week${n === 1 ? "" : "s"}`;
+  const labels = tables.map((t, i) => `T${i + 1} ${t.table}`);
+  const emphasis =
+    labels.length <= 1
+      ? (labels[0] ?? "")
+      : `${labels.slice(0, -1).join(", ")} and ${labels[labels.length - 1]}`;
+
+  const lead = "Off to the right, one column per archived table — old rows of ";
+  const opening = " leave Postgres for permanent per-week archive objects";
+  // A table dropped from the profile keeps its column (its history is still real) but its windows
+  // are no longer knowable, so it is left out of the schedule clause rather than guessed at.
+  const known = tables.filter((t) => t.archiveAfterWeeks != null && t.pruneAfterWeeks != null);
+  if (known.length === 0) return { lead, emphasis, tail: `${opening}.` };
+
+  const uniform =
+    known.length === tables.length &&
+    known.every((t) => t.archiveAfterWeeks === known[0].archiveAfterWeeks && t.pruneAfterWeeks === known[0].pruneAfterWeeks);
+  if (uniform) {
+    return {
+      lead,
+      emphasis,
+      tail:
+        `${opening}: archived once ${weeks(known[0].archiveAfterWeeks!)} old, ` +
+        `deleted from the database once ${weeks(known[0].pruneAfterWeeks!)} old.`,
+    };
+  }
+  const each = known.map(
+    (t) => `${t.table} archived once ${weeks(t.archiveAfterWeeks!)} old and deleted once ${weeks(t.pruneAfterWeeks!)} old`,
+  );
+  return { lead, emphasis, tail: `${opening}, each on its own schedule: ${each.join("; ")}.` };
 }
