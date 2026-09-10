@@ -274,7 +274,10 @@ legendGroup("Runs", [
   ["Failed", null, one("failed")],
   ["Needs a look", "b-ok", one("attention")],
   ["Mixed outcomes", "b-ok", { worst: "failed", second: "ok", codes: 2 }],
-  ["Ran, stored nothing", null, one("ok")],
+  // A clean run with nothing beneath it. Under the two-channel split this no longer means "stored
+  // nothing" — an archiver run stores some OTHER week's rows — it means the run went clean and the
+  // body has nothing of its own to say.
+  ["Ran clean", null, one("ok")],
 ]);
 
 // The Tn → table-name key. Mono, so it reads as the label it is rather than as prose.
