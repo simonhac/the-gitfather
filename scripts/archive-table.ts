@@ -67,6 +67,7 @@ import {
   archiveObjectKey,
   manifestObjectKey,
   indexObjectKey,
+  shortTableName,
   planArchive,
   planPrune,
   parsePruneManifest,
@@ -277,7 +278,7 @@ async function archiveWeek(ctx: {
   result: TableRun;
 }): Promise<void> {
   const { cfg, pg, store, workDir, prefix, name, table, timeColumn, week, states, mayWriteStore, result } = ctx;
-  const short = table.includes(".") ? table.split(".").pop()! : table;
+  const short = shortTableName(table);
 
   const live = pg.fingerprint(table, timeColumn, week);
   const plan = planArchive(states.get(week.label), live);
@@ -424,7 +425,7 @@ async function pruneWeek(ctx: {
   result: TableRun;
 }): Promise<void> {
   const { pg, store, workDir, prefix, name, table, timeColumn, week, batchRows, states, mayDeleteRows, result } = ctx;
-  const short = table.includes(".") ? table.split(".").pop()! : table;
+  const short = shortTableName(table);
   const state = states.get(week.label);
   const live = pg.fingerprint(table, timeColumn, week);
   const plan = planPrune(state, live);
@@ -515,7 +516,7 @@ async function processTable(ctx: {
   const prefix = cfg.archive.storePrefix!;
   const name = cfg.name!;
   const table = spec.table;
-  const short = table.includes(".") ? table.split(".").pop()! : table;
+  const short = shortTableName(table);
   const timeColumn = spec.timeColumn;
   const result: TableRun = {
     table,
@@ -701,7 +702,7 @@ async function main(): Promise<void> {
   try {
     if (args["rebuild-index"]) {
       for (const spec of specs) {
-        const short = spec.table.includes(".") ? spec.table.split(".").pop()! : spec.table;
+        const short = shortTableName(spec.table);
         const n = await rebuildIndex(store, cfg.archive.storePrefix!, short, pg, spec);
         log(`rebuilt index for ${spec.table}: ${n} week(s)`);
       }

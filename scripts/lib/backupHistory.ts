@@ -14,12 +14,18 @@ import {
   type PublicRun,
   type PublicVerification,
   type PublicPayload,
+  type PublicArchiveRun,
   type BackupCellState,
   type SlotRun,
   type BackupCell,
   type BackupRow,
   type BackupGrid,
   type BackupStats,
+  type ArchiveCellState,
+  type ArchiveSlotRun,
+  type ArchiveCell,
+  type ArchiveColumns,
+  type ArchiveStats,
 } from "./backupTypes.js";
 import { tzAbbrev } from "./tzAbbrev.js";
 
@@ -75,6 +81,35 @@ function ordinalToDate(ordinal: number): { y: number; mo: number; day: number } 
 export function weekStartLabel(ordinal: number): string {
   const { y, mo, day } = ordinalToDate(ordinal);
   return `${String(day).padStart(2, "0")} ${MONTH_SHORT[mo - 1]} ${String(y).slice(-2)}`;
+}
+
+/**
+ * The ordinal of the Monday that starts the week containing `now`, in DISPLAY_TZ — the origin every
+ * grid row is measured back from.
+ */
+export function currentWeekStartOrdinal(now: Date): number {
+  const p = tzParts(now);
+  const ord = dateOrdinal(p.y, p.mo, p.day);
+  return ord - weekdayMon0(ord);
+}
+
+/**
+ * Where a timestamp lands on the grid, as seen in DISPLAY_TZ: `row` 0 is the current week (top) and
+ * grows going back in time, `weekday` is 0=Mon…6=Sun, `slot` is the display slot within that day.
+ *
+ * Shared by the backup grid and the archive columns so a run and the archive that ran hours later
+ * cannot disagree about which week they are in — which is the whole point of putting the archive
+ * cells on the same rows.
+ */
+export function weekRowOf(d: Date, currentWeekStart: number): { row: number; weekday: number; slot: number } {
+  const p = tzParts(d);
+  const ord = dateOrdinal(p.y, p.mo, p.day);
+  const weekday = weekdayMon0(ord);
+  return {
+    row: (currentWeekStart - (ord - weekday)) / DAYS_PER_WEEK,
+    weekday,
+    slot: Math.floor(p.hour / HOURS_PER_SLOT),
+  };
 }
 
 const whenFmt = new Intl.DateTimeFormat("en-GB", {
@@ -136,6 +171,9 @@ export function deriveState(
  * (the backup is server-side copied into 2hourly/daily/weekly/monthly), and each copy
  * expires independently by its own lifecycle rule — so a run still contributes one
  * copy's worth of bytes per tier whose retention window hasn't elapsed.
+ *
+ * Archive objects are included: they live in the same bucket and land on the same bill, and they
+ * never expire, so leaving them out would understate both the size and the cost of the thing.
  */
 export function storedBytes(payload: PublicPayload, now: number): number {
   const retention = payload.retention ?? DEFAULT_RETENTION;
@@ -146,6 +184,21 @@ export function storedBytes(payload: PublicPayload, now: number): number {
     for (const tier of run.tiers) {
       if (now < start + (retention[tier]?.days ?? 0) * 86_400_000) total += run.bytes;
     }
+  }
+  return total + archiveStoredBytes(payload);
+}
+
+/**
+ * Cumulative bytes of archive objects ever written. Unlike a backup, an archive is not a copy of
+ * something that still exists — it IS the rows, and it has no lifecycle rule behind it — so every
+ * byte ever written is still there and the sum runs over the whole payload, not the visible window.
+ */
+export function archiveStoredBytes(payload: PublicPayload): number {
+  let total = 0;
+  for (const run of payload.archive?.runs ?? []) {
+    // A dry run reports the bytes it WOULD have written; nothing reached the bucket.
+    if (!run.ok || run.dryRun !== "none" || run.bytes == null) continue;
+    total += run.bytes;
   }
   return total;
 }
@@ -174,9 +227,7 @@ export function buildBackupGrid(payload: PublicPayload, now: Date, weeks = 52): 
     if (!existing || (v.ok && !existing.ok)) verByTs.set(k, v);
   }
 
-  const np = tzParts(now);
-  const nowOrdinal = dateOrdinal(np.y, np.mo, np.day);
-  const currentWeekStart = nowOrdinal - weekdayMon0(nowOrdinal);
+  const currentWeekStart = currentWeekStartOrdinal(now);
 
   const rows: BackupRow[] = [];
   for (let r = 0; r < weeks; r++) {
@@ -193,13 +244,9 @@ export function buildBackupGrid(payload: PublicPayload, now: Date, weeks = 52): 
   const slotRuns = new Map<number, Map<number, SlotRun[]>>(); // row → col → runs
   for (const run of payload.runs) {
     const d = new Date(run.t);
-    const sp = tzParts(d);
-    const ord = dateOrdinal(sp.y, sp.mo, sp.day);
-    const wd = weekdayMon0(ord);
-    const slot = Math.floor(sp.hour / HOURS_PER_SLOT);
-    const row = (currentWeekStart - (ord - wd)) / DAYS_PER_WEEK;
+    const { row, weekday, slot } = weekRowOf(d, currentWeekStart);
     if (row < 0 || row >= weeks) continue;
-    const col = wd * SLOTS_PER_DAY + slot;
+    const col = weekday * SLOTS_PER_DAY + slot;
     const verification = verByTs.get(d.toISOString()) ?? null;
     let byCol = slotRuns.get(row);
     if (!byCol) {
@@ -266,6 +313,117 @@ export function summarize(grid: BackupGrid): BackupStats {
           stats.latestLabel = sr.whenLabel;
           stats.latestState = sr.state;
         }
+      }
+    }
+  }
+  return stats;
+}
+
+// ── Archive columns ──────────────────────────────────────────────────────────
+// A sibling block to the right of the grid: one narrow column per archived table, sharing the row
+// pitch. The row is the week the run HAPPENED in, not the ISO week whose data it moved — the
+// run-log carries counts, not week labels, and it is the run week that puts an archive cell on the
+// same row as the weekly backup it follows a few hours later.
+
+/**
+ * An archive record's cell state.
+ *
+ * Refusals and anomalies are tested FIRST because archive-table.ts already folds them into `ok`
+ * (`ok: !failure && refusals.length === 0 && anomalies.length === 0`), so a refusal arrives as a
+ * not-ok record. Painting it red would say "the job broke" when what happened is "the fingerprint
+ * gate declined to delete, on purpose, and someone should look".
+ */
+export function deriveArchiveState(run: PublicArchiveRun): ArchiveCellState {
+  if (run.refusals > 0 || run.anomalies > 0) return "attention";
+  if (!run.ok) return "failed";
+  // A dry run and a run with nothing eligible are the same story to a reader: it ran, the database
+  // did not change. The tooltip tells them apart.
+  if (run.dryRun !== "none") return "quiet";
+  return run.weeksArchived + run.weeksPruned > 0 ? "archived" : "quiet";
+}
+
+/** Better of two untroubled states; `archived` outranks `quiet`. */
+const ARCHIVE_SUCCESS_RANK: Record<string, number> = { archived: 2, quiet: 1 };
+/** Worse of two troubled states; a failed run outranks a refusal. */
+const ARCHIVE_PROBLEM_RANK: Record<string, number> = { failed: 2, attention: 1 };
+
+/**
+ * Assemble the archive block: one Map per week row (index-aligned with BackupGrid.rows), keyed by
+ * short table name. Returns null when the profile archives nothing — the caller then renders the
+ * page exactly as it did before this feature existed.
+ */
+export function buildArchiveColumns(payload: PublicPayload, now: Date, weeks = 52): ArchiveColumns | null {
+  const archive = payload.archive;
+  if (!archive || archive.tables.length === 0) return null;
+
+  const tables = archive.tables.map((t) => t.table);
+  const known = new Set(tables);
+  const currentWeekStart = currentWeekStartOrdinal(now);
+
+  // row → table → records
+  const byRow = new Map<number, Map<string, ArchiveSlotRun[]>>();
+  for (const run of archive.runs) {
+    if (!known.has(run.table)) continue; // build-dashboard unions log-only tables in, so this is a guard
+    const d = new Date(run.t);
+    const { row } = weekRowOf(d, currentWeekStart);
+    if (row < 0 || row >= weeks) continue;
+    let byTable = byRow.get(row);
+    if (!byTable) {
+      byTable = new Map();
+      byRow.set(row, byTable);
+    }
+    let arr = byTable.get(run.table);
+    if (!arr) {
+      arr = [];
+      byTable.set(run.table, arr);
+    }
+    arr.push({ run, state: deriveArchiveState(run), whenLabel: formatInTz(d) });
+  }
+
+  const rows: Map<string, ArchiveCell>[] = [];
+  for (let r = 0; r < weeks; r++) {
+    const cells = new Map<string, ArchiveCell>();
+    rows.push(cells);
+    const byTable = byRow.get(r);
+    if (!byTable) continue;
+    for (const [table, runsIn] of byTable) {
+      runsIn.sort((a, b) => Date.parse(a.run.t) - Date.parse(b.run.t));
+      let successState: ArchiveCellState | null = null;
+      let problemState: ArchiveCellState | null = null;
+      for (const sr of runsIn) {
+        if (sr.state === "failed" || sr.state === "attention") {
+          if (!problemState || ARCHIVE_PROBLEM_RANK[sr.state] > ARCHIVE_PROBLEM_RANK[problemState]) problemState = sr.state;
+        } else if (!successState || ARCHIVE_SUCCESS_RANK[sr.state] > ARCHIVE_SUCCESS_RANK[successState]) {
+          successState = sr.state;
+        }
+      }
+      cells.set(table, {
+        row: r,
+        table,
+        runs: runsIn,
+        // Headline follows the backup grid's convention: the success is the colour, the problem
+        // shows as the split triangle. With no success at all, the problem IS the cell.
+        state: successState ?? problemState ?? "failed",
+        successState,
+        problemState,
+        multiple: runsIn.length > 1,
+      });
+    }
+  }
+
+  return { tables, rows };
+}
+
+/** Row/issue totals over the VISIBLE window, matching `summarize`'s scope for the backup cards. */
+export function summarizeArchives(cols: ArchiveColumns): ArchiveStats {
+  const stats: ArchiveStats = { rowsArchived: 0, rowsPruned: 0, issues: 0 };
+  for (const row of cols.rows) {
+    for (const cell of row.values()) {
+      for (const sr of cell.runs) {
+        if (sr.state === "failed" || sr.state === "attention") stats.issues++;
+        if (sr.run.dryRun !== "none") continue; // a dry run moved nothing; don't count phantom rows
+        stats.rowsArchived += sr.run.rowsArchived;
+        stats.rowsPruned += sr.run.rowsPruned;
       }
     }
   }

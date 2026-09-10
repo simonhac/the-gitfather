@@ -1,7 +1,8 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// Shared in-memory log store. Loads the whole private run/verification history
-// (_log/<basename>/{runs,verifications}-YYYY-MM.jsonl) into typed arrays + Map
-// indexes, so consumers join by plain lookup instead of targeted rclone cat.
+// Shared in-memory log store. Loads the whole private run/verification/archive
+// history (_log/<basename>/{runs,verifications,archives,credentials}-YYYY-MM.jsonl)
+// into typed arrays + Map indexes, so consumers join by plain lookup instead of
+// targeted rclone cat.
 //
 // Used by build-dashboard.ts (the grid), restore-drill-pg.ts (the drift gate), and
 // verify-durable-pg.ts (the due-set). Working set is tiny — bounded by the _log/
@@ -13,12 +14,14 @@ import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getProfile } from "./config.js";
-import type { LogRun, LogVerification } from "./backupTypes.js";
+import type { LogRun, LogVerification, LogArchive } from "./backupTypes.js";
 import type { LogCredential } from "./credentialAge.js";
 
 export interface RawLog {
   runs: LogRun[];
   verifications: LogVerification[];
+  /** Archive-task records, one per TABLE per run — see backupTypes.ts LogArchive. */
+  archives: LogArchive[];
   /** Credential-rotation records — see lib/credentialAge.ts. */
   credentials: LogCredential[];
 }
@@ -44,16 +47,17 @@ export function compactStamp(iso: string): string {
   return iso.replace(/[-:]/g, "");
 }
 
-/** Parse a directory of *.jsonl into runs + verifications (skips malformed lines). */
+/** Parse a directory of *.jsonl into its per-kind record arrays (skips malformed lines). */
 export function readLogDir(dir: string): RawLog {
   const runs: LogRun[] = [];
   const verifications: LogVerification[] = [];
+  const archives: LogArchive[] = [];
   const credentials: LogCredential[] = [];
   let files: string[];
   try {
     files = readdirSync(dir);
   } catch {
-    return { runs, verifications, credentials };
+    return { runs, verifications, archives, credentials };
   }
   for (const f of files) {
     if (!f.endsWith(".jsonl")) continue;
@@ -63,13 +67,14 @@ export function readLogDir(dir: string): RawLog {
         const o = JSON.parse(ln);
         if (f.startsWith("runs-")) runs.push(o as LogRun);
         else if (f.startsWith("verifications-")) verifications.push(o as LogVerification);
+        else if (f.startsWith("archives-")) archives.push(o as LogArchive);
         else if (f.startsWith("credentials-")) credentials.push(o as LogCredential);
       } catch {
         /* skip malformed line */
       }
     }
   }
-  return { runs, verifications, credentials };
+  return { runs, verifications, archives, credentials };
 }
 
 /** rclone-copy every _log/<basename>/*.jsonl to a tmpdir and parse it. Uses the `r2` remote. */
