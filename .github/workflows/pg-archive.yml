@@ -6,7 +6,7 @@ name: pg-archive (reusable)
 # owns the schedule + secrets and points at its profile's `archive:` block.
 #
 # Retention is the INVERSE of pg-backup's: archives are meant to be permanent, so the archive/
-# prefix gets NO R2 lifecycle expiry rule (plus a bucket lock for ransomware resistance). See README.
+# prefix gets NO R2 lifecycle expiry rule (plus a bucket lock for ransomware resistance). See docs/archiving.md + docs/r2-setup.md.
 #
 # The two phases are separable on purpose. `mode: archive` is safe to run repeatedly — it never
 # deletes — which is what makes a large first-time backfill something you can work off in batches

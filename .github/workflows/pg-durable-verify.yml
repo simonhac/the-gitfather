@@ -5,7 +5,7 @@ name: pg-durable-verify (reusable)
 # recorded at backup time + full-restore the freshest daily. SECONDARY: full-restore the newest
 # weekly/monthly object ≥ verify-durable.retest-days old not yet restore-verified. Replaces the standalone weekly
 # pg-restore-drill in the recommended caller wiring. Cadence/limits come from the profile
-# (verify-durable.fresh / verify-durable.aged / verify-durable.retest-days / verify-durable.max-restores). See README.
+# (verify-durable.fresh / verify-durable.aged / verify-durable.retest-days / verify-durable.max-restores). See docs/verify-and-restore.md.
 
 on:
   workflow_call:

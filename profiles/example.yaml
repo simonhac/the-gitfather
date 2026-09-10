@@ -8,7 +8,7 @@
 #   PROFILE=profiles/example.yaml npx tsx scripts/backup-pg-to-r2.ts
 #
 # In CI you keep this file in your consuming repo and point the caller workflow's
-# `profile:` input at it (see README → "Wiring a consuming repo").
+# `profile:` input at it (see docs/wiring-a-consuming-repo.md).
 #
 # Keys are kebab-case. Every task validates this file (zod) at startup and fails fast
 # with one aggregated report naming any missing/malformed field. To check a freshly-wired
@@ -26,6 +26,8 @@
 #   HEARTBEAT_URL            (optional) dead-man's-switch ping hit on success
 #   ALERT_WEBHOOK_URL        (optional) generic failure webhook
 #   AGE_RECIPIENT / AGE_IDENTITY   (only if encryption: age)
+#   PG_ARCHIVE_DATABASE_URL  (archive, optional) — the archiver is the only task that DELETES
+#   AGE_ARCHIVE_RECIPIENT    (archive, optional) — the age PUBLIC key; its identity stays OFFLINE
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Object-key layout: <backup-prefix>/<tier>/<name>-<stamp>.<ext>
@@ -33,7 +35,7 @@ name: example                  # db shortname → R2 key basename + Slack header
 backup-prefix: pg/example      # R2 object-key prefix
 timezone: UTC                  # IANA tz for the dashboard + Slack row (day boundary, HH:MM, abbrev)
 encryption: none               # none | age | aes-gcm  (age = client-side; needs AGE_RECIPIENT/AGE_IDENTITY)
-anchor-hour-utc: 16            # the 2-hourly run at this UTC hour is also promoted to daily/weekly/monthly
+anchor-hour-utc: 16            # the 8-hourly run at this UTC hour is also promoted to daily/weekly/monthly
 
 dump:
   flags: "-Fc --no-owner --no-privileges"  # full custom-format dump, restorable without source roles
@@ -71,12 +73,12 @@ archive:                       # OPTIONAL — archive-table.ts. Move old rows of
       max-weeks-per-run: 1     # the backfill throttle; override per run with --max-weeks
 
 retention:                     # GFS windows as natural-language durations (these are the defaults).
-  grandson: 2 days             #   2-hourly — every 2 h, kept this long
+  grandson: 2 days             #   8-hourly (the legacy `2hourly/` key prefix) — every 8 h, kept this long
   son: 3 weeks                 #   daily    — one per day at the anchor hour
   father: 13 weeks             #   weekly   — one per week (Sundays)
   grandfather: 2 years         #   monthly  — one per month (the 1st)
 # NOTE: R2 actually deletes objects via bucket lifecycle rules — keep those in sync with these
-# values (see README → "Backup tiers"); changing this file does not reconfigure R2.
+# values (see docs/r2-setup.md); changing this file does not reconfigure R2.
 
 drill:                         # restore-drill / durable-verify row checks
   row-count-table: your_largest_table   # gated against the live row count (min/max-row-ratio)
@@ -104,10 +106,13 @@ credential-rotation:
                                # is the case this check exists for, so it is reported, not skipped.
 
 staleness:                     # check-staleness.ts
-  slot-minutes: 120            # backup cadence in minutes — MUST match the backup cron interval (0 */2 = 120)
+  slot-minutes: 480            # backup cadence in minutes — MUST match the backup cron interval (0 0,8,16 = 480)
   grace-minutes: 25            # minutes past a slot boundary before it's "overdue" — trades faster recovery
                                #   (≈ grace + check interval) against redundant heals on scheduler jitter
-  max-age-hours: 5             # backstop: page if the newest 2hourly object is older than this (slot logic is primary)
+  max-age-hours: 12            # backstop: page if the newest 2hourly/ object is older than this (slot logic
+                               #   is primary). Omit it and it is DERIVED from the cadence (1.5 slots —
+                               #   12 h here); a value inside slot-minutes + grace is refused, because a
+                               #   backstop that tight pages on every healthy tick.
   repage-minutes: 60           # minutes between LOUD re-pages while an outage persists. The check runs
                                #   far more often than this; entry and any change of CAUSE always page.
                                #   0 = page every tick (the old behaviour). Slack noise only — the job

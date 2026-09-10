@@ -175,11 +175,21 @@ const credentialRotationGroup = z
   .strict()
   .prefault({} as never);
 
+// The max-age backstop has to be LOOSER than the slot logic it backs up, because a healthy system
+// spends most of every slot with an object that is already several hours old. A fixed default cannot
+// be right for every cadence — 3 h was correct when the finest tier ran 2-hourly and pages on every
+// tick at 8-hourly — so derive it from the cadence instead: 1.5 slots, and never less than one slot
+// plus its grace window plus an hour. At the 480/25 default that is 12 h.
+export const defaultMaxAgeHours = (slotMinutes: number, graceMinutes: number): number =>
+  Math.max(Math.ceil((1.5 * slotMinutes) / 60), Math.ceil((slotMinutes + graceMinutes) / 60) + 1);
+
 const stalenessGroup = z
   .object({
     // Primary trigger is slot-based (slotMinutes/graceMinutes); maxAgeHours is a backstop that still
-    // pages if the slot math is misconfigured and a truly ancient object slips through.
-    maxAgeHours: intIn(3, 1, Number.MAX_SAFE_INTEGER), // backstop: page if newest 2hourly object is older than this
+    // pages if the slot math is misconfigured and a truly ancient object slips through. Unset →
+    // derived from the cadence (defaultMaxAgeHours), which is the only default that cannot be wrong
+    // for the configured slot width.
+    maxAgeHours: optInt(1, Number.MAX_SAFE_INTEGER),
     // Backup cadence in minutes — MUST match the caller's cron interval, and must divide 1440
     // (requireValidStalenessSlot). The default is shared with the display constants so the alerting
     // cadence and the rendered cadence can never be two different numbers.
@@ -194,7 +204,12 @@ const stalenessGroup = z
     selfHeal: boolIn(true),
     dryRun: boolIn(false),
   })
-  .strict().prefault({} as never);
+  .strict()
+  .transform((v) => ({
+    ...v,
+    maxAgeHours: v.maxAgeHours ?? defaultMaxAgeHours(v.slotMinutes, v.graceMinutes),
+  }))
+  .prefault({} as never);
 
 // Archive encryption deliberately offers FEWER options than the dump's `encryption:` — "aes-gcm"
 // is a not-implemented stub there, and an archive is the one artifact that must never be written
@@ -401,6 +416,23 @@ function requireValidStalenessSlot(v: Profile, ctx: Ctx): void {
       ["staleness", "graceMinutes"],
       `must be less than staleness.slot-minutes (${v.staleness.slotMinutes}); otherwise the current slot can ` +
         `never be flagged overdue and slot-based self-heal silently falls back to the max-age-hours backstop`,
+    );
+  }
+
+  // The backstop has to sit OUTSIDE the slot window. A healthy run lands at the start of its slot and
+  // is `slotMinutes` old by the end of it, so a backstop inside that window is not a backstop at all —
+  // it pages on every tick of a perfectly healthy schedule, with a reason ("older than Nh") that says
+  // nothing is wrong. Refuse it rather than let a profile page itself into being ignored.
+  const backstopMinutes = v.staleness.maxAgeHours * 60;
+  const slotWindow = v.staleness.slotMinutes + v.staleness.graceMinutes;
+  if (backstopMinutes <= slotWindow) {
+    miss(
+      ctx,
+      ["staleness", "maxAgeHours"],
+      `must exceed staleness.slot-minutes + grace-minutes (${slotWindow}m = ` +
+        `${(slotWindow / 60).toFixed(1)}h); ${v.staleness.maxAgeHours}h sits inside a single backup slot, ` +
+        `so the backstop would page on every healthy tick. Leave it unset to derive it from the cadence ` +
+        `(${defaultMaxAgeHours(v.staleness.slotMinutes, v.staleness.graceMinutes)}h here)`,
     );
   }
 }

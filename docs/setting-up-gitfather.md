@@ -26,12 +26,14 @@ their-repo                          the-gitfather (engine, public)
     pg-durable-verify.yml ────────►     pg-durable-verify.yml   (daily; supersedes the weekly drill)
     pg-staleness-check.yml ───────►     pg-staleness-check.yml
     pg-dashboard.yml ─────────────►     pg-dashboard.yml
+    pg-archive.yml ───────────────►     pg-archive.yml          (optional — the table archiver)
+    pg-restore-drill.yml ─────────►     pg-restore-drill.yml    (optional — superseded by durable-verify)
 ```
 
 **The critical path — drive it in this order:**
 
-1. **Create the R2 bucket(s), lifecycle rules, WORM locks, and a scoped no-delete S3 token** (§1 +
-   README "Create the buckets"; account-level Cloudflare creds). For the dashboard, also create a
+1. **Create the R2 bucket(s), lifecycle rules, WORM locks, and a scoped S3 token** (§1 +
+   [r2-setup.md](r2-setup.md); account-level Cloudflare creds). For the dashboard, also create a
    **separate public** bucket + a write-only token. **`doctor` cannot pass until these exist.**
 2. **Get a direct Postgres connection string** — not a transaction-mode pooler (§2b).
 3. **Write the profile** (`pg-backup/<name>.yaml`, committed to their repo) and the local
@@ -39,8 +41,11 @@ their-repo                          the-gitfather (engine, public)
 4. **Clone this engine repo, `npm ci`, and run `doctor`** against that profile (§5) — `npm run doctor`
    lives *here*, not in their repo.
 5. **Move credentials into GitHub Secrets** (and `R2_BUCKET` / `DASHBOARD_R2_BUCKET` / `SLACK_CHANNEL`
-   into **Variables**), then **add the caller workflows** (README "Wiring a consuming repo"), pointing
-   `profile:` at the new file. Pushing workflow files needs a token with the **`workflow`** scope.
+   into **Variables**), then **add the caller workflows** ([wiring-a-consuming-repo.md](wiring-a-consuming-repo.md)),
+   pointing `profile:` at the new file. Each caller carries its own `schedule:` cron — or, if the
+   operator runs several projects and wants one punctual scheduler, drop the cron blocks and use the
+   [Cloudflare Worker scheduler](../scheduler/README.md) instead. Pushing workflow files needs a token
+   with the **`workflow`** scope.
 6. **Prove it:** trigger `pg-backup` via `workflow_dispatch` and confirm an object lands in R2.
 
 **Three things `doctor` cannot catch — a green checklist is *not* a proven backup:**
@@ -49,7 +54,8 @@ their-repo                          the-gitfather (engine, public)
 - a **lifecycle / bucket-lock** misconfiguration — `doctor` only probes that the bucket is *reachable*,
   not that retention/immutability are correct;
 - **`secrets: inherit` across owners** — it silently passes *nothing* when the caller repo is owned by a
-  different account than this one, so every secret reads empty (see the README "Troubleshooting"). The
+  different account than this one, so every secret reads empty (see
+  [configuration-and-troubleshooting.md](configuration-and-troubleshooting.md#troubleshooting)). The
   caller workflows must pass each secret explicitly.
 
 Only a real backup run (a `workflow_dispatch` of `pg-backup`, or a local `backup-pg-to-r2.ts`) proves
@@ -87,9 +93,14 @@ Then you run `npm run doctor -- all` with both files in scope and interpret the 
 
 - `node` + `npm ci` already run (installs `tsx`, `zod`, `esbuild`).
 - CLI tools on PATH: `rclone`, `pg_dump`, `pg_restore`, `psql`. Plus `age` **only if** they choose `encryption: age`, and `gh` **only if** staleness self-heal is on (the default).
-- The Cloudflare R2 buckets already exist with lifecycle + lock rules applied. This is a **one-time manual step** done with account-level Cloudflare creds — see the README "Create the buckets" / wrangler section. The engine does **not** create buckets; `doctor` only probes that they're reachable. This is **critical-path step 1** (see the Architecture section) — nothing else can be validated until it's done. If you're enabling the dashboard, also create a **separate public** bucket + a **write-only** S3 token for it.
+- If they're enabling the **archiver** (§3g): `zstd` (or `gzip`) for compression and `age` for archive
+  encryption — note `age` is needed for `archive.encryption: age` even when the dumps themselves are
+  unencrypted, because the archive uses its own recipient.
+- The Cloudflare R2 buckets already exist with lifecycle + lock rules applied. This is a **one-time manual step** done with account-level Cloudflare creds — see [r2-setup.md](r2-setup.md). The engine does **not** create buckets; `doctor` only probes that they're reachable. This is **critical-path step 1** (see the Architecture section) — nothing else can be validated until it's done. If you're enabling the dashboard, also create a **separate public** bucket + a **write-only** S3 token for it.
 
-If buckets don't exist yet, pause the setup and walk the user through the README's `wrangler r2 bucket create / lifecycle add / lock add` commands first.
+If buckets don't exist yet, pause the setup and walk the user through the
+[`wrangler r2 bucket create / lifecycle add / lock add`](r2-setup.md#create-the-r2-bucket-lifecycle-rules-and-bucket-locks-once)
+commands first.
 
 ---
 
@@ -119,6 +130,11 @@ For the **restore drill** (only if they want automated restore verification — 
 | `PG_LIVE_DATABASE_URL` | live DB used only to read row counts for the ratio check | usually same as `PG_BACKUP_DATABASE_URL` |
 | `drill.row-count-table` | `public.<table>` whose restored/live row ratio is asserted | the user's largest stable table |
 
+> `DRILL_DATABASE_URL` and `PG_LIVE_DATABASE_URL` are only needed for a **local** `doctor -- drill`.
+> In CI the reusable drill and durable-verify workflows supply them themselves (the restore target is
+> a throwaway Postgres service container inside the job) — the operator does *not* set them as repo
+> secrets.
+
 ### 2c. Cloudflare R2 — private dump bucket (→ secrets + one variable)
 
 | Variable | Meaning | How to get it |
@@ -141,7 +157,7 @@ Everything here has a safe default or is feature-gated. Ask, but offer the defau
 |---|---|---|
 | `anchor-hour-utc` | `16` | the UTC hour whose run is also promoted to daily/weekly/monthly tiers |
 | `dump.min-bytes` | `1048576` (1 MB) | abort the upload if the dump is smaller (catches a truncated dump) |
-| `staleness.max-age-hours` | `3` (example.yaml suggests `5`) | backstop: alert if the newest 2-hourly object is older than this (the **primary** trigger is the slot-based overdue check — see 3e) |
+| `staleness.max-age-hours` | derived: `12` at the default cadence | backstop: alert if the newest object is older than this (the **primary** trigger is the slot-based overdue check — see 3e). Leave it unset unless the operator has a reason: unset derives 1.5 slots from `slot-minutes`, and a value inside `slot-minutes + grace` is **refused** by config validation |
 | `drill.min-row-ratio` | `0.95` | restored/live row-count floor for the drill sentinel table |
 | `drill.max-row-ratio` | `2.0` | restored/live row-count ceiling — catches duplicated/double-restored rows |
 | `dump.flags` | `-Fc --no-owner --no-privileges` | pg_dump flags; tune per database (e.g. `--exclude-schema=…`) |
@@ -203,7 +219,7 @@ Everything here has a safe default or is feature-gated. Ask, but offer the defau
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `staleness.slot-minutes` | `120` | backup cadence in minutes — **must match your backup cron interval** (`0 */2` = 120). The primary freshness trigger: a slot with no backup past its grace window is "overdue" |
+| `staleness.slot-minutes` | `480` | backup cadence in minutes — **must match your backup cron interval** (`0 0,8,16 * * *` = 480). The primary freshness trigger: a slot with no backup past its grace window is "overdue" |
 | `staleness.grace-minutes` | `25` | minutes past a slot boundary before it counts as overdue (**must be < slot-minutes**). Trades faster recovery against redundant heals on scheduler jitter |
 | `staleness.repage-minutes` | `60` | minutes between **loud** re-pages while an outage persists. The check runs every ~10 min, so paging on every tick turns a long outage into dozens of identical `@here` messages; entry into an outage and any change of **cause** still page immediately. `0` restores page-every-tick. Affects Slack only — the job still exits non-zero, so Actions and the dashboard are unchanged, and a recovery note is posted when a fresh backup lands |
 | `staleness.self-heal` | `true` | on a missed tick, re-trigger the backup workflow via `gh` (needs `gh` auth + `GITHUB_REPOSITORY`) |
@@ -213,6 +229,11 @@ Everything here has a safe default or is feature-gated. Ask, but offer the defau
 
 > `dump.min-bytes` is **also** the staleness floor: a fresh-but-smaller newest object is treated as broken
 > (pages directly) rather than just stale.
+
+> **The backstop must be looser than the slot logic**: `max-age-hours > slot-minutes/60 + grace-minutes/60`,
+> or the check pages on every healthy tick — mid-slot, the newest object is always older than a tight
+> backstop. Config validation refuses such a value outright. Omitting `max-age-hours` derives it
+> (1.5 slots: `12` h at the 480/25 default), which is the recommendation.
 
 ### 3f. Backup integrity & durable verification (→ profile, defaults fine)
 
@@ -230,7 +251,40 @@ All default-on and safe — surface them only if the user asks *"how do you know
 | `drill.max-row-drop` | `0` (off) | if set (0–1), fail a drill when a table shrank more than this fraction vs the prior passing drill |
 
 These power `verify-durable-pg.ts` (the daily `pg-durable-verify.yml` workflow), which guarantees every
-durable file is tested — **weekly/monthly twice, daily once**. See README → **Verifying backups**.
+durable file is tested — **weekly/monthly twice, daily once**. See
+[verify-and-restore.md](verify-and-restore.md).
+
+### 3g. Archiving a table (optional — ask, don't assume)
+
+Only relevant if the operator has an **append-only** table that has outgrown the database (a request
+log, an event log, an audit trail). It is off unless the profile has an `archive:` block. Backups
+copy; the archiver **moves** — rows leave Postgres — so interview carefully and default to caution.
+Full detail: [archiving.md](archiving.md).
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `archive.store-prefix` | — | object-key prefix, a **sibling** of `backup-prefix` (e.g. `archive/<name>`) |
+| `archive.encryption` | `age` | `none` \| `age`. With `age` this uses **`AGE_ARCHIVE_RECIPIENT`**, *not* the dumps' `AGE_RECIPIENT` |
+| `archive.compression` / `compression-level` | `zstd` / `12` | applied before encryption |
+| `archive.tables[].table` | — | schema-qualified, e.g. `public.api_logs` |
+| `archive.tables[].time-column` | `created_at` | must be NOT NULL and indexed; weeks are ISO-8601 on UTC boundaries |
+| `archive.tables[].archive-after-weeks` | `4` | a week is eligible only once its **last** row is this old |
+| `archive.tables[].prune-after-weeks` | `4` | ≥ archive-after-weeks. **Err wide** — widening later is free, narrowing deletes more and nothing deleted comes back |
+| `archive.tables[].delete-batch-rows` | `2000` | small batches: one huge DELETE floods a realtime publication's slot |
+| `archive.tables[].max-weeks-per-run` | `1` | the backfill throttle; override per run with `--max-weeks` |
+
+Secrets: **`PG_ARCHIVE_DATABASE_URL`** (required — deliberately separate from the dump URL, because
+this is the only task that DELETES) and, for `archive.encryption: age`, **`AGE_ARCHIVE_RECIPIENT`**
+(the `age1…` **public** key only). Generate that identity **offline** and keep it in a password
+manager — it must never become a repo secret. CI never decrypts an archive.
+
+R2: the store prefix gets **no** lifecycle expiry rule (that absence is what makes archives permanent)
+plus a 90-day bucket lock — see [r2-setup.md → The archive prefix](r2-setup.md#the-archive-prefix).
+
+Then, in order: `npm run doctor -- archive` (needs `PG_ARCHIVE_DATABASE_URL`), a rehearsal with
+`--target=local:<dir>`, then `--dry-run=store` against R2, then a real `--mode archive` batch. Prune
+last, and only after spot-checking a decrypted object. A first backfill of a legacy table is worked
+off in batches — [archiving.md → Backfilling a legacy table](archiving.md#backfilling-a-legacy-table).
 
 ---
 
@@ -274,6 +328,9 @@ ALERT_WEBHOOK_URL="https://hooks.slack.com/services/…"
 DASHBOARD_R2_BUCKET="…"
 DASHBOARD_R2_ACCESS_KEY_ID="…"
 DASHBOARD_R2_SECRET_ACCESS_KEY="…"
+# archive (optional — the archiver is the only task that DELETES from the source):
+PG_ARCHIVE_DATABASE_URL="postgres://…"
+AGE_ARCHIVE_RECIPIENT="age1…"        # public key only; its identity stays OFFLINE
 # staleness self-heal (optional):
 GITHUB_REPOSITORY="owner/repo"
 ```
@@ -308,8 +365,9 @@ credentials.
 > manual `workflow_dispatch` of `pg-backup` (or a local `backup-pg-to-r2.ts` run) that lands an object in
 > R2.
 
-`-- all` checks `backup`, `drill`, `verify-durable`, `staleness`, and `dashboard`. You can scope to one
-task: `npm run doctor -- backup`.
+`-- all` checks `backup`, `archive`, `drill`, `verify-durable`, `staleness`, and `dashboard`. You can
+scope to one task: `npm run doctor -- backup`. `doctor -- archive` needs `PG_ARCHIVE_DATABASE_URL`
+and only makes sense once the profile has an `archive:` block.
 
 **Reading the output** — each line is `✓` / `⚠` / `✗`:
 - `✓ config — all variables present & valid` means the schema passed. A schema failure prints an
@@ -328,7 +386,7 @@ get `✓ doctor: all required checks passed`.
 ## Appendix A — Where each value comes from
 
 When the user doesn't already have a value, walk them to its source. Paths below are current as of
-mid-2026; if a UI label has moved, search the provider's docs rather than guessing.
+September 2026; if a UI label has moved, search the provider's docs rather than guessing.
 
 ### Cloudflare R2 (account id, bucket, S3 tokens, dashboard URL)
 
@@ -381,15 +439,21 @@ mid-2026; if a UI label has moved, search the provider's docs rather than guessi
 
 ### GitHub (where the values live in CI)
 
-- **Secrets / Variables** — repo → **Settings → Secrets and variables → Actions**. Put sensitive
-  values (DB URLs, `*_ACCESS_KEY*`, `SLACK_BOT_TOKEN`, `HEARTBEAT_URL`, age keys) under the
-  **Secrets** tab; put `R2_BUCKET`, `DASHBOARD_R2_BUCKET`, and `SLACK_CHANNEL` under the **Variables** tab.
+- **Secrets / Variables** — repo → **Settings → Secrets and variables → Actions**. Which name is a
+  secret and which is a variable is listed once, in
+  [wiring-a-consuming-repo.md § 3](wiring-a-consuming-repo.md#3-set-the-secrets--variables-in-your-repo);
+  use that table rather than restating it.
 - Pushing the workflow files themselves needs a token with the **`workflow`** scope.
 
 ### age encryption (only if `encryption: age`)
 
 - `age-keygen -o key.txt` prints the **public key** (`age1…`) → that's **`AGE_RECIPIENT`**; the file's
   `AGE-SECRET-KEY-…` line is **`AGE_IDENTITY`** (keep it secret; the drill needs it to decrypt).
+- **age (archive)** — run `age-keygen` a **second** time for the archiver, on the operator's machine.
+  Only the `age1…` recipient becomes a secret (`AGE_ARCHIVE_RECIPIENT`); the identity goes into a
+  password manager and **never** into GitHub. That asymmetry is the point: CI verifies archives by
+  hash and fingerprint, so it never needs to decrypt one, and a leaked CI credential cannot read a
+  single archived row. `age-keygen -y key.txt` re-derives the recipient if they need to check the pair.
 
 ### Heartbeat (optional)
 
@@ -403,12 +467,18 @@ mid-2026; if a UI label has moved, search the provider's docs rather than guessi
 Once doctor is green locally, tell the user the remaining steps the engine can't do for them:
 
 1. Commit `pg-backup/<name>.yaml` to their consuming repo (verify no secret leaked in).
-2. Move the credentials from `.context/gitfather-secrets.env` into GitHub **Secrets** (and the three
-   bucket/channel values into GitHub **Variables**) — see the README secrets/variables table.
+2. Move the credentials from `.context/gitfather-secrets.env` into GitHub **Secrets** (and the
+   bucket/channel values into GitHub **Variables**) — see the
+   [secrets/variables table](wiring-a-consuming-repo.md#3-set-the-secrets--variables-in-your-repo).
 3. Wire the caller workflows (`pg-backup.yml`, `pg-durable-verify.yml` — daily; supersedes the weekly
-   `pg-restore-drill.yml` — `pg-staleness-check.yml`, `pg-dashboard.yml`) per the README "Wiring a
-   consuming repo" section, pointing `profile:` at the new profile. **Pass every secret explicitly** —
-   `secrets: inherit` silently passes nothing when the caller repo is owned by a different account than
-   this one (the #1 first-run failure; see the README "Troubleshooting"). Pushing the workflow files
-   needs a token with the **`workflow`** scope.
-4. Delete `.context/gitfather-secrets.env` (or keep it knowing it's gitignored) once secrets are in GitHub.
+   `pg-restore-drill.yml` — `pg-staleness-check.yml`, `pg-dashboard.yml`, plus `pg-archive.yml` if they
+   archive) per [wiring-a-consuming-repo.md](wiring-a-consuming-repo.md), pointing `profile:` at the new
+   profile. **Pass every secret explicitly** — `secrets: inherit` silently passes nothing across owners
+   (the #1 first-run failure). Pushing the workflow files needs a token with the **`workflow`** scope.
+4. If they'll use the [Worker scheduler](../scheduler/README.md) instead of GitHub cron: delete the
+   `schedule:` blocks and add the client to the roster — and remember `archive` is **opt-in**, so its
+   `cadences` list must name `"archive"` explicitly.
+5. If a first archive backfill ran, schedule a **`VACUUM FULL`** on that table: a plain `DELETE` only
+   marks space reusable, so without it the table stops growing but never shrinks. It takes an
+   `ACCESS EXCLUSIVE` lock — size the window to the table.
+6. Delete `.context/gitfather-secrets.env` (or keep it knowing it's gitignored) once secrets are in GitHub.
