@@ -412,23 +412,33 @@ export const stalenessSchema = profileSchema
   .superRefine(requireValidStalenessSlot);
 
 /**
- * Archive config. Like the dashboard, R2 requirements depend on a RUNTIME flag: `--target=local:<dir>`
- * writes real artifacts to a directory and needs no bucket at all, which is how the whole pipeline is
- * rehearsed before it is ever pointed at R2. archive-table.ts passes the target it parsed; doctor
- * validates with toR2:true.
+ * Archive config. Two RUNTIME flags shape it, not two schemas.
+ *
+ * `toR2` — R2 requirements depend on the target: `--target=local:<dir>` writes real artifacts to a
+ * directory and needs no bucket at all, which is how the whole pipeline is rehearsed before it is
+ * ever pointed at R2. archive-table.ts passes the target it parsed; doctor validates with toR2:true.
+ *
+ * `writesArchives:false` — for the maintenance paths that only ever touch the STORE, as
+ * backfill-archive-sizes.ts does when it lists object sizes and rewrites `_index/`. Such a run
+ * extracts nothing and encrypts nothing, so requiring a production database URL and an age
+ * recipient would be demanding credentials for work it will never do, and every credential a task
+ * does not need is one it cannot leak.
  */
-export function archiveSchema(opts: { toR2?: boolean } = {}) {
+export function archiveSchema(opts: { toR2?: boolean; writesArchives?: boolean } = {}) {
+  const writes = opts.writesArchives !== false;
   return profileSchema
     .superRefine(requireSlackChannel)
     .superRefine((v, ctx) => {
       if (!v.name) miss(ctx, ["name"], "must be set");
       if (!v.archive.storePrefix) miss(ctx, ["archive", "storePrefix"], "must be set");
       if (opts.toR2) requireR2(v, ctx);
-      if (!v.credentials.archiveDatabaseUrl) miss(ctx, ["credentials", "archiveDatabaseUrl"], "must be set");
+      if (writes && !v.credentials.archiveDatabaseUrl) {
+        miss(ctx, ["credentials", "archiveDatabaseUrl"], "must be set");
+      }
       if (v.archive.tables.length === 0) {
         miss(ctx, ["archive", "tables"], "must list at least one table to archive");
       }
-      if (v.archive.encryption === "age" && !v.credentials.age.archiveRecipient) {
+      if (writes && v.archive.encryption === "age" && !v.credentials.age.archiveRecipient) {
         miss(ctx, ["credentials", "age", "archiveRecipient"], "required when archive.encryption=age");
       }
       v.archive.tables.forEach((t, i) => {
