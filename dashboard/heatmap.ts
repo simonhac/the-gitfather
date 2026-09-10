@@ -698,6 +698,13 @@ function archiveProblem(r: PublicArchiveRun): string {
   return bits.join(" · ");
 }
 
+/**
+ * " · 41.2 KB" — the size of the object those rows are stored in, said the same way a backup cell
+ * says its dump's size. Empty when the index line predates the field, so an old week reads as rows
+ * alone rather than claiming 0 B.
+ */
+const archiveSize = (bytes: number | undefined): string => (bytes == null ? "" : ` · ${formatBytes(bytes)}`);
+
 const ARCHIVE_DATA_LABEL: Record<ArchiveBodyState, string> = {
   archived: "Archived",
   pruned: "Pruned (verified at prune)",
@@ -719,7 +726,7 @@ function archiveTipHtml(r: number, table: string, cell: ArchiveCell | null): str
   const data = cell?.data ?? null;
   lines.push(
     data
-      ? `<div class="tip-state">${dot(bodyClass(data.state)!)}${ARCHIVE_DATA_LABEL[data.state]} · ${rowsWord(data.rows)}</div>`
+      ? `<div class="tip-state">${dot(bodyClass(data.state)!)}${ARCHIVE_DATA_LABEL[data.state]} · ${rowsWord(data.rows)}${archiveSize(data.bytes)}</div>`
       : `<div class="tip-muted">No rows archived for this week</div>`,
   );
 

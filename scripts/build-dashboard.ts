@@ -450,8 +450,9 @@ function makeSample(now: Date): {
   /** A plausible fingerprint. Never published — the scrub drops it — but the record carries one. */
   const fakeDigest = (label: string): string =>
     [...label].reduce((h, c) => (Math.imul(h ^ c.charCodeAt(0), 16_777_619) >>> 0), 2_166_136_261).toString(16).padStart(16, "0");
-  const fullPart = (part: number, rows: number, label: string): ArchivedPart => ({
-    part, role: "full", rowCount: rows, fingerprint: { n: rows, digest: fakeDigest(`${label}#${part}`) },
+  const fullPart = (part: number, rows: number, label: string, bytesPerRow: number): ArchivedPart => ({
+    part, role: "full", rowCount: rows, bytes: rows * bytesPerRow,
+    fingerprint: { n: rows, digest: fakeDigest(`${label}#${part}`) },
   });
 
   /** What one table's store knows about one week, as the simulation walks forward. */
@@ -478,7 +479,9 @@ function makeSample(now: Date): {
       const rows = Math.round(v.rows + rand() * v.spread);
       rowsArchived += rows;
       bytes += rows * v.bytesPerRow;
-      if (commit) book.set(w.label, { rows, state: "archived", parts: [fullPart(1, rows, w.label)] });
+      if (commit) {
+        book.set(w.label, { rows, state: "archived", parts: [fullPart(1, rows, w.label, v.bytesPerRow)] });
+      }
     }
     return { weeksArchived: weeks.length, rowsArchived, bytes };
   };
@@ -551,7 +554,11 @@ function makeSample(now: Date): {
   if (superseded) {
     const [label, b] = superseded;
     const grown = b.rows + 137;
-    b.parts = [{ ...fullPart(1, b.rows, label), role: "superseded" }, fullPart(2, grown, label)];
+    const perRow = VOLUME["public.api_logs"].bytesPerRow;
+    b.parts = [
+      { ...fullPart(1, b.rows, label, perRow), role: "superseded" },
+      fullPart(2, grown, label, perRow),
+    ];
     b.rows = grown;
   }
 

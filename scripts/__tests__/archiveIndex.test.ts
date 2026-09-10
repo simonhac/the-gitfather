@@ -45,6 +45,28 @@ test("scrubArchiveWeek: rows come from the ACTIVE part, not the newest or the su
   assert.equal(rows([]), 0, "a zero-row week is archived, and says so");
 });
 
+test("scrubArchiveWeek: bytes come from the same part the rows do", () => {
+  const week = scrubArchiveWeek("t", {
+    ...RECORD,
+    state: "archived",
+    parts: [
+      { part: 1, role: "superseded", rowCount: 100, bytes: 4_000, fingerprint: { n: 100, digest: "a" } },
+      { part: 2, role: "full", rowCount: 140, bytes: 5_500, fingerprint: { n: 140, digest: "b" } },
+    ],
+  });
+  assert.deepEqual(week, { table: "t", week: "2026-W02", state: "archived", rows: 140, bytes: 5_500 });
+});
+
+test("scrubArchiveWeek: a part with no byte count publishes no size at all", () => {
+  // Index lines written before `bytes` existed, and zero-row weeks (a manifest, no data object),
+  // must read as "size unknown" on the page. `bytes: 0` would read as "an empty archive".
+  for (const bytes of [undefined, null, "12", Number.NaN]) {
+    const parts = [{ part: 1, role: "full", rowCount: 409, bytes, fingerprint: { n: 409, digest: "a" } }];
+    assert.equal("bytes" in scrubArchiveWeek("t", { ...RECORD, parts })!, false, String(bytes));
+  }
+  assert.equal("bytes" in scrubArchiveWeek("api_logs", RECORD)!, false, "the legacy record shape");
+});
+
 test("scrubArchiveWeek: anything that is not a real week record is dropped, not guessed at", () => {
   for (const bad of [null, undefined, 42, "2026-W02", {}, { label: "2026-W02" },
                      { label: "2026-W02", state: "deleted", parts: [] },

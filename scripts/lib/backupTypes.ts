@@ -291,6 +291,12 @@ export interface PublicArchiveWeek {
   week: string;
   state: ArchiveBodyState;
   rows: number;
+  /**
+   * Bytes of the archive object holding those rows — the stored size, exactly as a backup cell
+   * reports its dump's size. Optional because it was added after the first indexes were written:
+   * an older `_index/` line records no byte count, and a week without one must still render.
+   */
+  bytes?: number;
 }
 
 export interface PublicPayload {
@@ -428,7 +434,7 @@ export interface ArchiveCell {
    * that had no rows: the index gains a week only when it is archived, so a backlog and an empty
    * week look the same. That limit is forced by the data rather than chosen.
    */
-  data: { state: ArchiveBodyState; rows: number } | null;
+  data: { state: ArchiveBodyState; rows: number; bytes?: number } | null;
   /** The mark: did the archiver runs that happened this week go clean? See outcomes.ts. */
   mark: CellMark;
 }

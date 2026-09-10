@@ -24,9 +24,14 @@ import type { PublicArchiveWeek } from "./backupTypes.js";
 const warn = (msg: string): void => void process.stderr.write(`${msg}\n`);
 
 /**
- * One private index line reduced to what the dashboard may say out loud: the week, its state, and
- * how many rows it holds. `rows` is the ACTIVE part's count — the highest-numbered `full` part, per
- * archive.ts — because supplements describe rows that arrived late, not a snapshot of the window.
+ * One private index line reduced to what the dashboard may say out loud: the week, its state, how
+ * many rows it holds and how big it is. Both come from the ACTIVE part — the highest-numbered
+ * `full` part, per archive.ts — because supplements describe rows that arrived late, not a snapshot
+ * of the window, and a size beside a row count must describe the same object the count does.
+ *
+ * `bytes` is omitted rather than zeroed when the part records none: an index line written before
+ * the field existed, or a zero-row week with no data object, must render as "no size known" and not
+ * as "0 B". Weeks archived before this shipped therefore keep showing rows alone.
  *
  * Pure, and tested as such: it is the only thing standing between the private index and a public
  * page, so "no digest ever reaches the payload" is a unit test rather than a code review.
@@ -37,7 +42,15 @@ export function scrubArchiveWeek(table: string, record: unknown): PublicArchiveW
   if (typeof rec.label !== "string") return null;
   if (rec.state !== "archived" && rec.state !== "pruned") return null;
   const parts = Array.isArray(rec.parts) ? rec.parts : [];
-  return { table, week: rec.label, state: rec.state, rows: activePart(parts)?.rowCount ?? 0 };
+  const active = activePart(parts);
+  const bytes = active?.bytes;
+  return {
+    table,
+    week: rec.label,
+    state: rec.state,
+    rows: active?.rowCount ?? 0,
+    ...(typeof bytes === "number" && Number.isFinite(bytes) ? { bytes } : {}),
+  };
 }
 
 /**

@@ -455,6 +455,12 @@ export interface ArchivedPart {
   part: number;
   role: PartRole;
   rowCount: number;
+  /**
+   * Bytes of the stored object for this part — the manifest's `objectBytes`, copied into the index
+   * so the dashboard can say a week's SIZE without fetching every manifest. `null` for a zero-row
+   * week (a manifest, no data object); absent on parts written before this field existed.
+   */
+  bytes?: number | null;
   fingerprint: Fingerprint;
 }
 

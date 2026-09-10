@@ -493,7 +493,11 @@ export function buildArchiveColumns(payload: PublicPayload, now: Date, weeks = 5
     }
     const row = (currentWeekStart - monday) / DAYS_PER_WEEK;
     if (row < 0 || row >= weeks) continue;
-    channelsAt(row, w.table).data = { state: w.state, rows: w.rows };
+    channelsAt(row, w.table).data = {
+      state: w.state,
+      rows: w.rows,
+      ...(w.bytes != null ? { bytes: w.bytes } : {}),
+    };
   }
 
   const rows: Map<string, ArchiveCell>[] = [];
