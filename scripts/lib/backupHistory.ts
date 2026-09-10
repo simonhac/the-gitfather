@@ -261,8 +261,8 @@ export function buildBackupGrid(payload: PublicPayload, now: Date, weeks = 52): 
     arr.push({ run, verification, state: deriveState(run, verification, nowMs, retention), whenLabel: formatInTz(d) });
   }
 
-  // Reduce each slot to one cell. Headline colour = best success (verified > ok > expired); a slot
-  // with both successes and failures is rendered as a diagonal split (see heatmap.ts).
+  // Reduce each slot to one cell. Headline state = best success (verified > ok > expired), which
+  // becomes the cell's BODY; the runs' outcomes become its mark (see cellGlyph.ts).
   const SUCCESS_RANK: Record<string, number> = { verified: 4, ok: 3, unverified: 2, expired: 1 };
   for (let r = 0; r < weeks; r++) {
     const byCol = slotRuns.get(r);

@@ -5,18 +5,96 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <meta name="robots" content="noindex, nofollow" />
 <title>__TITLE__</title>
+<!-- Pre-paint. Must run BEFORE the stylesheet below, or a reader who has chosen dark gets a white
+     flash on every load. Kept to one line and wrapped, because localStorage THROWS (not returns
+     null) when site data is blocked, and a theme preference is not worth a blank page.
+     The key must stay in step with THEME_KEY in dashboard/theme.ts — a test pins that. -->
+<script>try{var t=localStorage.getItem("gitfather:theme");if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t)}catch(e){}</script>
 <style>
+  /* ── Tokens ────────────────────────────────────────────────────────────────
+     One declaration per colour, both halves in `light-dark()`. A theme is chosen by telling the
+     document which half to resolve — `color-scheme` — so there is no second block to keep in step
+     and nothing has to re-render. No attribute = follow the OS. */
   :root {
-    --fg:#181c24; --muted:#677085; --border:#e7e9ef; --bg:#f7f8fa; --card:#ffffff;
-    --accent:#1f8a54; --shadow:0 1px 2px rgba(16,24,40,0.04), 0 4px 16px rgba(16,24,40,0.06);
+    color-scheme: light dark;
+
+    --bg:          light-dark(#f7f8fa, #101319);
+    --card:        light-dark(#ffffff, #1a1e26);
+    --fg:          light-dark(#181c24, #e7e9ee);
+    --muted:       light-dark(#677085, #949cad);
+    --border:      light-dark(#e7e9ef, #2a2f3a);
+    --accent:      light-dark(#1f8a54, #34c878);
+
+    /* Grid chrome */
+    --surface:     light-dark(#eef0f4, #20242d);
+    --grid-border: light-dark(#e3e6ec, #2a2f3a);
+
+    /* Body — "do we have data for this period?" Two ordinal ramps, greens for backups and blues
+       for archives, because an archive is not a backup: it is where rows LIVE once they have left
+       Postgres, and it never expires. */
+    --ok:          light-dark(#1f8a54, #2a9d63);
+    --verified:    light-dark(#2fb872, #41d586);
+    --expired:     light-dark(#cdd3dc, #3a414e);
+    --archived:    light-dark(#6b9ce4, #4a7cb8);
+    --pruned:      light-dark(#24509f, #7fb3f0);
+
+    /* Mark — "did the actions in this period run clean?" Red and amber hold a deutan ΔE of 9.7,
+       so the two survive the most common colour-vision deficiency; the legend and tooltip carry
+       the rest. `--mark-ok` is deliberately the muted grey: "it ran and stored nothing" is a
+       non-event, and should not look like one of the two problem colours. */
+    --failed:      light-dark(#e5484d, #f0656a);
+    --attention:   light-dark(#d9911f, #e0a23a);
+    --mark-ok:     var(--muted);
+
+    /* Text red. NOT the mark red: #e5484d on the card is 3.9:1, under AA for 12px text, and the
+       old #d4493f was 4.35:1 — also under. This one is 5.09:1 light / 5.39:1 dark. */
+    --failed-text: light-dark(#c53d43, #f0656a);
+
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   }
+  :root[data-theme="light"] { color-scheme: light; }
+  :root[data-theme="dark"]  { color-scheme: dark; }
+
+  /* Shadows are not colours, so `light-dark()` cannot carry them — these are the only tokens that
+     still need the two-scope form. */
+  :root { --shadow: 0 1px 2px rgba(16,24,40,0.04), 0 4px 16px rgba(16,24,40,0.06);
+          --shadow-lift: 0 4px 10px rgba(16,24,40,0.08), 0 14px 30px rgba(16,24,40,0.10);
+          --tip-shadow: 0 8px 28px rgba(16,24,40,0.16); }
+  @media (prefers-color-scheme: dark) {
+    :root { --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 4px 16px rgba(0,0,0,0.4);
+            --shadow-lift: 0 4px 10px rgba(0,0,0,0.4), 0 14px 30px rgba(0,0,0,0.5);
+            --tip-shadow: 0 8px 28px rgba(0,0,0,0.55); }
+  }
+  :root[data-theme="light"] { --shadow: 0 1px 2px rgba(16,24,40,0.04), 0 4px 16px rgba(16,24,40,0.06);
+                              --shadow-lift: 0 4px 10px rgba(16,24,40,0.08), 0 14px 30px rgba(16,24,40,0.10);
+                              --tip-shadow: 0 8px 28px rgba(16,24,40,0.16); }
+  :root[data-theme="dark"]  { --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 4px 16px rgba(0,0,0,0.4);
+                              --shadow-lift: 0 4px 10px rgba(0,0,0,0.4), 0 14px 30px rgba(0,0,0,0.5);
+                              --tip-shadow: 0 8px 28px rgba(0,0,0,0.55); }
+
+
   * { box-sizing: border-box; }
   body {
     margin: 0; background: var(--bg); color: var(--fg);
     font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
   }
-  #app { max-width: 1220px; margin: 0 auto; padding: 40px 28px 72px; }
+  /* The page column is exactly as wide as the grid, and centred. `--grid-w` is the SVG's natural
+     width, set by the renderer; +42px is the heatmap card's padding (40) and border (2), and +56px
+     is this element's own padding — `box-sizing: border-box` folds both into the width. A denser
+     backup cadence makes a wider grid, so the max-width still caps it and the SVG scales to fit. */
+  #app {
+    width: min(100%, calc(var(--grid-w, 1220px) + 98px));
+    max-width: 1220px; margin: 0 auto; padding: 40px 28px 72px;
+  }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 4px; }
+
+  /* ── Header ──────────────────────────────────────────────────────────────── */
+  /* 21px = the heatmap card's padding (20) + border (1), so header and footer text starts on the
+     same vertical as the grid's left edge rather than a hair outside it. */
+  .header, .footer { padding-inline: 21px; }
+  .header { display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 16px; }
+  .header-text { flex: 1 1 340px; }
   .header h1 { margin: 0 0 6px; font-size: 26px; font-weight: 680; letter-spacing: -0.01em; }
   .subtitle { margin: 0; max-width: 780px; color: var(--muted); font-size: 14px; }
   .subtitle + .subtitle { margin-top: 4px; }
@@ -27,44 +105,101 @@
     color: var(--muted); font-size: 14px;
   }
   .tiers li { margin: 0; }
+
+  /* Three real buttons, because there are three states and `aria-pressed` has to say which is on. */
+  .theme {
+    display: flex; gap: 2px; flex: none;
+    background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 2px;
+  }
+  .theme-btn {
+    font: inherit; font-size: 12px; font-weight: 550; line-height: 1;
+    padding: 6px 11px; border: 0; border-radius: 6px;
+    background: transparent; color: var(--muted); cursor: pointer;
+  }
+  .theme-btn:hover { color: var(--fg); }
+  .theme-btn[aria-pressed="true"] { background: var(--surface); color: var(--fg); }
+
+  /* ── Stat cards ──────────────────────────────────────────────────────────── */
   .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 28px 0 22px; }
   @media (max-width: 760px) { .stats { grid-template-columns: repeat(2, 1fr); } }
   .stat {
-    background: var(--card); border: 1px solid var(--border); border-radius: 7px;
+    background: var(--card); border: 1px solid var(--border); border-radius: 8px;
     padding: 12px 15px; box-shadow: var(--shadow);
     display: flex; flex-direction: column; justify-content: center; min-height: 66px;
     transition: box-shadow 0.16s ease, transform 0.16s ease;
   }
-  .stat:hover { transform: translateY(-1px); box-shadow: 0 4px 10px rgba(16,24,40,0.08), 0 14px 30px rgba(16,24,40,0.10); }
+  .stat:hover { transform: translateY(-1px); box-shadow: var(--shadow-lift); }
+  @media (prefers-reduced-motion: reduce) {
+    .stat { transition: box-shadow 0.16s ease; }
+    .stat:hover { transform: none; }
+  }
   .stat-label { font-size: 11px; font-weight: 550; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); white-space: nowrap; }
   .stat-value { margin-top: 4px; font-size: 21px; font-weight: 680; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; line-height: 1.15; }
   .stat-value.text { font-size: 15px; font-weight: 650; letter-spacing: 0; }
   .stat-value.pos { color: var(--accent); }
-  .stat-value.bad { color: #d4493f; }
+  .stat-value.bad { color: var(--failed-text); }
+
+  /* Fills the column, which #app has already sized to the grid. */
   .card {
     background: var(--card); border: 1px solid var(--border); border-radius: 10px;
     padding: 18px 20px 12px; box-shadow: var(--shadow);
   }
-  .legend { display: flex; flex-wrap: wrap; gap: 16px; margin: 0 0 14px; font-size: 12px; color: var(--muted); }
+
+  /* ── Legend ──────────────────────────────────────────────────────────────── */
+  /* Two headed groups plus the table key, on one wrapping row. The heads are what let one grammar
+     carry two subjects: DATA is about what we hold, RUNS is about how the jobs went. */
+  .legend { display: flex; flex-wrap: wrap; row-gap: 10px; column-gap: 28px; margin: 0 0 14px; font-size: 12px; color: var(--muted); }
+  .legend-group { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+  .legend-head { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--fg); }
   .legend-item { display: flex; align-items: center; gap: 6px; }
-  .swatch { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
-  /* Divides the backup keys from the archive keys. Red, amber and empty mean the same on both
-     sides of it, so it separates two vocabularies rather than introducing a third. */
-  .legend-sep { width: 1px; height: 14px; background: var(--border); align-self: center; }
+  /* The swatch is an inline SVG drawn by the same cellOps() as the grid, on its own backdrop tile —
+     without the tile, "blank = nothing" and grey "Expired" are both invisible on a white card. */
+  .legend-swatch { display: block; flex: none; }
+  .legend-table { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
   .scroll { overflow-x: auto; padding-bottom: 6px; }
   .heatmap { display: block; }
   .footer { margin-top: 18px; font-size: 12px; color: var(--muted); }
+
+  /* ── SVG classes ─────────────────────────────────────────────────────────── */
+  /* Each rule sets `fill` for the SVG and `background-color` for the tooltip's dots, so one
+     declaration serves both surfaces and the two can never drift apart. This is also what fixes
+     the old bug: colours used to be JS constants read once at module load, so flipping the OS
+     theme restyled the page and left the grid in its load-time palette. */
+  .backdrop   { fill: var(--surface); stroke: var(--grid-border); stroke-width: 1; }
+  .gridline   { stroke: var(--grid-border); stroke-width: 1; }
+  .axis       { fill: var(--muted); font-family: var(--mono); font-size: 11px; font-variant-numeric: tabular-nums; }
+  .moat       { fill: var(--surface); }
+
+  .b-ok       { fill: var(--ok);        background-color: var(--ok); }
+  .b-verified { fill: var(--verified);  background-color: var(--verified); }
+  .b-expired  { fill: var(--expired);   background-color: var(--expired); }
+  .b-archived { fill: var(--archived);  background-color: var(--archived); }
+  .b-pruned   { fill: var(--pruned);    background-color: var(--pruned); }
+
+  .m-failed    { fill: var(--failed);    background-color: var(--failed); }
+  .m-attention { fill: var(--attention); background-color: var(--attention); }
+  .m-ok        { fill: var(--mark-ok);   background-color: var(--mark-ok); }
+
+  /* Hover is an OUTLINE, not a brightness filter: a filter would lighten the moat too and make it
+     read as a ring around the mark. The hit rect is painted `transparent` rather than left
+     unfilled, because an unfilled rect receives no pointer events — which is how a blank-body
+     cell keeps a full-size hover target. */
+  .cell-hit { fill: transparent; stroke: none; }
+  .cell:hover .cell-hit { stroke: var(--fg); stroke-opacity: 0.45; stroke-width: 1; }
+
+  /* ── Tooltip + chooser ───────────────────────────────────────────────────── */
   .tip {
-    position: fixed; z-index: 50; pointer-events: none; max-width: 248px;
+    position: fixed; z-index: 50; pointer-events: none; max-width: 262px;
     background: var(--card); color: var(--fg); border: 1px solid var(--border);
     border-radius: 8px; padding: 9px 11px; font-size: 12px; line-height: 1.45;
-    box-shadow: 0 8px 28px rgba(16,24,40,0.16);
+    box-shadow: var(--tip-shadow);
   }
   /* Beak: a 9px square rotated 45°, half-buried in the panel so only its outer two edges show. Its
      background covers the panel border it straddles, so the two read as one outline. `--beak-x` is
      set per-panel from the cell's centre, so a panel clamped against the viewport edge still points
      at the right cell. It matters more than it looks: a screenshot has no cursor in it, and a tip
-     floating near an 11px square would otherwise be about nothing in particular. */
+     floating near a small square would otherwise be about nothing in particular. */
   .tip::after {
     content: ""; position: absolute; width: 9px; height: 9px;
     left: var(--beak-x, 20px); margin-left: -4.5px;
@@ -80,9 +215,17 @@
   .tip-when { font-weight: 620; margin-bottom: 3px; }
   .tip-state { display: flex; align-items: center; gap: 6px; }
   .tip-muted { color: var(--muted); margin-top: 2px; }
-  .tip-fail { color: #d4493f; margin-top: 2px; }
+  .tip-fail { color: var(--failed-text); font-weight: 600; margin-top: 2px; }
   .tip-hint { color: var(--muted); opacity: 0.8; margin-top: 5px; }
-  .dot { width: 9px; height: 9px; border-radius: 2px; display: inline-block; flex: none; }
+  .tip-sub { color: var(--muted); font-weight: 600; margin-top: 2px; }
+  /* Splits "this week's data" from "runs this week". The two halves are about DIFFERENT weeks —
+     the run that executed this week archived rows dated months ago — and a reader will assume
+     otherwise unless something stops them. */
+  .tip-rule { border: 0; border-top: 1px solid var(--border); margin: 7px 0 5px; }
+  .tip-count { font-variant-numeric: tabular-nums; }
+  /* A data dot is a square; a run mark is a pill, the same shape it has in the grid. */
+  .dot { width: 10px; height: 10px; border-radius: 2px; display: inline-block; flex: none; }
+  .dot.mark { width: 12px; height: 3px; border-radius: 1.5px; }
   .tip.pinned { pointer-events: auto; }
   .tip-link, .tip-row { display: flex; align-items: center; gap: 6px; margin: 2px -6px 0; padding: 5px 6px; border-radius: 7px; }
   .tip-link { color: inherit; text-decoration: none; cursor: pointer; }
@@ -90,12 +233,6 @@
   .tip-run-label { flex: 1; }
   .tip-go { color: var(--muted); flex: none; }
   .tip-nolink { font-size: 11px; opacity: 0.7; }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --fg:#e7e9ee; --muted:#949cad; --border:#2a2f3a; --bg:#101319; --card:#1a1e26;
-      --accent:#34c878; --shadow:0 1px 2px rgba(0,0,0,0.3), 0 4px 16px rgba(0,0,0,0.4);
-    }
-  }
 </style>
 </head>
 <body>

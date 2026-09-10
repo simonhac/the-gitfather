@@ -319,7 +319,7 @@ export interface BackupCell {
   successState: BackupCellState | null;
   /** True if any run in the slot failed. */
   hasFailure: boolean;
-  /** True if the slot holds more than one run (→ notch + possible diagonal split). */
+  /** True if the slot holds more than one run. */
   multiple: boolean;
 }
 
@@ -380,11 +380,11 @@ export interface ArchiveCell {
   successState: ArchiveCellState | null;
   /**
    * Worst of failed/attention among the troubled runs (null if none). BackupCell gets away with a
-   * `hasFailure` boolean because failure has one colour; archives have two, and the diagonal split
-   * needs to know which one to paint.
+   * `hasFailure` boolean because failure has one colour and archives have two — a refusal and a
+   * breakage are different things, and the cell has to know which one it is showing.
    */
   problemState: ArchiveCellState | null;
-  /** True if the week holds more than one record for this table (→ notch + possible split). */
+  /** True if the week holds more than one record for this table. */
   multiple: boolean;
 }
 
