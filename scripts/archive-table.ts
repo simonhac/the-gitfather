@@ -226,7 +226,7 @@ async function rebuildIndex(
       const prior = parts.find((p) => p.part === n);
       if (prior) prior.role = "superseded";
     }
-    parts.push({ part: m.part, role: m.role, rowCount: m.rowCount, fingerprint: m.fingerprint });
+    parts.push({ part: m.part, role: m.role, rowCount: m.rowCount, bytes: m.objectBytes ?? null, fingerprint: m.fingerprint });
     states.set(m.week, {
       label: m.week,
       state: "archived", // provisional; reconciled against the live table below
@@ -393,7 +393,7 @@ async function archiveWeek(ctx: {
     const p = parts.find((x) => x.part === n);
     if (p) p.role = "superseded";
   }
-  parts.push({ part, role: plan.role!, rowCount: live.n, fingerprint: live });
+  parts.push({ part, role: plan.role!, rowCount: live.n, bytes: manifest.objectBytes, fingerprint: live });
   states.set(week.label, {
     label: week.label,
     state: prior?.state === "pruned" ? "pruned" : "archived",

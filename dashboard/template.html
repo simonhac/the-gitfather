@@ -31,8 +31,13 @@
 
     /* Body — "do we have data for this period?" Two ordinal ramps, greens for backups and blues
        for archives, because an archive is not a backup: it is where rows LIVE once they have left
-       Postgres, and it never expires. */
-    --ok:          light-dark(#1f8a54, #2a9d63);
+       Postgres, and it never expires.
+
+       Within the green ramp the two steps have to be told apart at 12px across a grid, not held
+       side by side in the legend: `--ok` ("a backup exists") sits well below `--verified` ("and a
+       restore drill proved it"), so the brighter square always means the stronger claim. They were
+       one step apart and read as the same green on the published page. */
+    --ok:          light-dark(#12643c, #1f7d50);
     --verified:    light-dark(#2fb872, #41d586);
     --expired:     light-dark(#cdd3dc, #3a414e);
     --archived:    light-dark(#6b9ce4, #4a7cb8);

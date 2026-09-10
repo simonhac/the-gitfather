@@ -54,6 +54,7 @@ import {
   type RectOp,
 } from "../scripts/lib/cellGlyph.js";
 import { summarizeOutcomes, type CellMark, type OutcomeCode, NO_MARK } from "../scripts/lib/outcomes.js";
+import { bindUnits } from "../scripts/lib/units.js";
 import { themeControl } from "./theme.js";
 
 const SVGNS = "http://www.w3.org/2000/svg";
@@ -440,12 +441,30 @@ const PANEL_GAP = 3;
 const EDGE = 8;
 
 /**
+ * Bind every "5.9 MB" / "2 weeks" in a subtree so it cannot wrap — see units.ts for why this is done
+ * to rendered text rather than to the strings that produce it.
+ *
+ * Walking TEXT NODES, not the HTML, is the point: the tooltip markup carries class names and hrefs,
+ * and a regex over the serialised form could reach inside an attribute. A text node cannot be an
+ * attribute, so this is incapable of corrupting the markup it fixes.
+ */
+function bindUnitsIn(root: Node): void {
+  const walk = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  for (let n = walk.nextNode(); n; n = walk.nextNode()) {
+    const bound = bindUnits(n.nodeValue ?? "");
+    if (bound !== n.nodeValue) n.nodeValue = bound;
+  }
+}
+
+/**
  * Place a panel against a cell: below it when there is room, above it when there isn't, centred on
  * the cell and clamped to the viewport — with the beak shifted by whatever the clamp took, so it
  * keeps pointing at the cell even when the panel has been pushed sideways.
  */
 function placePanel(el: HTMLElement, html: string, anchor: Anchor): void {
   el.innerHTML = html;
+  bindUnitsIn(el); // before measuring: a bound line is what decides the panel's width
+
   // Measure from the left edge, not from wherever the panel last sat. These are fixed-position
   // shrink-to-fit boxes with `right: auto`, so their width depends on the space between `left` and
   // the viewport edge: measuring after positioning yields a width the panel then reflows away from,
@@ -698,6 +717,13 @@ function archiveProblem(r: PublicArchiveRun): string {
   return bits.join(" · ");
 }
 
+/**
+ * " · 41.2 KB" — the size of the object those rows are stored in, said the same way a backup cell
+ * says its dump's size. Empty when the index line predates the field, so an old week reads as rows
+ * alone rather than claiming 0 B.
+ */
+const archiveSize = (bytes: number | undefined): string => (bytes == null ? "" : ` · ${formatBytes(bytes)}`);
+
 const ARCHIVE_DATA_LABEL: Record<ArchiveBodyState, string> = {
   archived: "Archived",
   pruned: "Pruned (verified at prune)",
@@ -719,7 +745,7 @@ function archiveTipHtml(r: number, table: string, cell: ArchiveCell | null): str
   const data = cell?.data ?? null;
   lines.push(
     data
-      ? `<div class="tip-state">${dot(bodyClass(data.state)!)}${ARCHIVE_DATA_LABEL[data.state]} · ${rowsWord(data.rows)}</div>`
+      ? `<div class="tip-state">${dot(bodyClass(data.state)!)}${ARCHIVE_DATA_LABEL[data.state]} · ${rowsWord(data.rows)}${archiveSize(data.bytes)}</div>`
       : `<div class="tip-muted">No rows archived for this week</div>`,
   );
 
@@ -766,3 +792,8 @@ function archiveChooserHtml(cell: ArchiveCell): string {
 // Footer: generated-at
 const footer = elem("footer", "footer", `Updated ${formatInTz(now)} · times in ${DISPLAY_TZ}`);
 app.appendChild(footer);
+
+// The page is now complete, so bind its numbers to their units in one pass — the stat values, the
+// GFS bullets, the archive blurb, the week-start labels and this footer, none of which know about
+// each other. The tooltips are bound as they are built, in placePanel.
+bindUnitsIn(app);
