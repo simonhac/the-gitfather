@@ -88,6 +88,46 @@ test("every body and mark class colours the SVG and the tooltip from one declara
   }
 });
 
+// ── Palette separation ───────────────────────────────────────────────────────
+
+/** WCAG relative luminance of a #rrggbb literal. */
+function luminance(hex: string): number {
+  const ch = (i: number): number => {
+    const c = parseInt(hex.slice(1 + i * 2, 3 + i * 2), 16) / 255;
+    return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+  };
+  return 0.2126 * ch(0) + 0.7152 * ch(1) + 0.0722 * ch(2);
+}
+const ratio = (a: string, b: string): number => {
+  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+  return (hi + 0.05) / (lo + 0.05);
+};
+/** The two `light-dark()` arms of a token, as hex literals. */
+function arms(token: string): [string, string] {
+  const m = html.match(new RegExp(`${token}:\\s*light-dark\\((#[0-9a-f]{6}),\\s*(#[0-9a-f]{6})\\)`));
+  assert.ok(m, `${token} must be declared as light-dark() of two hex literals`);
+  return [m![1], m![2]];
+}
+
+test("the two greens are a real step apart — a verified backup must LOOK like the stronger claim", () => {
+  // `--ok` and `--verified` are the same shape in the same column; colour is the only thing
+  // carrying "a drill proved this one restores". At one step apart they read as one green on the
+  // published page, which is the whole reason this floor exists.
+  const [okL, okD] = arms("--ok");
+  const [verL, verD] = arms("--verified");
+  assert.ok(ratio(okL, verL) >= 2.4, `light: ${okL} vs ${verL} is only ${ratio(okL, verL).toFixed(2)}:1`);
+  assert.ok(ratio(okD, verD) >= 2.4, `dark: ${okD} vs ${verD} is only ${ratio(okD, verD).toFixed(2)}:1`);
+});
+
+test("…and the darker of the two still clears 3:1 against the grid it sits on", () => {
+  // The floor above is satisfiable by making `--ok` black. This is the other side of it: a body
+  // square is a graphical object, so AA wants 3:1 against the surface behind it.
+  const [okL, okD] = arms("--ok");
+  const [surfL, surfD] = arms("--surface");
+  assert.ok(ratio(okL, surfL) >= 3, `light: ${okL} on ${surfL} is ${ratio(okL, surfL).toFixed(2)}:1`);
+  assert.ok(ratio(okD, surfD) >= 3, `dark: ${okD} on ${surfD} is ${ratio(okD, surfD).toFixed(2)}:1`);
+});
+
 test("every token a rule reads is actually declared", () => {
   // A declaration is `--x:`; a read is `var(--x)` and is never followed by a colon, so a plain
   // global match separates the two without caring how the stylesheet is wrapped.
