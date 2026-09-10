@@ -53,7 +53,7 @@ import {
   type BodyClass,
   type RectOp,
 } from "../scripts/lib/cellGlyph.js";
-import { summarizeOutcomes, type CellMark, type OutcomeCode, NO_MARK } from "../scripts/lib/outcomes.js";
+import { type CellMark, type OutcomeCode, NO_MARK } from "../scripts/lib/outcomes.js";
 import { bindUnits } from "../scripts/lib/units.js";
 import { themeControl } from "./theme.js";
 
@@ -609,17 +609,6 @@ function esc(s: string): string {
   return s.replace(/[&<>]/g, (c) => (c === "&" ? "&amp;" : c === "<" ? "&lt;" : "&gt;"));
 }
 
-/**
- * The "N actions · M not clean" summary for a period holding more than one run — the line the cell's
- * two-dash mark is short for. Its pill is the worst code, which is the dash the eye lands on first.
- */
-function actionsLine(codes: OutcomeCode[]): string {
-  const worst = summarizeOutcomes(codes).worst ?? "ok";
-  const bad = codes.filter((c) => c !== "ok").length;
-  const tail = bad > 0 ? `${bad} not clean` : "all clean";
-  return `<div class="tip-state">${markDot(worst)}<span class="tip-count">${codes.length} actions · ${tail}</span></div>`;
-}
-
 function cellHtml(cell: BackupCell): string {
   const lines: string[] = [];
   const multiple = cell.runs.length > 1;
@@ -649,7 +638,6 @@ function cellHtml(cell: BackupCell): string {
     }
     if (!sr.run.ok) lines.push(`<div class="tip-fail">Backup failed.</div>`);
   }
-  if (multiple) lines.push(actionsLine(cell.runs.map(backupCode)));
   if (clickable(cell)) {
     lines.push(`<div class="tip-hint">${multiple ? "Click to choose a run to open ↗" : "Click to open the GitHub run ↗"}</div>`);
   }
@@ -769,8 +757,6 @@ function archiveTipHtml(r: number, table: string, cell: ArchiveCell | null): str
     }
     if (sr.state === "attention") lines.push(`<div class="tip-fail">${archiveProblem(sr.run)} — needs a look</div>`);
     if (sr.state === "failed") lines.push(`<div class="tip-fail">Archive run failed.</div>`);
-  } else {
-    lines.push(actionsLine(runs.map(archiveCode)));
   }
   if (clickable(cell)) {
     lines.push(`<div class="tip-hint">${runs.length > 1 ? "Click to choose a run to open ↗" : "Click to open the GitHub run ↗"}</div>`);
