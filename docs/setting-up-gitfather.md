@@ -24,7 +24,6 @@ their-repo                          the-gitfather (engine, public)
   .github/workflows/        └─uses─►   .github/workflows/  (reusable: workflow_call)
     pg-backup.yml ────────────────►     pg-backup.yml
     pg-durable-verify.yml ────────►     pg-durable-verify.yml   (daily; supersedes the weekly drill)
-    pg-staleness-check.yml ───────►     pg-staleness-check.yml
     pg-dashboard.yml ─────────────►     pg-dashboard.yml
     pg-archive.yml ───────────────►     pg-archive.yml          (optional — the table archiver)
     pg-restore-drill.yml ─────────►     pg-restore-drill.yml    (optional — superseded by durable-verify)
@@ -42,10 +41,10 @@ their-repo                          the-gitfather (engine, public)
    lives *here*, not in their repo.
 5. **Move credentials into GitHub Secrets** (and `R2_BUCKET` / `DASHBOARD_R2_BUCKET` / `SLACK_CHANNEL`
    into **Variables**), then **add the caller workflows** ([wiring-a-consuming-repo.md](wiring-a-consuming-repo.md)),
-   pointing `profile:` at the new file. Each caller carries its own `schedule:` cron — or, if the
-   operator runs several projects and wants one punctual scheduler, drop the cron blocks and use the
-   [Cloudflare Worker scheduler](../scheduler/README.md) instead. Pushing workflow files needs a token
-   with the **`workflow`** scope.
+   pointing `profile:` at the new file. The callers carry no `schedule:` cron — the
+   [Cloudflare Worker](../scheduler/README.md) dispatches them and runs the staleness watchdog, so the
+   client must also be added to the Worker's roster (with an R2 binding to its bucket). Pushing
+   workflow files needs a token with the **`workflow`** scope.
 6. **Prove it:** trigger `pg-backup` via `workflow_dispatch` and confirm an object lands in R2.
 
 **Three things `doctor` cannot catch — a green checklist is *not* a proven backup:**
@@ -92,7 +91,7 @@ Then you run `npm run doctor -- all` with both files in scope and interpret the 
 `doctor` will verify these, but flag missing ones early so the user can install them:
 
 - `node` + `npm ci` already run (installs `tsx`, `zod`, `esbuild`).
-- CLI tools on PATH: `rclone`, `pg_dump`, `pg_restore`, `psql`. Plus `age` **only if** they choose `encryption: age`, and `gh` **only if** staleness self-heal is on (the default).
+- CLI tools on PATH: `rclone`, `pg_dump`, `pg_restore`, `psql`. Plus `age` **only if** they choose `encryption: age`.
 - If they're enabling the **archiver** (§3g): `zstd` (or `gzip`) for compression and `age` for archive
   encryption — note `age` is needed for `archive.encryption: age` even when the dumps themselves are
   unencrypted, because the archive uses its own recipient.
@@ -182,11 +181,11 @@ Everything here has a safe default or is feature-gated. Ask, but offer the defau
 | Variable | Default | Meaning |
 |---|---|---|
 | `SLACK_BOT_TOKEN` | (unset → Slack off) | `xoxb-…`, scope `chat:write` (secret, env) |
-| `SLACK_CHANNEL` | — | channel id `C…` (non-secret, env — a GitHub Variable). **Required if `SLACK_BOT_TOKEN` is set** (else the row silently never posts) |
+| `SLACK_CHANNEL` / `slack.channel` | — | channel id `C…` (non-secret — either the env Variable or the profile key; env wins). **Required if `SLACK_BOT_TOKEN` is set** (else the row silently never posts). The Worker's watchdog posts to the same channel |
 | `slack.alert-mention` | `<!here>` | prepended to failure alerts (`<!here>` / `<!channel>`) — profile |
 | `timezone` | `UTC` | IANA tz for the daily row's date + HH:MM labels (e.g. `Australia/Perth`) |
 | `dashboard.url` | (unset) | if set, hyperlinks the Slack header's "`<basename> DB backup`" text to the dashboard. See note below on how to obtain it. |
-| `ALERT_WEBHOOK_URL` | (unset) | optional **failure** webhook (secret), independent of the bot — a Slack-compatible `{"text":…}` POST on backup/drill/staleness failure. A no-bot alert fallback, or a redundant failure channel into a host app's existing incoming webhook. Fires on failure only (no success spam). |
+| `ALERT_WEBHOOK_URL` | (unset) | optional **failure** webhook (secret), independent of the bot — a Slack-compatible `{"text":…}` POST on backup/drill failure. A no-bot alert fallback, or a redundant failure channel into a host app's existing incoming webhook. Fires on failure only (no success spam). The watchdog's copy is a Worker secret (`ALERT_WEBHOOK_URL_<ID>`). |
 
 ### 3d. Public dashboard (→ profile + secrets)
 
@@ -217,14 +216,19 @@ Everything here has a safe default or is feature-gated. Ask, but offer the defau
 
 ### 3e. Staleness behaviour (→ profile, defaults fine)
 
+The watchdog itself runs in the [Cloudflare Worker](../scheduler/README.md) every 10 minutes; these
+keys are still written **here**, because the backup job publishes the validated block to
+`_config/<name>/watchdog.json` in the bucket on every run, and the Worker reads it there. An edit
+lands with the next backup run (or a manual `workflow_dispatch` of `pg-backup`).
+
 | Variable | Default | Meaning |
 |---|---|---|
-| `staleness.slot-minutes` | `480` | backup cadence in minutes — **must match your backup cron interval** (`0 0,8,16 * * *` = 480). The primary freshness trigger: a slot with no backup past its grace window is "overdue" |
+| `staleness.slot-minutes` | `480` | backup cadence in minutes — **must match the Worker's backup cadence** (00/08/16 UTC = 480). The primary freshness trigger: a slot with no backup past its grace window is "overdue" |
 | `staleness.grace-minutes` | `25` | minutes past a slot boundary before it counts as overdue (**must be < slot-minutes**). Trades faster recovery against redundant heals on scheduler jitter |
-| `staleness.repage-minutes` | `60` | minutes between **loud** re-pages while an outage persists. The check runs every ~10 min, so paging on every tick turns a long outage into dozens of identical `@here` messages; entry into an outage and any change of **cause** still page immediately. `0` restores page-every-tick. Affects Slack only — the job still exits non-zero, so Actions and the dashboard are unchanged, and a recovery note is posted when a fresh backup lands |
-| `staleness.self-heal` | `true` | on a missed tick, re-trigger the backup workflow via `gh` (needs `gh` auth + `GITHUB_REPOSITORY`) |
+| `staleness.repage-minutes` | `60` | minutes between **loud** re-pages while an outage persists. The check runs every ~10 min, so paging on every tick turns a long outage into dozens of identical `@here` messages; entry into an outage and any change of **cause** still page immediately. `0` restores page-every-tick. Affects Slack only — every tick's outcome is still recorded in the scheduler's state, and a recovery note is posted when a fresh backup lands |
+| `staleness.self-heal` | `true` | on a missed slot, dispatch the backup caller workflow (`reason=self-heal` → 🩹) |
 | `staleness.dry-run` | `false` | staleness check evaluates but takes no action |
-| `staleness.heal-workflow` | `pg-backup.yml` | workflow file self-heal triggers |
+| `staleness.heal-workflow` | `pg-backup.yml` | the caller workflow file (in the consuming repo) self-heal dispatches |
 | `HEARTBEAT_URL` | (unset) | optional dead-man's-switch URL pinged on success (e.g. healthchecks.io) |
 
 > `dump.min-bytes` is **also** the staleness floor: a fresh-but-smaller newest object is treated as broken
@@ -331,8 +335,6 @@ DASHBOARD_R2_SECRET_ACCESS_KEY="…"
 # archive (optional — the archiver is the only task that DELETES from the source):
 PG_ARCHIVE_DATABASE_URL="postgres://…"
 AGE_ARCHIVE_RECIPIENT="age1…"        # public key only; its identity stays OFFLINE
-# staleness self-heal (optional):
-GITHUB_REPOSITORY="owner/repo"
 ```
 
 > `R2_BUCKET`, `DASHBOARD_R2_BUCKET`, and `SLACK_CHANNEL` are stored as GitHub **Variables** (not Secrets)
@@ -365,7 +367,7 @@ credentials.
 > manual `workflow_dispatch` of `pg-backup` (or a local `backup-pg-to-r2.ts` run) that lands an object in
 > R2.
 
-`-- all` checks `backup`, `archive`, `drill`, `verify-durable`, `staleness`, and `dashboard`. You can
+`-- all` checks `backup`, `archive`, `drill`, `verify-durable`, and `dashboard`. You can
 scope to one task: `npm run doctor -- backup`. `doctor -- archive` needs `PG_ARCHIVE_DATABASE_URL`
 and only makes sense once the profile has an `archive:` block.
 
@@ -471,13 +473,14 @@ Once doctor is green locally, tell the user the remaining steps the engine can't
    bucket/channel values into GitHub **Variables**) — see the
    [secrets/variables table](wiring-a-consuming-repo.md#3-set-the-secrets--variables-in-your-repo).
 3. Wire the caller workflows (`pg-backup.yml`, `pg-durable-verify.yml` — daily; supersedes the weekly
-   `pg-restore-drill.yml` — `pg-staleness-check.yml`, `pg-dashboard.yml`, plus `pg-archive.yml` if they
-   archive) per [wiring-a-consuming-repo.md](wiring-a-consuming-repo.md), pointing `profile:` at the new
-   profile. **Pass every secret explicitly** — `secrets: inherit` silently passes nothing across owners
-   (the #1 first-run failure). Pushing the workflow files needs a token with the **`workflow`** scope.
-4. If they'll use the [Worker scheduler](../scheduler/README.md) instead of GitHub cron: delete the
-   `schedule:` blocks and add the client to the roster — and remember `archive` is **opt-in**, so its
-   `cadences` list must name `"archive"` explicitly.
+   `pg-restore-drill.yml` — `pg-dashboard.yml`, plus `pg-archive.yml` if they archive) per
+   [wiring-a-consuming-repo.md](wiring-a-consuming-repo.md), pointing `profile:` at the new profile.
+   **Pass every secret explicitly** — `secrets: inherit` silently passes nothing across owners (the #1
+   first-run failure). Pushing the workflow files needs a token with the **`workflow`** scope.
+4. Add the client to the [Worker's roster](../scheduler/README.md) with an R2 binding to its bucket —
+   the Worker dispatches every cadence and runs the staleness watchdog. Remember `archive` is
+   **opt-in**, so its `cadences` list must name `"archive"` explicitly. The watchdog reports
+   `no-config` until the first backup run publishes the profile's `staleness:` block to the bucket.
 5. If a first archive backfill ran, schedule a **`VACUUM FULL`** on that table: a plain `DELETE` only
    marks space reusable, so without it the table stops growing but never shrinks. It takes an
    `ACCESS EXCLUSIVE` lock — size the window to the table.

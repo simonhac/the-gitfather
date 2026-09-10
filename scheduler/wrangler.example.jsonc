@@ -1,9 +1,10 @@
 {
   // ─────────────────────────────────────────────────────────────────────────────
-  // Template — copy to wrangler.jsonc (gitignored) and fill in the real bucket name.
+  // Template — copy to wrangler.jsonc (gitignored) and fill in the real bucket names + roster.
   //   cp wrangler.example.jsonc wrangler.jsonc
-  // Everything secret (GitHub App id + private key, client roster, trigger secret) is set OUT of band with
-  // `wrangler secret put …` — see README.md. The only per-deployment value here is the R2 bucket name.
+  // Everything secret (GitHub App id + private key, trigger secret, Slack bot token) is set OUT of band
+  // with `wrangler secret put …` — see README.md. This file holds the NON-secret deployment shape: which
+  // buckets the Worker can see, and which client each one belongs to.
   // ─────────────────────────────────────────────────────────────────────────────
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "gitfather-scheduler",
@@ -14,14 +15,36 @@
   // ONE cron trigger — 1 of the free plan's 5. The handler decides which cadences are due per tick.
   "triggers": { "crons": ["*/10 * * * *"] },
 
-  // The SHARED dashboard bucket. The Worker writes its state/log under the _scheduler/ prefix.
-  // Native binding = free, in-network (no S3 token, no egress). Replace with your real bucket name.
-  "r2_buckets": [{ "binding": "STATE", "bucket_name": "YOUR_SHARED_DASHBOARD_BUCKET" }]
+  // Native bindings = free, in-network (no S3 token, no egress). All buckets must be in THIS account.
+  //   STATE       the SHARED (public) dashboard bucket — scheduler state + logs under _scheduler/
+  //   <CLIENT>_R2 each client's PRIVATE dump bucket — the watchdog reads _config/, _status/, _log/ and
+  //               <backup-prefix>/2hourly/ from it, and writes _status/ (alert episode, Slack row state).
+  "r2_buckets": [
+    { "binding": "STATE", "bucket_name": "YOUR_SHARED_DASHBOARD_BUCKET" },
+    { "binding": "ALPHA_R2", "bucket_name": "alpha-pg-backups" },
+    { "binding": "BETA_R2", "bucket_name": "beta-pg-backups" }
+  ],
+
+  // The client roster. Bootstrap identifiers ONLY — every watchdog setting comes from the profile in the
+  // client's own repo, which the backup job publishes to `_config/<name>/watchdog.json` in its bucket.
+  //   id              opaque label; the only client identifier that reaches the (public) logs
+  //   owner / repo    the consuming repo the caller workflows live in
+  //   installationId  the GitHub App's installation id on that owner (README → "GitHub App setup")
+  //   bucket          the r2_buckets binding of that client's private dump bucket
+  //   cadences        optional allowlist; omit for every non-opt-in cadence ("archive" is opt-in)
+  //   workflows       optional per-cadence caller filename overrides
+  "vars": {
+    "ROSTER": [
+      { "id": "alpha", "owner": "your-org", "repo": "alpha-app", "installationId": 11111111, "bucket": "ALPHA_R2" },
+      { "id": "beta", "owner": "other-org", "repo": "beta-app", "installationId": 22222222, "bucket": "BETA_R2", "cadences": ["backup", "staleness", "durableVerify", "archive"] }
+    ]
+  }
 
   // Secrets (NEVER committed — set with `wrangler secret put`):
-  //   GH_APP_ID           GitHub App id (the JWT `iss`)
-  //   GH_APP_PRIVATE_KEY  the App private key as a PKCS#8 PEM ("BEGIN PRIVATE KEY") — convert GitHub's PKCS#1
-  //                       once with `openssl pkcs8 -topk8 -nocrypt`. See README "GitHub App setup".
-  //   CLIENTS             JSON roster: [{ "id","owner","repo","installationId", "workflows": { cadence: "file.yml" } }]
-  //   TRIGGER_SECRET      random string gating the manual /trigger and /state endpoints
+  //   GH_APP_ID              GitHub App id (the JWT `iss`)
+  //   GH_APP_PRIVATE_KEY     the App private key as a PKCS#8 PEM ("BEGIN PRIVATE KEY") — convert GitHub's PKCS#1
+  //                          once with `openssl pkcs8 -topk8 -nocrypt`. See README "GitHub App setup".
+  //   TRIGGER_SECRET         random string gating the manual /trigger and /state endpoints
+  //   SLACK_BOT_TOKEN        the watchdog's bot token (chat:write); optional per-client SLACK_BOT_TOKEN_<ID>
+  //   ALERT_WEBHOOK_URL_<ID> optional per-client failure webhook (Slack-compatible {"text":…} POST)
 }

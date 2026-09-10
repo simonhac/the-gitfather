@@ -105,8 +105,11 @@ credential-rotation:
                                # A tracked prefix with NO recorded rotation reports `unknown` — which
                                # is the case this check exists for, so it is reported, not skipped.
 
-staleness:                     # check-staleness.ts
-  slot-minutes: 480            # backup cadence in minutes — MUST match the backup cron interval (0 0,8,16 = 480)
+staleness:                     # the watchdog — runs in the Cloudflare Worker (scheduler/), every 10 min.
+                               # The backup PUBLISHES this block (validated, defaults applied) to
+                               # _config/<name>/watchdog.json in the bucket on every run; the Worker
+                               # reads it there. An edit here lands with the next backup run.
+  slot-minutes: 480            # backup cadence in minutes — MUST match the Worker's backup cadence (00/08/16 UTC = 480)
   grace-minutes: 25            # minutes past a slot boundary before it's "overdue" — trades faster recovery
                                #   (≈ grace + check interval) against redundant heals on scheduler jitter
   max-age-hours: 12            # backstop: page if the newest 2hourly/ object is older than this (slot logic
@@ -115,15 +118,17 @@ staleness:                     # check-staleness.ts
                                #   backstop that tight pages on every healthy tick.
   repage-minutes: 60           # minutes between LOUD re-pages while an outage persists. The check runs
                                #   far more often than this; entry and any change of CAUSE always page.
-                               #   0 = page every tick (the old behaviour). Slack noise only — the job
-                               #   still exits non-zero, so Actions and the dashboard are unchanged.
-  heal-workflow: pg-backup.yml # the workflow self-heal re-triggers on a missed slot
+                               #   0 = page every tick (the old behaviour). Slack noise only — every
+                               #   tick's outcome is still recorded in the scheduler's state/log.
+  heal-workflow: pg-backup.yml # the caller workflow (in YOUR repo) self-heal dispatches on a missed slot
   self-heal: true              # false = alert only (never auto-retry)
   dry-run: false               # true = log the trigger, don't fire
 
-slack:                         # optional. Credentials are env: SLACK_BOT_TOKEN (secret) +
-  alert-mention: "<!here>"     #   SLACK_CHANNEL (a GitHub Variable). Here, only the mention string:
-                               #   prepended to failure alerts (<!here> active members, <!channel> everyone)
+slack:                         # optional. The bot token is env: SLACK_BOT_TOKEN (a secret).
+  channel: ""                  # channel id (C…) to post in — non-secret, so it may live here. The env
+                               #   SLACK_CHANNEL (a GitHub Variable) wins when set. The Worker's watchdog
+                               #   posts to this channel too (from the published watchdog config).
+  alert-mention: "<!here>"     # prepended to failure alerts (<!here> active members, <!channel> everyone)
 
 dashboard:                     # optional public backup-history dashboard
   label: ""                    # display label; defaults to `name`

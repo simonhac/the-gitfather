@@ -1,11 +1,10 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // The timezone abbreviation shown in the Slack day header and the dashboard.
 //
-// Browser-safe (Intl only): backupHistory.ts imports this and is bundled into the
-// dashboard by build-dashboard.ts, which `define`s DISPLAY_TZ at build time.
+// Browser-safe AND Worker-safe (Intl only, no env): backupHistory.ts bundles it into the dashboard,
+// dailyRow.ts into the Cloudflare Worker. The zone is always passed in — this module must not
+// import backupTypes.ts, which reads process.env at load.
 // ─────────────────────────────────────────────────────────────────────────────
-
-import { DISPLAY_TZ } from "./backupTypes.js";
 
 /**
  * CLDR only carries letter abbreviations for a zone in the locales of that zone's OWN region, so no
@@ -31,7 +30,7 @@ function shortName(locale: string, timeZone: string, d: Date): string {
  * to the raw offset ("GMT+9") for zones English CLDR has no abbreviation for (Tokyo, Shanghai, São
  * Paulo). DST-correct because the probe runs per instant, not once at module load.
  */
-export function tzAbbrev(d: Date, timeZone: string = DISPLAY_TZ): string {
+export function tzAbbrev(d: Date, timeZone: string): string {
   let fallback = "";
   for (const locale of LOCALES) {
     const v = shortName(locale, timeZone, d);

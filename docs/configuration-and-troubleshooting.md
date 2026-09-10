@@ -14,12 +14,12 @@ keys). Credentials are **never** in it — they come from the environment (GitHu
   non-empty), `min-row-ratio`, `max-row-ratio`, `max-row-drop`
 - **`verify-durable:`** — `fresh`, `aged`, `retest-days`, `max-restores`
 - **`archive:`** *(optional — see [Archiving a table out of Postgres](archiving.md))* — `store-prefix`, `encryption` (`none`|`age`), `compression` (`zstd`|`gzip`|`none`), `compression-level`, and `tables:` — a list of `{ table, time-column, archive-after-weeks, prune-after-weeks, delete-batch-rows, max-weeks-per-run }`
-- **`staleness:`** — `slot-minutes`, `grace-minutes`, `max-age-hours` (unset → derived from the cadence), `repage-minutes`, `heal-workflow`, `self-heal`, `dry-run`
+- **`staleness:`** — `slot-minutes`, `grace-minutes`, `max-age-hours` (unset → derived from the cadence), `repage-minutes`, `heal-workflow`, `self-heal`, `dry-run`. Consumed by the [Worker's watchdog](../scheduler/README.md): the backup publishes the validated block to `_config/<name>/watchdog.json` on every run
 - **`credential-rotation:`** — `max-age-days` (default `365`; 0 disables) and `track:` — the credential prefixes to
   watch, matching the ENV names (`R2_ACCESS_KEY_ID` → `R2`). A tracked prefix with no recorded
   rotation reports `unknown`, which is grouped with `due`. See
   [Knowing when a rotation is overdue](r2-setup.md#knowing-when-a-rotation-is-overdue)
-- **`slack:`** — `alert-mention` (the channel id is env: `SLACK_CHANNEL`)  ·  **`dashboard:`** — `label`, `hide-run-links`, `url`, `path-prefix`
+- **`slack:`** — `channel` (or the env `SLACK_CHANNEL`, which wins), `alert-mention`  ·  **`dashboard:`** — `label`, `hide-run-links`, `url`, `path-prefix`
 
 All have safe defaults — see **[Verifying backups and restoring for real](verify-and-restore.md)**.
 
@@ -46,17 +46,17 @@ it's proven by `doctor`'s live probes.
 `doctor` is a **read-only** preflight — *"is this consumer actually wired up?"* — for verifying a
 freshly-configured repo before go-live. It runs the **same** config schema, then probes the external
 clients (binaries on PATH, `pg_dump`/`pg_restore` version, R2 bucket reachable via `rclone lsf`,
-Postgres via `select 1`, Slack `auth.test`, `gh auth status`). It performs **no writes** — no dump, no
-upload, no `gh workflow run`, no Slack post — so it's safe against production creds.
+Postgres via `select 1`, Slack `auth.test`). It performs **no writes** — no dump, no upload, no
+workflow trigger, no Slack post — so it's safe against production creds.
 
 ```bash
-npm run doctor -- backup           # one task: backup | archive | drill | verify-durable | staleness | dashboard
+npm run doctor -- backup           # one task: backup | archive | drill | verify-durable | dashboard
 npm run doctor -- all              # every task's config + probes
 PROFILE=profiles/example.yaml npm run doctor -- backup   # ✓/⚠/✗ checklist; exit 0 iff all required pass
 ```
 
 Optionally add a `doctor all` step to CI before the real task. It complements (doesn't replace)
-`build-dashboard`'s `--sample` and check-staleness's `staleness.dry-run` — those exercise one task's dry path;
+`build-dashboard`'s `--sample` and the watchdog's `staleness.dry-run` — those exercise one task's dry path;
 `doctor` is the broader client preflight.
 
 ---
@@ -102,11 +102,12 @@ owner boundary either — which is why the callers pass bucket/channel names as 
 This is expected, not a second bug. The Slack daily row is **in-band** — it's written *by the backup
 script*, so it can only report failures the script reaches far enough to handle (a failed `pg_dump`,
 a bad upload, a too-small dump). Failures *before* that point — empty secrets, a workflow that won't
-start, a runner that dies, the cron not firing — never reach the Slack code, and the staleness check
-(also in-band) can be knocked out by the same root cause. The **out-of-band dead-man's-switch**
-(`HEARTBEAT_URL` → healthchecks.io etc.) is the catch-all for exactly these cases: it pages on the
-*absence* of a success ping, independent of GitHub. Treat a healthchecks alarm with a quiet Slack row
-as "the wiring/secrets/runner is broken," and check the Actions run logs.
+start, a runner that dies, the dispatch not landing — never reach the Slack code. Two out-of-band
+watchers cover exactly these cases: the [Worker's staleness watchdog](../scheduler/README.md) pages when
+no object lands for a slot (and tries one catch-up dispatch first), and the **dead-man's-switch**
+(`HEARTBEAT_URL` → healthchecks.io etc.) pages on the *absence* of a success ping even if the Worker
+itself is down. Treat a STALE page or a healthchecks alarm with a quiet Slack row as "the
+wiring/secrets/runner is broken," and check the Actions run logs.
 
 ### An amber "Drill failed" cell, or a `restore-drill`/`durable-verify FAILED` page
 
@@ -135,10 +136,17 @@ or it fires on a perfectly healthy schedule. The rule:
 max-age-hours  >  slot-minutes / 60  +  grace-minutes / 60
 ```
 
-Config validation now enforces it — a profile that sets the backstop inside a slot fails fast rather
-than paging on every tick — so if you are seeing this symptom, the profile predates that check. The
-fix is usually to **delete the key**: unset, `max-age-hours` is derived from the cadence as 1.5 slots
-(`12` h at the `480`/`25` default), which cannot be wrong for the configured slot width.
+Config validation enforces it at backup time (before the block is published to the Worker) — a
+profile that sets the backstop inside a slot fails fast rather than paging on every tick — so if you
+are seeing this symptom, the published config predates that check. The fix is usually to **delete the
+key**: unset, `max-age-hours` is derived from the cadence as 1.5 slots (`12` h at the `480`/`25`
+default), which cannot be wrong for the configured slot width. The next backup run republishes it.
+
+### The watchdog reports `no-config` for a client
+
+The Worker found no `_config/<name>/watchdog.json` in that client's bucket. The backup job writes it
+on every run, so either no backup has run since the client was wired, or the run failed before
+publishing (config validation). Dispatch one: `gh workflow run pg-backup.yml -f reason=schedule`.
 
 ### `Unrecognized named-value: 'vars'` when validating a workflow
 

@@ -5,7 +5,6 @@ import {
   backupSchema,
   drillSchema,
   verifyDurableSchema,
-  stalenessSchema,
   dashboardSchema,
   reportConfigError,
   joinObjectKey,
@@ -28,7 +27,6 @@ const drillBase = {
     r2,
   },
 };
-const stalenessBase = { name: "example", backupPrefix: "pg/example", credentials: { r2 } };
 
 // ── Defaults & coercion ──────────────────────────────────────────────────────
 
@@ -102,20 +100,20 @@ test("drill: min-row-ratio in 0..1; max-row-ratio default 2 (>=1); max-row-drop 
 });
 
 test("staleness: max-age-hours positive; slot/grace defaults; min-bytes default + coercion", () => {
-  const s = stalenessSchema.safeParse(stalenessBase).data?.staleness;
+  const s = backupSchema.safeParse(backupBase).data?.staleness;
   // Unset → derived from the cadence, not a fixed number: 1.5 slots at the 480/25 default.
   assert.equal(s?.maxAgeHours, 12);
   // One number, not two: the schema default IS the display constant (see DEFAULT_SLOT_MINUTES).
   assert.equal(s?.slotMinutes, DEFAULT_SLOT_MINUTES);
   assert.equal(s?.slotMinutes, 480);
   assert.equal(s?.graceMinutes, 25);
-  assert.ok(!stalenessSchema.safeParse({ ...stalenessBase, staleness: { maxAgeHours: 0 } }).success);
-  assert.equal(stalenessSchema.safeParse({ ...stalenessBase, dump: { minBytes: 2048 } }).data?.dump.minBytes, 2048);
+  assert.ok(!backupSchema.safeParse({ ...backupBase, staleness: { maxAgeHours: 0 } }).success);
+  assert.equal(backupSchema.safeParse({ ...backupBase, dump: { minBytes: 2048 } }).data?.dump.minBytes, 2048);
 });
 
 test("staleness: max-age-hours is derived per cadence, and refused when it sits inside a slot", () => {
   const parse = (staleness: Record<string, number>) =>
-    stalenessSchema.safeParse({ ...stalenessBase, staleness });
+    backupSchema.safeParse({ ...backupBase, staleness });
 
   // Derived: 1.5 slots, floored at one slot + grace + 1h.
   assert.equal(parse({ slotMinutes: 120, graceMinutes: 25 }).data?.staleness.maxAgeHours, 4);
@@ -133,7 +131,7 @@ test("staleness: max-age-hours is derived per cadence, and refused when it sits 
 
 test("staleness: slot-minutes must divide a whole day (else slot buckets mis-file runs)", () => {
   const parse = (slotMinutes: number) =>
-    stalenessSchema.safeParse({ ...stalenessBase, staleness: { slotMinutes, graceMinutes: 5 } });
+    backupSchema.safeParse({ ...backupBase, staleness: { slotMinutes, graceMinutes: 5 } });
   for (const ok of [60, 120, 240, 480, 720, 1440]) {
     assert.ok(parse(ok).success, `${ok} divides 1440`);
   }
@@ -148,13 +146,13 @@ test("staleness: grace-minutes must be < slot-minutes (else the slot can never g
   // Pin the slot explicitly rather than leaning on the schema default — this rule is about the
   // RELATIONSHIP between the two, and reading one of them from ambient config hides that.
   const grace = (graceMinutes: number, slotMinutes = 120) =>
-    stalenessSchema.safeParse({ ...stalenessBase, staleness: { graceMinutes, slotMinutes } }).success;
+    backupSchema.safeParse({ ...backupBase, staleness: { graceMinutes, slotMinutes } }).success;
   assert.ok(grace(119)); // < slot
   assert.ok(!grace(120)); // == slot
   assert.ok(!grace(200)); // > slot
   assert.ok(grace(200, 480)); // the same grace is fine against a wider slot
-  assert.ok(!stalenessSchema.safeParse({ ...stalenessBase, staleness: { slotMinutes: 20, graceMinutes: 25 } }).success); // grace ≥ short slot
-  assert.ok(stalenessSchema.safeParse({ ...stalenessBase, staleness: { slotMinutes: 60, graceMinutes: 25 } }).success); // 25 < 60
+  assert.ok(!backupSchema.safeParse({ ...backupBase, staleness: { slotMinutes: 20, graceMinutes: 25 } }).success); // grace ≥ short slot
+  assert.ok(backupSchema.safeParse({ ...backupBase, staleness: { slotMinutes: 60, graceMinutes: 25 } }).success); // 25 < 60
 });
 
 // ── table-list split ─────────────────────────────────────────────────────────
@@ -194,10 +192,10 @@ test("backup: integrity defaults (checksum/check-structure on, verify off); veri
 // ── booleans: YAML boolean AND env-style string ──────────────────────────────
 
 test("booleans: accept a real YAML boolean and an env-style string; garbage rejected", () => {
-  assert.equal(stalenessSchema.safeParse({ ...stalenessBase, staleness: { selfHeal: false } }).data?.staleness.selfHeal, false);
-  assert.equal(stalenessSchema.safeParse({ ...stalenessBase, staleness: { dryRun: "yes" } }).data?.staleness.dryRun, true);
-  assert.equal(stalenessSchema.safeParse(stalenessBase).data?.staleness.selfHeal, true); // default
-  assert.ok(!stalenessSchema.safeParse({ ...stalenessBase, staleness: { dryRun: "maybe" } }).success);
+  assert.equal(backupSchema.safeParse({ ...backupBase, staleness: { selfHeal: false } }).data?.staleness.selfHeal, false);
+  assert.equal(backupSchema.safeParse({ ...backupBase, staleness: { dryRun: "yes" } }).data?.staleness.dryRun, true);
+  assert.equal(backupSchema.safeParse(backupBase).data?.staleness.selfHeal, true); // default
+  assert.ok(!backupSchema.safeParse({ ...backupBase, staleness: { dryRun: "maybe" } }).success);
 });
 
 // ── IANA tz probe ────────────────────────────────────────────────────────────

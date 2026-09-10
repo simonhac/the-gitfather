@@ -244,8 +244,10 @@ const archiveGroup = z
 
 const slackGroup = z
   .object({
-    // the channel id is a deployment identifier paired with the bot token, so it lives in the env
-    // credentials group (SLACK_CHANNEL), like r2.bucket pairs with the R2 keys — not here.
+    // The channel id is NOT secret, so it may live here in the profile (the Worker's watchdog reads it
+    // from the published watchdog config). The env SLACK_CHANNEL (a GitHub Variable) still wins when
+    // set — see resolvedSlackChannel() — so existing consumers need not move it.
+    channel: opt(nonEmpty()),
     alertMention: strDefault("<!here>"),
   })
   .strict().prefault({} as never);
@@ -357,9 +359,12 @@ function requireR2(v: Profile, ctx: Ctx): void {
   if (!r.accessKeyId) miss(ctx, ["credentials", "r2", "accessKeyId"], "must be set");
   if (!r.secretAccessKey) miss(ctx, ["credentials", "r2", "secretAccessKey"], "must be set");
 }
+/** The Slack channel to post in: env SLACK_CHANNEL when set, else the profile's `slack.channel`, else "". */
+export const resolvedSlackChannel = (p: Profile): string => p.credentials.slackChannel || p.slack.channel || "";
+
 function requireSlackChannel(v: Profile, ctx: Ctx): void {
-  if (v.credentials.slackToken && !v.credentials.slackChannel) {
-    miss(ctx, ["credentials", "slackChannel"], "required when the Slack bot token (SLACK_BOT_TOKEN) is set");
+  if (v.credentials.slackToken && !resolvedSlackChannel(v)) {
+    miss(ctx, ["credentials", "slackChannel"], "required when the Slack bot token (SLACK_BOT_TOKEN) is set (env SLACK_CHANNEL or profile slack.channel)");
   }
 }
 
@@ -367,6 +372,9 @@ export const backupSchema = profileSchema
   .superRefine(requireNameAndPrefix)
   .superRefine(requireR2)
   .superRefine(requireSlackChannel)
+  // The backup publishes the staleness block to the Worker's watchdog (lib/watchdogConfig.ts), so the
+  // slot/grace/backstop relationships are validated HERE, before anything is published.
+  .superRefine(requireValidStalenessSlot)
   .superRefine((v, ctx) => {
     if (!v.credentials.databaseUrl) miss(ctx, ["credentials", "databaseUrl"], "must be set");
     if (v.encryption === "age" && !v.credentials.age.recipient) {
@@ -436,12 +444,6 @@ function requireValidStalenessSlot(v: Profile, ctx: Ctx): void {
     );
   }
 }
-
-export const stalenessSchema = profileSchema
-  .superRefine(requireNameAndPrefix)
-  .superRefine(requireR2)
-  .superRefine(requireSlackChannel)
-  .superRefine(requireValidStalenessSlot);
 
 /**
  * Archive config. Two RUNTIME flags shape it, not two schemas.
@@ -513,7 +515,6 @@ export function dashboardSchema(opts: { fromR2?: boolean; upload?: boolean } = {
 export type BackupConfig = Profile;
 export type DrillConfig = Profile;
 export type VerifyDurableConfig = Profile;
-export type StalenessConfig = Profile;
 export type DashboardConfig = Profile;
 export type ArchiveConfig = Profile;
 
@@ -581,7 +582,6 @@ export function loadConfig<T extends z.ZodType>(schema: T): z.infer<T> {
 export const loadBackupConfig = (): BackupConfig => loadConfig(backupSchema);
 export const loadDrillConfig = (): DrillConfig => loadConfig(drillSchema);
 export const loadVerifyDurableConfig = (): VerifyDurableConfig => loadConfig(verifyDurableSchema);
-export const loadStalenessConfig = (): StalenessConfig => loadConfig(stalenessSchema);
 export const loadDashboardConfig = (opts?: { fromR2?: boolean; upload?: boolean }): DashboardConfig =>
   loadConfig(dashboardSchema(opts));
 export const loadArchiveConfig = (opts?: { toR2?: boolean }): ArchiveConfig => loadConfig(archiveSchema(opts));
