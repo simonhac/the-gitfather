@@ -74,6 +74,43 @@ export function weekdayMon0(ordinal: number): number {
   return (new Date(ordinal * 86_400_000).getUTCDay() + 6) % 7;
 }
 
+/**
+ * Days since the Unix epoch of the MONDAY that starts ISO week `label` ("2026-W13").
+ *
+ * DISPLAY_TZ deliberately does not enter. An ISO week label is a CALENDAR fact — it names seven
+ * dates, not an instant — so it maps to a date ordinal directly. Converting its Monday 00:00 UTC to
+ * an instant and bucketing that in a negative-offset zone lands on the previous Sunday, which would
+ * shift every archive body up a row: the one bug this function exists to make impossible.
+ *
+ * Throws on a label that is well-formed but not a real week ("2025-W53"), because a silently
+ * clamped week would put rows on a row they do not belong to.
+ */
+export function isoWeekMondayOrdinal(label: string): number {
+  const m = /^(\d{4})-W(\d{2})$/.exec(label);
+  if (!m) throw new Error(`invalid ISO week label "${label}" — expected e.g. "2026-W23"`);
+  const year = Number(m[1]);
+  const week = Number(m[2]);
+  const weeks = isoWeeksInYear(year);
+  if (week < 1 || week > weeks) {
+    throw new Error(`invalid ISO week label "${label}" — ${year} has ${weeks} ISO weeks`);
+  }
+  // ISO week 1 is the week containing 4 January, by definition.
+  const jan4 = dateOrdinal(year, 1, 4);
+  return jan4 - weekdayMon0(jan4) + (week - 1) * DAYS_PER_WEEK;
+}
+
+/**
+ * 53 when the ISO year has a 53rd week — 1 January a Thursday, or a Wednesday in a leap year.
+ *
+ * lib/archive.ts has the same function, but that module imports `node:crypto` and so can never be
+ * pulled into the browser bundle. A unit test walks 400 weeks through both to pin the agreement.
+ */
+function isoWeeksInYear(year: number): number {
+  const jan1 = new Date(Date.UTC(year, 0, 1)).getUTCDay(); // 0=Sun … 4=Thu
+  const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+  return jan1 === 4 || (leap && jan1 === 3) ? 53 : 52;
+}
+
 function ordinalToDate(ordinal: number): { y: number; mo: number; day: number } {
   const d = new Date(ordinal * 86_400_000);
   return { y: d.getUTCFullYear(), mo: d.getUTCMonth() + 1, day: d.getUTCDate() };
