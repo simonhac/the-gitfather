@@ -8,8 +8,9 @@
 import { buildBackupGrid, summarize, formatInTz, slotApproxDate, storedBytes, r2MonthlyCostUsd, WEEKDAY_LABELS } from "../scripts/lib/backupHistory.js";
 import {
   SLOTS_PER_DAY,
-  slotCadencePhrase,
+  slotCadence,
   slotCadenceAdjective,
+  retentionBullets,
   DAYS_PER_WEEK,
   COLS_PER_WEEK,
   DISPLAY_TZ,
@@ -89,16 +90,30 @@ const app = document.getElementById("app")!;
 const header = elem("header", "header");
 header.appendChild(elem("h1", undefined, `${payload.label} — backup history`));
 const R = payload.retention ?? DEFAULT_RETENTION;
+
+// The GFS ladder is four parallel clauses, which is one clause too many for a sentence — as a
+// paragraph the windows ran together and the reader had to count commas to tell which tier kept
+// what. Rendered as a list instead; the strings come from retentionBullets/slotCadence so the
+// wording stays unit-tested rather than eyeballed on a published page.
+const { lead, emphasis } = slotCadence();
+const intro = elem("p", "subtitle");
+intro.append(
+  `This grid shows every off-site Postgres backup over the last ${WEEKS} weeks — ${lead} `,
+  elem("em", undefined, emphasis),
+  ".",
+);
+header.appendChild(intro);
+header.appendChild(elem("p", "subtitle", "Older copies thin out on a Grandfather–Father–Son schedule:"));
+const ladder = elem("ul", "tiers");
+for (const bullet of retentionBullets(R)) ladder.appendChild(elem("li", undefined, bullet));
+header.appendChild(ladder);
+header.appendChild(elem("p", "subtitle", `…at its fullest about ${maxRetained(R)} backups at once.`));
 header.appendChild(
   elem(
     "p",
     "subtitle",
-    `This grid shows every off-site Postgres backup over the last ${WEEKS} weeks — ${slotCadencePhrase()}. ` +
-      `Older copies thin out on a Grandfather–Father–Son schedule: the ${slotCadenceAdjective()} ` +
-      `“grandsons” are kept for ${R["2hourly"].label}, then one “son” per day for ${R.daily.label}, one “father” ` +
-      `per week for ${R.weekly.label}, and one “grandfather” per month for ${R.monthly.label} — at its fullest ` +
-      `about ${maxRetained(R)} backups at once. Greens are retained (brighter = restore-verified), amber flags a ` +
-      `failed verification drill, grey has aged out. Times in ${DISPLAY_TZ}.`,
+    `Greens are retained (brighter = restore-verified), amber flags a failed verification drill, ` +
+      `grey has aged out. Times per ${DISPLAY_TZ}.`,
   ),
 );
 app.appendChild(header);

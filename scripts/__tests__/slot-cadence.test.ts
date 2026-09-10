@@ -1,6 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { slotCadencePhrase, slotCadenceAdjective, slotsPerDayFrom } from "../lib/backupTypes.js";
+import {
+  slotCadence,
+  slotCadencePhrase,
+  slotCadenceAdjective,
+  slotsPerDayFrom,
+  retentionBullets,
+  DEFAULT_RETENTION,
+  type RetentionMap,
+} from "../lib/backupTypes.js";
 
 // The dashboard blurb used to hardcode "a fresh one every 2 hours, 3 a day" — two claims that
 // contradicted each other AND the actual cadence, because only the "3" was derived. These helpers
@@ -60,4 +68,42 @@ test("bridgeSlotMinutes only accepts a slot width that tiles a day", async () =>
 
   delete process.env.PROFILE;
   delete process.env.SLOT_MINUTES;
+});
+
+// ── Header prose ─────────────────────────────────────────────────────────────
+// The subtitle is a list, not a paragraph, so the pieces are built here and the DOM assembly in
+// dashboard/heatmap.ts stays thin enough to read at a glance.
+
+test("slotCadence splits into a lead and the part worth emphasising", () => {
+  assert.deepEqual(slotCadence(480), { lead: "a fresh one every", emphasis: "8 hours, 3 a day" });
+  assert.deepEqual(slotCadence(120), { lead: "a fresh one every", emphasis: "2 hours, 12 a day" });
+  assert.deepEqual(slotCadence(90), { lead: "a fresh one every", emphasis: "90 minutes, 16 a day" });
+  // "every once a day" would be nonsense, so the daily case moves the whole thing into the emphasis.
+  assert.deepEqual(slotCadence(1440), { lead: "a fresh one", emphasis: "once a day" });
+});
+
+test("slotCadencePhrase is exactly its parts joined — the two cannot drift", () => {
+  for (const m of [60, 120, 480, 720, 1440]) {
+    const { lead, emphasis } = slotCadence(m);
+    assert.equal(slotCadencePhrase(m), `${lead} ${emphasis}`);
+  }
+});
+
+test("retentionBullets: one tier per bullet, connectives included, oldest last", () => {
+  const R: RetentionMap = {
+    ...DEFAULT_RETENTION,
+    weekly: { days: 91, label: "13 weeks" },
+    monthly: { days: 365, label: "12 months" },
+  };
+  assert.deepEqual(retentionBullets(R, 480), [
+    "the 8-hourly “grandsons” are kept for 2 days, then",
+    "one “son” per day for 3 weeks,",
+    "one “father” per week for 13 weeks, and",
+    "one “grandfather” per month for 12 months",
+  ]);
+  // The grandson bullet tracks the cadence, not the frozen `2hourly` key.
+  assert.match(retentionBullets(R, 120)[0], /^the 2-hourly /);
+  assert.match(retentionBullets(R, 1440)[0], /^the daily /);
+  // Only the last bullet has no trailing connective — it is the one the "…at its fullest" line follows.
+  assert.ok(!retentionBullets(R, 480)[3].endsWith(","));
 });
