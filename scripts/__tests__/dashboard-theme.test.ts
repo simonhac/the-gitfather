@@ -109,23 +109,35 @@ function arms(token: string): [string, string] {
   return [m![1], m![2]];
 }
 
-test("the two greens are a real step apart — a verified backup must LOOK like the stronger claim", () => {
-  // `--ok` and `--verified` are the same shape in the same column; colour is the only thing
-  // carrying "a drill proved this one restores". At one step apart they read as one green on the
-  // published page, which is the whole reason this floor exists.
-  const [okL, okD] = arms("--ok");
-  const [verL, verD] = arms("--verified");
-  assert.ok(ratio(okL, verL) >= 2.4, `light: ${okL} vs ${verL} is only ${ratio(okL, verL).toFixed(2)}:1`);
-  assert.ok(ratio(okD, verD) >= 2.4, `dark: ${okD} vs ${verD} is only ${ratio(okD, verD).toFixed(2)}:1`);
+/** Each ordinal ramp: its lesser step, its stronger step. */
+const RAMPS: [string, string][] = [["--ok", "--verified"], ["--archived", "--pruned"]];
+
+test("each ramp's two steps are a real step apart — the stronger one must LOOK like the stronger claim", () => {
+  // Within a ramp the two steps are the same shape in the same column, so colour is the only thing
+  // carrying "a drill proved this one restores" / "and the rows are gone from the database". One
+  // step apart and they read as a single colour on the published page, which is why this floor
+  // exists. It is a floor on the PAIR, deliberately, not on either value.
+  for (const [lesser, stronger] of RAMPS) {
+    const [aL, aD] = arms(lesser);
+    const [bL, bD] = arms(stronger);
+    assert.ok(ratio(aL, bL) >= 3, `light ${lesser}/${stronger}: ${aL} vs ${bL} is ${ratio(aL, bL).toFixed(2)}:1`);
+    assert.ok(ratio(aD, bD) >= 3, `dark ${lesser}/${stronger}: ${aD} vs ${bD} is ${ratio(aD, bD).toFixed(2)}:1`);
+  }
 });
 
-test("…and the darker of the two still clears 3:1 against the grid it sits on", () => {
-  // The floor above is satisfiable by making `--ok` black. This is the other side of it: a body
-  // square is a graphical object, so AA wants 3:1 against the surface behind it.
-  const [okL, okD] = arms("--ok");
+test("…and the lesser step still stands off the grid it sits on", () => {
+  // The other side of the trade, and the reason both tests have to exist: the floor above is
+  // satisfiable by dimming the lesser step until it vanishes into the surface, at which point a
+  // week WITH data looks like a week without. 2.1 is under the 3:1 AA wants of a graphical object —
+  // knowingly, see template.html: these are steps of an ordinal scale read as a field, and buying
+  // AA here costs the separation that carries the actual information. What must not happen is the
+  // number drifting further without anyone deciding to.
   const [surfL, surfD] = arms("--surface");
-  assert.ok(ratio(okL, surfL) >= 3, `light: ${okL} on ${surfL} is ${ratio(okL, surfL).toFixed(2)}:1`);
-  assert.ok(ratio(okD, surfD) >= 3, `dark: ${okD} on ${surfD} is ${ratio(okD, surfD).toFixed(2)}:1`);
+  for (const [lesser] of RAMPS) {
+    const [aL, aD] = arms(lesser);
+    assert.ok(ratio(aL, surfL) >= 2.1, `light ${lesser}: ${aL} on ${surfL} is ${ratio(aL, surfL).toFixed(2)}:1`);
+    assert.ok(ratio(aD, surfD) >= 2.1, `dark ${lesser}: ${aD} on ${surfD} is ${ratio(aD, surfD).toFixed(2)}:1`);
+  }
 });
 
 test("every token a rule reads is actually declared", () => {

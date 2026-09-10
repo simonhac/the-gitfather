@@ -33,15 +33,31 @@
        for archives, because an archive is not a backup: it is where rows LIVE once they have left
        Postgres, and it never expires.
 
-       Within the green ramp the two steps have to be told apart at 12px across a grid, not held
-       side by side in the legend: `--ok` ("a backup exists") sits well below `--verified` ("and a
-       restore drill proved it"), so the brighter square always means the stronger claim. They were
-       one step apart and read as the same green on the published page. */
-    --ok:          light-dark(#12643c, #1f7d50);
-    --verified:    light-dark(#2fb872, #41d586);
+       EACH RAMP'S TWO STEPS HAVE TO BE TOLD APART AT 12px ACROSS A GRID, not held side by side in
+       the legend. `--ok` ("a backup exists") sits well below `--verified` ("and a restore drill
+       proved it"), and `--archived` ("the rows are in the archive") below `--pruned` ("and they are
+       gone from the database"), so in both ramps the stronger step is the one that carries. Note the
+       blue ramp INVERTS between themes — on white the stronger step is darker, on black lighter —
+       so "dimmer" means "nearer the surface", not "nearer black".
+
+       Where the two ends are pushed apart differs by theme, and that is forced rather than chosen.
+       On white there is room below the lesser step, so it goes darker; on black the lesser step is
+       already near the floor before it stops reading as data at all, so the STRONGER step goes
+       brighter instead. Widening a pair by dimming its lesser step has a hard limit — past it a week
+       WITH data looks like a week without — and brightening the stronger one has none.
+
+       The lesser step is deliberately close to its background: ~2.2-2.5:1, under the 3:1 AA wants of
+       a graphical object. That is the trade, made knowingly. These are not standalone controls but
+       steps of an ordinal scale read as a field, and buying AA on the lesser step costs the very
+       separation that tells the two steps apart — which is the information the grid exists to carry.
+       `--expired` has always sat at 1.6:1 for the same reason. dashboard-theme.test.ts pins both
+       ends of the trade: a floor on each pair, and a floor on each lesser step against its surface,
+       so neither can be optimised away without the other failing. */
+    --ok:          light-dark(#0d5233, #1a6e49);
+    --verified:    light-dark(#2fb872, #63eaa3);
     --expired:     light-dark(#cdd3dc, #3a414e);
-    --archived:    light-dark(#6b9ce4, #4a7cb8);
-    --pruned:      light-dark(#24509f, #7fb3f0);
+    --archived:    light-dark(#78a4e6, #2f5f92);
+    --pruned:      light-dark(#1d4489, #a4cffb);
 
     /* Mark — "did the actions in this period run clean?" Red and amber hold a deutan ΔE of 9.7,
        so the two survive the most common colour-vision deficiency; the legend and tooltip carry
@@ -218,7 +234,10 @@
     border-right: 1px solid var(--border); border-bottom: 1px solid var(--border);
   }
   .tip-when { font-weight: 620; margin-bottom: 3px; }
-  .tip-state { display: flex; align-items: center; gap: 6px; }
+  /* flex-start, not center: a label that wraps to two lines would otherwise pull its glyph down to
+     the centre of the BLOCK, leaving the dash floating between the two lines it is meant to label.
+     The offsets below put each glyph on the centre of the FIRST line instead. */
+  .tip-state { display: flex; align-items: flex-start; gap: 6px; }
   .tip-muted { color: var(--muted); margin-top: 2px; }
   .tip-fail { color: var(--failed-text); font-weight: 600; margin-top: 2px; }
   .tip-hint { color: var(--muted); opacity: 0.8; margin-top: 5px; }
@@ -227,12 +246,14 @@
      the run that executed this week archived rows dated months ago — and a reader will assume
      otherwise unless something stops them. */
   .tip-rule { border: 0; border-top: 1px solid var(--border); margin: 7px 0 5px; }
-  .tip-count { font-variant-numeric: tabular-nums; }
-  /* A data dot is a square; a run mark is a pill, the same shape it has in the grid. */
-  .dot { width: 10px; height: 10px; border-radius: 2px; display: inline-block; flex: none; }
-  .dot.mark { width: 12px; height: 3px; border-radius: 1.5px; }
+  /* A data dot is a square; a run mark is a pill, the same shape it has in the grid. Each is nudged
+     down by half the difference between one line box (1.45em, from .tip) and its own height, which
+     is what lands it on the first line's centre whether the label wraps or not. */
+  .dot { width: 10px; height: 10px; border-radius: 2px; display: inline-block; flex: none;
+         margin-top: calc((1.45em - 10px) / 2); }
+  .dot.mark { width: 12px; height: 3px; border-radius: 1.5px; margin-top: calc((1.45em - 3px) / 2); }
   .tip.pinned { pointer-events: auto; }
-  .tip-link, .tip-row { display: flex; align-items: center; gap: 6px; margin: 2px -6px 0; padding: 5px 6px; border-radius: 7px; }
+  .tip-link, .tip-row { display: flex; align-items: flex-start; gap: 6px; margin: 2px -6px 0; padding: 5px 6px; border-radius: 7px; }
   .tip-link { color: inherit; text-decoration: none; cursor: pointer; }
   .tip-link:hover { background: rgba(127,127,127,0.14); }
   .tip-run-label { flex: 1; }
