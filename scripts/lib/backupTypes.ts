@@ -275,6 +275,24 @@ export interface PublicArchiveTable {
   pruneAfterWeeks: number | null;
 }
 
+/**
+ * One ISO week of one table's archive index, scrubbed for publication — the `_index/` view of what
+ * happened to the rows DATED that week, as opposed to how a run went.
+ *
+ * The private record also carries per-part fingerprints, digests, part numbers and roles. None of
+ * that is published: a digest is a gift to anyone reasoning about what is in the bucket, and the
+ * page only needs the state and the size. `rows` is the ACTIVE part's row count (lib/archive.ts
+ * activePart) — see lib/archiveIndex.ts, where the scrub happens.
+ */
+export interface PublicArchiveWeek {
+  /** Schema-stripped table name, matching PublicArchiveRun.table. */
+  table: string;
+  /** ISO week label, e.g. "2026-W13". A calendar fact, not an instant. */
+  week: string;
+  state: ArchiveBodyState;
+  rows: number;
+}
+
 export interface PublicPayload {
   /** Generic project label, e.g. "mydb" (the profile's name / dashboard.label). */
   label: string;
