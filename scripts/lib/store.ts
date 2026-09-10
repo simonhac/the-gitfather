@@ -42,6 +42,12 @@ export class StoreUnreachableError extends Error {
   }
 }
 
+/** One stored object and its size in bytes, as the store reports it right now. */
+export interface StoredObject {
+  key: string;
+  bytes: number;
+}
+
 export interface Store {
   readonly kind: "r2" | "local";
   /** Human-readable sink description for logs (never contains a credential). */
@@ -59,6 +65,11 @@ export interface Store {
   cat(key: string): Promise<string | null>;
   /** Every key under `prefix`, recursively. Empty when the prefix holds nothing. */
   list(prefix: string): Promise<string[]>;
+  /**
+   * The same listing, with each object's size — what the store actually holds, as opposed to what
+   * a manifest once recorded. One call per prefix, so sizing a whole table costs one round trip.
+   */
+  listSizes(prefix: string): Promise<StoredObject[]>;
 }
 
 // ── --target parsing ─────────────────────────────────────────────────────────
@@ -138,6 +149,10 @@ export class LocalStore implements Store {
     if (statSync(base).isDirectory()) walk(base);
     else out.push(relative(this.root, base).split(sep).join("/"));
     return out;
+  }
+
+  async listSizes(prefix: string): Promise<StoredObject[]> {
+    return (await this.list(prefix)).map((key) => ({ key, bytes: statSync(this.path(key)).size }));
   }
 }
 
@@ -254,6 +269,32 @@ export class R2Store implements Store {
       .filter(Boolean)
       .map((rel) => `${prefix.replace(/\/+$/, "")}/${rel}`);
   }
+
+  /**
+   * `lsf --format "sp"` yields "<size>;<path>" per line. The separator is set explicitly because a
+   * key may legitimately contain rclone's default (`;`) — the size field cannot, so splitting on the
+   * FIRST separator is unambiguous whatever the key looks like.
+   */
+  async listSizes(prefix: string): Promise<StoredObject[]> {
+    const res = capture("rclone", [
+      "lsf", "-R", "--files-only", "--format", "sp", "--separator", ";",
+      `${this.obj(prefix)}/`, "--s3-no-check-bucket",
+    ]);
+    if (!res.ok) {
+      if (!this.reachable()) throw new StoreUnreachableError(`could not list ${prefix}/`);
+      return [];
+    }
+    const out: StoredObject[] = [];
+    for (const line of res.out.split("\n").map((s) => s.trim()).filter(Boolean)) {
+      const cut = line.indexOf(";");
+      if (cut < 0) continue;
+      const bytes = Number(line.slice(0, cut));
+      const rel = line.slice(cut + 1);
+      if (!Number.isFinite(bytes) || !rel) continue;
+      out.push({ key: `${prefix.replace(/\/+$/, "")}/${rel}`, bytes });
+    }
+    return out;
+  }
 }
 
 // ── SuppressedStore (--dry-run=store) ────────────────────────────────────────
@@ -297,6 +338,9 @@ export class SuppressedStore implements Store {
   }
   async list(prefix: string): Promise<string[]> {
     return this.inner.list(prefix);
+  }
+  async listSizes(prefix: string): Promise<StoredObject[]> {
+    return this.inner.listSizes(prefix);
   }
 }
 

@@ -526,6 +526,33 @@ does not return it to the operating system — so without this the table stops g
 It takes an `ACCESS EXCLUSIVE` lock, so size the window to the table: seconds for tens of megabytes,
 rather longer for tens of gigabytes.
 
+### Repairing the index
+
+`_index/` is a materialised view of the manifests, so there are two ways to fix it — and they are
+not interchangeable:
+
+```bash
+# Fill in `bytes` for weeks archived before that field existed. Sizes come from the objects
+# themselves (one listing per table). Reports only; add --apply to write.
+npx tsx scripts/backfill-archive-sizes.ts
+npx tsx scripts/backfill-archive-sizes.ts --apply
+
+# Re-derive the WHOLE index from the manifests — the recovery path for an index that is lost or wrong.
+npx tsx scripts/archive-table.ts --rebuild-index
+```
+
+Reach for the **backfill** unless the index is actually broken. It never opens the database, only ever
+*adds* a size to a part (each line is round-trip checked, and the original file is kept beside its
+replacement as a timestamped `.bak-`), and cannot touch a week's archived/pruned state.
+
+`--rebuild-index` discards the index and rebuilds it, which means re-deciding every week's state by
+asking Postgres whether the window is empty. That is right for a lost index and too much for a missing
+number: a week that was pruned but has since acquired a back-dated row reconciles back to `archived`,
+and the next run then supersedes the real archive with those few stragglers.
+
+Both are available in CI — `backfill_sizes: true` (plus `backfill_apply` when you mean it) on the
+`pg-archive` workflow runs the first; the second has no input and is a local operation.
+
 ### Preflight
 
 ```bash

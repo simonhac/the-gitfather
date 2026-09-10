@@ -48,6 +48,16 @@ on:
         type: string
         required: false
         default: ""
+      backfill_sizes:
+        description: "Maintenance: fill missing `bytes` into _index/ from the stored objects, instead of archiving. Reports only unless backfill_apply is true."
+        type: boolean
+        required: false
+        default: false
+      backfill_apply:
+        description: "With backfill_sizes, actually write. Leave false for a report-only rehearsal."
+        type: boolean
+        required: false
+        default: false
       dry_run:
         description: "none | source | store. 'source' keeps the database read-only; 'store' also writes nothing."
         type: string
@@ -116,7 +126,29 @@ jobs:
           install-age: ${{ env.ARCHIVE_ENCRYPTION == 'age' }}
           install-zstd: ${{ env.ARCHIVE_COMPRESSION == 'zstd' }}
 
+      # Maintenance, not archiving: this fills the `bytes` that predate the field into _index/, using
+      # the sizes of the objects already in the bucket. It never opens the database — the DB URL is
+      # not even in this step's environment — and it only ever ADDS a size to a part, keeping a
+      # timestamped copy of each index file it replaces. See scripts/backfill-archive-sizes.ts.
+      - name: Backfill archive sizes
+        if: ${{ inputs.backfill_sizes }}
+        working-directory: engine
+        env:
+          PROFILE: ${{ github.workspace }}/caller/${{ inputs.profile }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ inputs.r2_bucket }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          SLACK_CHANNEL: ${{ inputs.slack_channel }}
+        run: |
+          set -euo pipefail
+          args=()
+          if [ -n "${{ inputs.table }}" ]; then args+=(--table "${{ inputs.table }}"); fi
+          if [ "${{ inputs.backfill_apply }}" = "true" ]; then args+=(--apply); fi
+          npx tsx scripts/backfill-archive-sizes.ts "${args[@]}"
+
       - name: Archive / prune
+        if: ${{ !inputs.backfill_sizes }}
         working-directory: engine
         env:
           PROFILE: ${{ github.workspace }}/caller/${{ inputs.profile }}
