@@ -1,0 +1,37 @@
+name: CI
+
+# The engine's own checks. Everything else in this directory is a REUSABLE workflow run by consumer
+# repos against their databases; nothing ran the test suite, so 366 tests were decoration — green
+# only for whoever last remembered to run them locally, and never a gate on a merge.
+#
+# rclone is installed because the run-log tests drive the real append path (lsf, read-modify-write,
+# copyto) through a `local` remote. They assert rclone is present rather than skipping without it:
+# a skipped test still prints as a pass, which is the one outcome this repo keeps learning to
+# distrust.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+      - uses: ./.github/actions/setup-tools
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test

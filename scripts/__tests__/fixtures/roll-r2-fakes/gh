@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Stand-in for gh. `secret list` must report a CHANGING updatedAt, because the CLI treats an
+# unchanged timestamp as "the write did not land" and dies.
+set -euo pipefail
+state="${FAKE_STATE:?FAKE_STATE must be set}"
+mkdir -p "$state"
+case "${2:-}" in
+  list)
+    n=$(cat "$state/gh-calls" 2>/dev/null || echo 0)
+    echo $((n + 1)) > "$state/gh-calls"
+    printf '[{"name":"R2_ACCESS_KEY_ID","updatedAt":"2026-01-0%sT00:00:00Z"},{"name":"R2_SECRET_ACCESS_KEY","updatedAt":"2026-01-0%sT00:00:00Z"}]\n' "$n" "$n"
+    ;;
+  set) cat > /dev/null; echo "set" ;;
+  *) echo "fake gh: unhandled: $*" >&2; exit 1 ;;
+esac

@@ -28,7 +28,7 @@
 import { createInterface } from "node:readline";
 import { capture, commandExists } from "./lib/proc.js";
 import { appendCredential } from "./runlog.js";
-import { secretFromTokenValue, isMate, opItemNames, parseRollArgs, type RollArgs } from "./lib/r2Token.js";
+import { secretFromTokenValue, isMate, opItemNames, parseRollArgs, runlogEnv, type RollArgs } from "./lib/r2Token.js";
 
 function die(msg: string): never {
   process.stderr.write(`\nERROR: ${msg}\n`);
@@ -202,7 +202,11 @@ async function main(): Promise<void> {
 
   // ── 4. PUBLISH from the escrow ─────────────────────────────────────────────
   if (!args.repo) {
-    console.log("\nDone. Nothing published — this credential stays off CI by design.\n");
+    console.log(
+      "\nDone. Credential escrowed; nothing published to GitHub.\n" +
+        "No rotation record was written: escrow-only mode does not write the run-log.\n" +
+        `If ${args.prefix} is listed in credential-rotation.track, its monitored age is unchanged.\n`,
+    );
     return;
   }
   const before = ghSecretTimestamps(args.repo, [names.accessKeyId, names.secretAccessKey]);
@@ -215,10 +219,16 @@ async function main(): Promise<void> {
   }
   // Record the rotation. This is the ONLY durable trace that it happened: a GitHub secret cannot be
   // read back, and listing repository secrets needs a token more privileged than the workflow that
-  // would do the checking. Best-effort by design — a logging hiccup must not fail a rotation that
-  // has already landed. Requires R2_BUCKET + a profile name; without them the record is skipped and
-  // the credential simply reports `unknown` until the next rotation, which is the honest answer.
-  appendCredential({
+  // would do the checking.
+  //
+  // appendRecord reads its R2 remote and bucket from the environment, which a CI job has set and an
+  // operator's shell has not — so the first cut recorded nothing whenever it was run the way it is
+  // actually run, from a laptop. It warned, once, in a wall of output. The credential monitor then
+  // reported `never recorded` every day forever, and no amount of correctly rotating could clear
+  // it: a false alarm indistinguishable from the true one it exists to raise. We have the working
+  // credential right here and have just proven it lists this bucket, so hand it to the logger.
+  Object.assign(process.env, runlogEnv(args, accessKeyId, secret));
+  const recorded = appendCredential({
     ts: new Date().toISOString(),
     prefix: args.prefix,
     bucket: args.bucket,
@@ -231,6 +241,18 @@ async function main(): Promise<void> {
       "correct by construction. Now run the workflow that uses it and watch it succeed — a secret\n" +
       "that is merely SET is not a secret that is known to WORK.\n",
   );
+  if (!recorded) {
+    // Loud, and last. The rotation itself succeeded and must not be reported as a failure, but a
+    // silently unrecorded rotation is how the monitor ends up crying wolf indefinitely.
+    process.stderr.write(
+      "WARNING: the rotation was NOT recorded in the run-log.\n" +
+        `  Credential-age monitoring for ${args.prefix} will not reflect this rotation.\n` +
+        "  The runlog: line above says why — most often $PROFILE is unset, so the log's <name>\n" +
+        "  could not be resolved; it can also be connectivity or bucket access.\n" +
+        "  The credential itself is fine and already escrowed and published. Once the cause is\n" +
+        "  fixed, re-run with the SAME values — no second Cloudflare roll is needed.\n",
+    );
+  }
 }
 
 main().catch((e: unknown) => die((e as Error).message));
