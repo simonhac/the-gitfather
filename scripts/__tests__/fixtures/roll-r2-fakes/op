@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Stand-in for the 1Password CLI. Stores whatever `item create/edit` is given under $FAKE_STATE so
+# `op read` can hand the same bytes back — the CLI compares them, so a lossy fake would fail the
+# escrow read-back rather than the thing under test.
+set -euo pipefail
+state="${FAKE_STATE:?FAKE_STATE must be set}"
+mkdir -p "$state/op"
+
+case "${1:-}" in
+  whoami) echo '{"user":"fake"}'; exit 0 ;;
+  read)
+    # op read op://<vault>/<TITLE>/credential
+    title=$(printf '%s' "${2:-}" | awk -F/ '{print $(NF-1)}')
+    cat "$state/op/$title"
+    exit 0
+    ;;
+  item)
+    sub="${2:-}"
+    case "$sub" in
+      get)
+        title="${3:-}"
+        # Absent → the CLI takes the `create` path. Present → `edit`. Either is fine here.
+        [ -f "$state/op/$title" ] || exit 1
+        echo '{}'
+        exit 0
+        ;;
+      create|edit)
+        title=""
+        value=""
+        for arg in "$@"; do
+          case "$arg" in
+            --title) title="__NEXT__" ;;
+            credential=*) value="${arg#credential=}" ;;
+            *) if [ "$title" = "__NEXT__" ]; then title="$arg"; fi ;;
+          esac
+        done
+        # `edit` takes the title positionally (op item edit <title> --vault …)
+        if [ -z "$title" ] || [ "$title" = "__NEXT__" ]; then title="${3:-}"; fi
+        printf '%s' "$value" > "$state/op/$title"
+        echo '{}'
+        exit 0
+        ;;
+    esac
+    ;;
+esac
+echo "fake op: unhandled: $*" >&2
+exit 1

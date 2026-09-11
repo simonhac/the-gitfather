@@ -169,7 +169,8 @@ Built as a GitHub-Actions toolkit (TypeScript run via `tsx`), but every script i
 
 ```bash
 npm ci
-npm test          # unit + bash-parity tests (node:test via tsx)
+npm test          # unit + bash-parity tests (node:test via tsx). Needs rclone on PATH:
+                  # the run-log tests drive the real append path through a `local` remote.
 npm run typecheck # tsc --noEmit
 npm run lint      # eslint
 ```

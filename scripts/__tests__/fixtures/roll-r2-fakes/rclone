@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Stand-in for rclone. Records the credential environment it was invoked WITH — which is the whole
+# point: the bug being guarded is that roll-r2-token.ts built that environment and never delivered
+# it, so the run-log calls ran credential-less (or never happened at all).
+set -euo pipefail
+state="${FAKE_STATE:?FAKE_STATE must be set}"
+mkdir -p "$state"
+printf 'ARGS=%s\tR2_BUCKET=%s\tKEYID=%s\n' "$*" "${R2_BUCKET:-}" "${RCLONE_CONFIG_R2_ACCESS_KEY_ID:-}" >> "$state/rclone.log"
+case "${1:-}" in
+  lsf) exit 0 ;;                       # connect check + run-log listing: both empty is fine
+  cat) exit 0 ;;
+  copyto) exit 0 ;;
+  *) exit 0 ;;
+esac
