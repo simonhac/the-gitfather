@@ -30,8 +30,18 @@ export function isMate(tokenValue: string, secret: string | undefined): boolean 
   return secret === undefined || secretFromTokenValue(tokenValue) === secret.trim().toLowerCase();
 }
 
-/** 1Password item titles for a credential prefix — the same names the workflows use as env vars. */
-export function opItemNames(prefix: string): { accessKeyId: string; secretAccessKey: string; tokenValue: string } {
+/**
+ * 1Password FIELD labels for a credential prefix — the same names the workflows use as env vars.
+ *
+ * These were three separate `API Credential` ITEMS until 2026-09-11. They are now three fields of
+ * one Secure Note (`--item`, default `backup`), because a vault holding one item per secret does
+ * not scale and the per-item split bought nothing the note's own header cannot carry. See
+ * docs/vaults.md in simonhac/infra.
+ *
+ * `op item edit <item> FIELD=value` touches only the named fields, so three writes into one note
+ * cannot clobber each other or the note's body.
+ */
+export function opFieldNames(prefix: string): { accessKeyId: string; secretAccessKey: string; tokenValue: string } {
   return {
     accessKeyId: `${prefix}_ACCESS_KEY_ID`,
     secretAccessKey: `${prefix}_SECRET_ACCESS_KEY`,
@@ -46,6 +56,7 @@ export interface RollArgs {
   bucket: string;
   accountId: string;
   repo: string | null; // null = escrow only, do not touch GitHub
+  item: string; // the 1Password Secure Note these three fields live in (default: backup)
   dryRun: boolean; // check the credential; write nothing, anywhere
 }
 
@@ -76,6 +87,7 @@ export function parseRollArgs(argv: string[]): RollArgs {
     bucket,
     accountId,
     prefix: get("--prefix") ?? "R2",
+    item: get("--item") ?? "backup",
     repo: get("--repo"),
     dryRun,
   };
