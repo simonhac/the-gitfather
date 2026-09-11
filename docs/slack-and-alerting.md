@@ -58,9 +58,23 @@ different failures and one caller repo holds both:
 If these ever collapsed into one name, a green backup would silence a broken restore — which is the
 more dangerous of the two failures, because it looks healthy right up until you need it.
 
-The verify ping requires `failures === 0` **and** that the run actually saw durable objects. "The job
-exited 0" over an empty listing verifies nothing. A steady-state day where nothing is *due* is still
-clean, though — requiring work-done would make the heartbeat go quiet on healthy days.
+The verify ping's claim is **"these backups are provably restorable"**, which is far stronger than
+"the job exited 0", so the gate is correspondingly strict (`scripts/lib/verifyHeartbeat.ts`):
+
+| blocks the ping | why |
+| --- | --- |
+| any failed check | hash mismatch, restore gate, census floor |
+| a failed tier listing | a partial listing makes the census floor meaningless |
+| no durable objects | nothing to make a claim about |
+| `pg_restore`/`psql` missing | restorability was never tested — this only *warns* in the run |
+| `fresh:false` **and** `aged:false` | no restore leg enabled |
+| `max-restores: 0` | restores disabled |
+| no restore this run **and** none on record | nobody has proved these restore lately |
+
+The distinction that matters is **"nothing was DUE"** (healthy — a recent object already carries a
+successful restore) versus **"nothing was POSSIBLE"** (not healthy — nobody checked). Only the first
+pings. An earlier version required just `failures === 0` and a non-empty listing, and every row in
+that table above was a green heartbeat claiming restorability nobody had established.
 
 Credential-rotation warnings do not withhold the verify ping: key age is advisory, not a statement
 about whether these backups restore.
