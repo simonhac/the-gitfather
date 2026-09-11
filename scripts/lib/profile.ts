@@ -58,7 +58,8 @@ function loadProfileConfig(path: string | undefined = process.env.PROFILE): Reco
 }
 
 /** Credentials assembled from the environment (GitHub secrets) — never from the profile file. */
-function credentialsFromEnv(): Record<string, unknown> {
+/** Exported for tests: the env → credential mapping is the contract every caller workflow depends on. */
+export function credentialsFromEnv(): Record<string, unknown> {
   const e = process.env;
   return {
     databaseUrl: e.PG_BACKUP_DATABASE_URL,
@@ -85,6 +86,7 @@ function credentialsFromEnv(): Record<string, unknown> {
     slackToken: e.SLACK_BOT_TOKEN,
     slackChannel: e.SLACK_CHANNEL,
     heartbeatUrl: e.HEARTBEAT_URL,
+    verifyHeartbeatUrl: e.VERIFY_HEARTBEAT_URL,
     alertWebhookUrl: e.ALERT_WEBHOOK_URL,
   };
 }

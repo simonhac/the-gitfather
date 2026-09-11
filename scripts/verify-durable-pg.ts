@@ -54,6 +54,20 @@ function priorCountsFrom(log: LogStore): Record<string, number> | null {
   return prior?.counts ?? null;
 }
 
+/** Best-effort dead-man's-switch ping. Mirrors backup-pg-to-r2.ts; failures must never fail the run. */
+async function pingHeartbeat(url: string): Promise<void> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10_000);
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    if (!res.ok) process.stderr.write("warning: verify heartbeat ping failed\n");
+  } catch {
+    process.stderr.write("warning: verify heartbeat ping failed\n");
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function main(): Promise<void> {
   const cfg = loadVerifyDurableConfig();
   const core = drillCoreFromProfile(cfg);
@@ -277,6 +291,27 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   console.log("✓ durable-verify complete");
+
+  // ── Dead-man's-switch: a CLEAN verify, not "the job ran" ───────────────────────────────────
+  // Guards the failure a backup heartbeat cannot see: dumps that land on schedule but will not
+  // restore. Until now that failure was Slack-only, i.e. invisible if Slack broke.
+  //
+  // Two conditions, and the second is the one that is easy to get wrong:
+  //   failures === 0   every hash check, restore gate and the census floor passed.
+  //   all.length > 0   the run actually SAW durable objects. An empty listing verifies nothing,
+  //                    and "the job exited 0" over nothing is precisely the too-weak signal that
+  //                    kept liveone's collector green while every store failed. Note a steady-state
+  //                    day where nothing is DUE is still clean — requiring work-done would make the
+  //                    heartbeat go quiet on healthy days, which is the opposite of what we want.
+  //
+  // Credential-rotation warnings deliberately do NOT withhold the ping: they are an advisory note
+  // about key age, not a statement about whether these backups restore.
+  const verifyHeartbeatUrl = cfg.credentials.verifyHeartbeatUrl;
+  if (verifyHeartbeatUrl && all.length > 0) {
+    await pingHeartbeat(verifyHeartbeatUrl);
+  } else if (verifyHeartbeatUrl) {
+    process.stderr.write("verify heartbeat withheld: no durable objects were seen\n");
+  }
 }
 
 main().catch((e) => {

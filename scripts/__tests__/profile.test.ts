@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { writeFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { deepCamel, buildRawProfile, bridgeDisplayTz } from "../lib/profile.js";
+import { deepCamel, buildRawProfile, bridgeDisplayTz, credentialsFromEnv } from "../lib/profile.js";
 import { profileSchema } from "../lib/config.js";
 
 test("deepCamel: kebab/snake keys → camelCase, recursively (arrays + scalars untouched)", () => {
@@ -92,4 +92,44 @@ test("the committed example.yaml validates and applies retention + defaults", ()
   } finally {
     process.env.PROFILE = prev;
   }
+});
+
+// ─── VERIFY_HEARTBEAT_URL (added 2026-09-12) ───────────────────────────────────────────────────
+
+/** credentialsFromEnv() reads process.env directly, so swap it around the call and restore. */
+function withEnv<T>(vars: Record<string, string | undefined>, fn: () => T): T {
+  const saved = new Map(Object.keys(vars).map((k) => [k, process.env[k]]));
+  try {
+    for (const [k, v] of Object.entries(vars)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    return fn();
+  } finally {
+    for (const [k, v] of saved) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+}
+
+test("credentialsFromEnv maps VERIFY_HEARTBEAT_URL, distinctly from HEARTBEAT_URL", () => {
+  // The two guard DIFFERENT failures — a backup not landing vs a backup that lands but will not
+  // restore — and one caller repo holds both. If these ever collapsed to one name, a green backup
+  // would silence a broken restore.
+  const creds = withEnv(
+    {
+      HEARTBEAT_URL: "https://uptime.betterstack.com/api/v1/heartbeat/aaa",
+      VERIFY_HEARTBEAT_URL: "https://uptime.betterstack.com/api/v1/heartbeat/bbb",
+    },
+    () => credentialsFromEnv(),
+  );
+  assert.equal(creds.heartbeatUrl, "https://uptime.betterstack.com/api/v1/heartbeat/aaa");
+  assert.equal(creds.verifyHeartbeatUrl, "https://uptime.betterstack.com/api/v1/heartbeat/bbb");
+  assert.notEqual(creds.heartbeatUrl, creds.verifyHeartbeatUrl);
+});
+
+test("verifyHeartbeatUrl is unset-means-off", () => {
+  const creds = withEnv({ VERIFY_HEARTBEAT_URL: undefined }, () => credentialsFromEnv());
+  assert.equal(creds.verifyHeartbeatUrl, undefined);
 });

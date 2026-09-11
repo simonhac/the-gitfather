@@ -39,8 +39,28 @@ to get the precise job-log link.
 
 The last line of defence, independent of both GitHub **and** the Cloudflare Worker. The Worker's
 staleness watchdog already catches a backup not landing and pages from outside GitHub; this catches the
-Worker itself being down. Create a check (e.g.
-[healthchecks.io](https://healthchecks.io)) with a period of ~8 h + grace ~3 h, and wire it to a **loud**
+Worker itself being down. Create a **BetterStack heartbeat** (the fleet consolidated onto BetterStack
+on 2026-09-11; healthchecks.io is decommissioned) with a period of ~8 h + grace ~1.5 h, and wire it to a **loud**
 channel you actually watch (Slack with a mention, SMS/PagerDuty — not just an email that buries) — this is
 the alert that fires when GitHub is the thing that's broken. Put its ping URL in `HEARTBEAT_URL`; the
 backup pings it on success, so its absence pages independently of GitHub.
+
+## Two heartbeats, not one
+
+`HEARTBEAT_URL` and `VERIFY_HEARTBEAT_URL` are deliberately separate names, because they guard
+different failures and one caller repo holds both:
+
+| secret | pinged by | catches |
+| --- | --- | --- |
+| `HEARTBEAT_URL` | `pg-backup.yml`, on a successful dump+upload | the backup not landing at all |
+| `VERIFY_HEARTBEAT_URL` | `pg-durable-verify.yml`, on a clean verify | dumps that land on schedule but **will not restore** |
+
+If these ever collapsed into one name, a green backup would silence a broken restore — which is the
+more dangerous of the two failures, because it looks healthy right up until you need it.
+
+The verify ping requires `failures === 0` **and** that the run actually saw durable objects. "The job
+exited 0" over an empty listing verifies nothing. A steady-state day where nothing is *due* is still
+clean, though — requiring work-done would make the heartbeat go quiet on healthy days.
+
+Credential-rotation warnings do not withhold the verify ping: key age is advisory, not a statement
+about whether these backups restore.

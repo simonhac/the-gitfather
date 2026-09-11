@@ -312,7 +312,12 @@ const credentialsGroup = z
       .strict().prefault({} as never),
     slackToken: opt(nonEmpty()), // SLACK_BOT_TOKEN (secret)
     slackChannel: opt(nonEmpty()), // SLACK_CHANNEL (non-secret id, paired with the token; a GitHub Variable)
-    heartbeatUrl: opt(z.url()), // HEARTBEAT_URL
+    heartbeatUrl: opt(z.url()), // HEARTBEAT_URL — pinged by the BACKUP on success
+    // VERIFY_HEARTBEAT_URL — pinged by DURABLE-VERIFY on a clean verify. Deliberately a separate
+    // name from HEARTBEAT_URL: the two guard different failures (a backup not landing vs a backup
+    // that lands but will not restore), they have different cadences, and one caller workflow can
+    // see both. A shared name would let a green backup silence a broken restore.
+    verifyHeartbeatUrl: opt(z.url()), // VERIFY_HEARTBEAT_URL
     alertWebhookUrl: opt(z.url()), // ALERT_WEBHOOK_URL
   })
   .strict().prefault({} as never);
@@ -548,6 +553,7 @@ const CRED_ENV: Record<string, string> = {
   "credentials.slackToken": "SLACK_BOT_TOKEN",
   "credentials.slackChannel": "SLACK_CHANNEL",
   "credentials.heartbeatUrl": "HEARTBEAT_URL",
+  "credentials.verifyHeartbeatUrl": "VERIFY_HEARTBEAT_URL",
   "credentials.alertWebhookUrl": "ALERT_WEBHOOK_URL",
 };
 
