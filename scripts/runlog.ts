@@ -9,12 +9,14 @@
 //   tsx runlog.ts run    --ts ISO --ok true|false [--tiers "2hourly daily"] [--bytes N] [--key K] [--error MSG] [--duration MS]
 //   tsx runlog.ts verify --ts ISO --verified-ts ISO --ok true|false [--ratio R]
 //
-// Records land in _log/<name>/{runs,verifications}-YYYY-MM.jsonl in R2.
+// Records land in _log/<name>/{runs,verifications,archives,credentials}-YYYY-MM.jsonl in R2.
 // "Append" = read-modify-write of the CURRENT month's file (S3/R2 has no native
 // append): monthly partitioning rotates the file by name (prior months freeze);
 // an R2 lifecycle rule on _log/ expires old months. Everything is BEST-EFFORT —
 // any failure logs a warning and returns (never throws) so a logging hiccup never
-// fails a backup.
+// fails a backup. appendCredential additionally returns whether the record LANDED, because its
+// caller (roll-r2-token.ts) must tell the operator when a rotation went unrecorded — silence there
+// makes the credential-age monitor cry wolf forever.
 //
 // Reads: R2_BUCKET + the RCLONE_CONFIG_R2_* rclone remote from the environment (set by the calling
 // backup/drill script), the profile `name` (read tolerantly — appendRun runs on the config-FAILURE
@@ -89,16 +91,27 @@ function appendRecord(
   fileBase: "runs" | "verifications" | "archives" | "credentials",
   ts: string,
   record: LogRun | LogVerification | LogArchive | LogCredential,
-): void {
+): boolean {
   const remote = process.env.RUNLOG_RCLONE_REMOTE ?? "r2";
   const bucket = process.env.R2_BUCKET; // credential (env)
   // Read the profile `name` tolerantly (raw, unvalidated) — appendRun is best-effort and is also called
   // from backup's config-FAILURE path, so it must never trigger full validation (which exits the process).
-  const rawName = buildRawProfile().name;
+  //
+  // "Tolerantly" has to include THROWING, which this missed: buildRawProfile reads and parses a file,
+  // so a $PROFILE pointing at a missing or malformed YAML raises rather than answering undefined. That
+  // escaped a module whose contract is never-throws, and in roll-r2-token.ts it surfaced as a fatal
+  // error AFTER the secrets were already published — reporting a completed rotation as a failure.
+  let rawName: unknown;
+  try {
+    rawName = buildRawProfile().name;
+  } catch (e) {
+    warn(`cannot read the profile — skipping run-log: ${(e as Error).message}`);
+    return false;
+  }
   const basename = typeof rawName === "string" ? rawName : undefined;
   if (!bucket || !basename) {
     warn("R2_BUCKET / profile name not set — skipping run-log");
-    return;
+    return false;
   }
 
   const ym = ts.slice(0, 7); // "YYYY-MM" from an ISO stamp
@@ -109,14 +122,14 @@ function appendRecord(
   const ls = rclone(["lsf", "--files-only", dirPath, "--s3-no-check-bucket"]);
   if (!ls.ok) {
     warn("cannot reach R2 to read the run-log — skipping this append");
-    return;
+    return false;
   }
   let existing = "";
   if (ls.out.split("\n").map((s) => s.trim()).includes(fileName)) {
     const cat = rclone(["cat", objPath, "--s3-no-check-bucket"]);
     if (!cat.ok) {
       warn("current month's run-log is unreadable — skipping to avoid clobber");
-      return;
+      return false;
     }
     existing = cat.out;
   }
@@ -135,7 +148,7 @@ function appendRecord(
     put = rclone(["copyto", tmp, objPath, "--s3-no-check-bucket"]);
   } catch (e) {
     warn(`failed to stage the run-log locally: ${(e as Error).message}`);
-    return;
+    return false;
   } finally {
     try {
       unlinkSync(tmp);
@@ -145,9 +158,10 @@ function appendRecord(
   }
   if (!put.ok) {
     warn("failed to write the run-log back to R2");
-    return;
+    return false;
   }
   process.stdout.write(`runlog: appended ${fileBase} → _log/${basename}/${fileName}\n`);
+  return true;
 }
 
 export interface RunRecordInput {
@@ -276,8 +290,8 @@ if (isEntrypoint()) main();
  * rotation happened: a GitHub secret cannot be read back, and listing repository secrets needs a
  * token more privileged than the workflow that would do the checking.
  */
-export function appendCredential(input: LogCredential): void {
-  appendRecord("credentials", input.ts, input);
+export function appendCredential(input: LogCredential): boolean {
+  return appendRecord("credentials", input.ts, input);
 }
 
 /**

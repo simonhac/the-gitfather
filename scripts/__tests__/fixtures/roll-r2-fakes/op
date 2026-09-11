@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# Stand-in for the 1Password CLI. Stores whatever `item create/edit` is given under $FAKE_STATE so
+# `op read` can hand the same bytes back — the CLI compares them, so a lossy fake would fail the
+# escrow read-back rather than the thing under test.
+#
+# Models the ONE-NOTE escrow (since 2026-09-11): three fields of a single Secure Note, written by
+# `op item edit <item> --vault V FIELD=value …` and read back by `op read op://V/<item>/FIELD`.
+# State is keyed per ITEM/FIELD for that reason — keying it per item alone would let all three
+# credentials collapse onto one file, and the read-back would still "pass" while comparing a value
+# against itself.
+set -euo pipefail
+state="${FAKE_STATE:?FAKE_STATE must be set}"
+mkdir -p "$state/op"
+
+case "${1:-}" in
+  whoami) echo '{"user":"fake"}'; exit 0 ;;
+  read)
+    # op read op://<vault>/<ITEM>/<FIELD>
+    ref="${2:-}"
+    item=$(printf '%s' "$ref" | awk -F/ '{print $(NF-1)}')
+    field=$(printf '%s' "$ref" | awk -F/ '{print $NF}')
+    path="$state/op/$item.$field"
+    [ -f "$path" ] || { echo "fake op: no such field $item/$field" >&2; exit 1; }
+    cat "$path"
+    exit 0
+    ;;
+  item)
+    sub="${2:-}"
+    case "$sub" in
+      get)
+        item="${3:-}"
+        # Absent → the CLI takes the `create` path. Present → `edit`. Either is fine here.
+        # An item exists once ANY of its fields has been written.
+        compgen -G "$state/op/$item.*" >/dev/null || exit 1
+        echo '{}'
+        exit 0
+        ;;
+      create|edit)
+        item=""
+        expect_title=0
+        # `create` names the item with --title; `edit` takes it positionally as $3.
+        [ "$sub" = "edit" ] && item="${3:-}"
+        for arg in "$@"; do
+          if [ "$expect_title" = "1" ]; then item="$arg"; expect_title=0; continue; fi
+          case "$arg" in
+            --title) expect_title=1 ;;
+          esac
+        done
+        [ -n "$item" ] || { echo "fake op: could not determine item title: $*" >&2; exit 1; }
+        wrote=0
+        for arg in "$@"; do
+          case "$arg" in
+            --*) ;;                       # flags are never field assignments
+            *=*)
+              field="${arg%%=*}"
+              value="${arg#*=}"
+              # `op item edit … FIELD[type]=value` sets the field's TYPE; the field is still named
+              # FIELD, and that is what `op read op://v/item/FIELD` asks for. Storing the annotated
+              # form would leave the read-back looking for a field nothing wrote.
+              field="${field%%\[*}"
+              printf '%s' "$value" > "$state/op/$item.$field"
+              wrote=$((wrote + 1))
+              ;;
+          esac
+        done
+        [ "$wrote" -gt 0 ] || { echo "fake op: no FIELD=value assignments in: $*" >&2; exit 1; }
+        echo '{}'
+        exit 0
+        ;;
+    esac
+    ;;
+esac
+echo "fake op: unhandled: $*" >&2
+exit 1

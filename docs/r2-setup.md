@@ -102,9 +102,14 @@ possible and the one moment it is easy to get wrong — the old credential dies 
 one is displayed once, and nothing downstream can be read back to check what you stored.
 
 ```bash
+PROFILE=<path-to-profile.yaml> \
 npm run roll-r2 -- --vault <1password-vault> --bucket <r2-bucket> --account-id <cf-account> \
   [--prefix R2] [--repo owner/name] [--dry-run]
 ```
+
+When `--repo` is supplied, `PROFILE` names the run-log for the rotation record. If recording fails,
+escrow and publication remain complete and the tool reports a warning. Without `--repo`, the tool
+escrows the credential but neither publishes it nor records its rotation.
 
 It does the checks in the order that fails cheapest, and writes nothing until they pass:
 
@@ -125,7 +130,8 @@ Two flags carry real meaning rather than convenience:
 
 ### Knowing when a rotation is overdue
 
-`roll-r2-token.ts` records each rotation into the run-log (`_log/<name>/credentials-YYYY-MM.jsonl`,
+After publishing with `--repo`, `roll-r2-token.ts` attempts to record the rotation in the
+credential's own bucket (`_log/<name>/credentials-YYYY-MM.jsonl`,
 holding no secret — the key-id tail is four characters). That record is the only durable trace a
 rotation happened: a GitHub secret cannot be read back, and listing repository secrets needs a token
 more privileged than the job that would do the checking.
