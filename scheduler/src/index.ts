@@ -27,6 +27,7 @@ import {
   type Env,
 } from "./github.js";
 import { runWatchdogs, type WatchdogRecord } from "./watchdog.js";
+import { healthVerdict, tickDelivered } from "./health.js";
 
 export type { Env } from "./github.js";
 
@@ -92,6 +93,27 @@ async function runTick(env: Env, cadences: Cadence[], clients: Client[], now: Da
   return { results, watchdog };
 }
 
+/**
+ * Dead-man's-switch ping. Best-effort by design: a failed ping must never fail the tick, because
+ * the tick's real work (dispatching backups, running the watchdog) has already happened. A missed
+ * ping costs one heartbeat interval of grace; a thrown exception here would cost a backup.
+ *
+ * Bounded at 5s — shorter than the backup script's 10s, because a Worker tick has far less budget
+ * and this is the last thing it does.
+ */
+async function pingHeartbeat(url: string): Promise<void> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5_000);
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    if (!res.ok) console.warn(`heartbeat ping returned ${res.status}`);
+  } catch (e) {
+    console.warn(`heartbeat ping failed: ${String(e)}`);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 interface TickRecord {
   tick: string;
   cadences: Cadence[];
@@ -155,7 +177,27 @@ async function writeState(env: Env, rec: TickRecord): Promise<void> {
 async function handleFetch(req: Request, env: Env): Promise<Response> {
   const url = new URL(req.url);
 
-  if (url.pathname === "/health") return new Response("ok\n"); // open liveness
+  if (url.pathname === "/health") {
+    // Open liveness, but STATEFUL. It used to return a constant "ok", which is false comfort: a
+    // Worker's fetch handler answers even with its Cron Trigger deleted, its ROSTER invalid, or its
+    // App key revoked — green through exactly the outages worth knowing about.
+    //
+    // Reading the last tick also makes this INDEPENDENT of the heartbeat: the heartbeat is
+    // Cloudflare→BetterStack, this is BetterStack→Cloudflare, so an uptime monitor here still fires
+    // if the Worker loses outbound fetch, which would silence the heartbeat.
+    const obj = await env.STATE.get("_scheduler/state.json").catch(() => null);
+    let lastTick: string | null = null;
+    if (obj) {
+      try {
+        lastTick = (JSON.parse(await obj.text()) as TickRecord).tick ?? null;
+      } catch {
+        lastTick = null; // unparseable state is indistinguishable from no state, and just as bad
+      }
+    }
+    const roster = safeParseClients(env)?.length ?? 0;
+    const v = healthVerdict(lastTick, roster, new Date());
+    return Response.json(v.body, { status: v.status });
+  }
 
   if (req.headers.get("X-Trigger-Secret") !== env.TRIGGER_SECRET) {
     return new Response("forbidden\n", { status: 403 });
@@ -197,6 +239,21 @@ export default {
     const fired = results.filter((r) => r.status !== 0).length;
     const outcomes = watchdog.map((w) => `${w.id}${w.name ? `/${w.name}` : ""}=${w.outcome}`).join(",");
     console.log(`tick ${t.toISOString()} cron=${event.cron} cadences=[${cadences.join(",")}] dispatches=${fired} watchdog=[${outcomes}]`);
+
+    // Ping ONLY from the cron path, never from /trigger: a manual trigger must not be able to keep
+    // the heartbeat green, because debugging a dead scheduler is exactly when someone would hit
+    // /trigger repeatedly and mask the very thing they are investigating. (liveone's collector
+    // heartbeat carries the same `isCron` condition, for the same reason.)
+    //
+    // Awaited, not fire-and-forget: a Worker's `scheduled` handler may be torn down as soon as it
+    // returns, which would cancel an un-awaited fetch and leave the heartbeat reading dead while
+    // the scheduler is fine.
+    const delivered = tickDelivered(watchdog, clients.filter((c) => subscribes(c, "staleness")).map((c) => c.id));
+    if (env.SCHEDULER_HEARTBEAT_URL && delivered) {
+      await pingHeartbeat(env.SCHEDULER_HEARTBEAT_URL);
+    } else if (!delivered) {
+      console.warn(`tick ${t.toISOString()} did NOT deliver — heartbeat withheld`);
+    }
   },
 
   async fetch(req: Request, env: Env): Promise<Response> {

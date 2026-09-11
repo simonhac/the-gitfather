@@ -18,6 +18,8 @@ export interface Env {
   // importKey takes pkcs8 only, and a PKCS#1 key fails to import. See README "GitHub App setup".
   TRIGGER_SECRET: string; // secret: shared secret gating the manual /trigger and /state endpoints
   SLACK_BOT_TOKEN?: string; // secret: the watchdog's bot token (chat:write); per-client override SLACK_BOT_TOKEN_<ID>
+  SCHEDULER_HEARTBEAT_URL?: string; // secret: BetterStack heartbeat, pinged when a TICK DELIVERED (see health.ts).
+  // UNSET MEANS OFF, so `wrangler dev` and a preview deployment can never keep production's monitor green.
   ROSTER: Client[] | string; // var (wrangler.jsonc): the client roster — see Client. A JSON string is accepted too.
   STATE: R2Bucket; // binding: shared dashboard bucket (free, in-network) — scheduler state + logs
   // Plus, per client: its private dump bucket under the binding named in Client.bucket, and optional
