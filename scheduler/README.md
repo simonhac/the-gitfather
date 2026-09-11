@@ -22,8 +22,10 @@ Three conditions are deliberate, and loosening any of them breaks the signal:
 
 Unset means off, so `wrangler dev` can never keep production's monitor green.
 
-`GET /health` is stateful: it reads `_scheduler/state.json` and returns **503** when the last tick is
-older than 25 minutes (two missed ticks; Cron Triggers are best-effort). It previously returned a
+`GET /health` is stateful: it reads `_scheduler/cron.json` — a **cron-only** record, deliberately not
+`state.json`, which `/trigger` also overwrites — and returns **503** when the last cron tick is older
+than 25 minutes (two missed ticks; Cron Triggers are best-effort), when it **did not deliver**, when
+the roster is empty or unparseable, or when the timestamp is in the future. It previously returned a
 constant `"ok"`, which was false comfort — a Worker's fetch handler answers even with its Cron
 Trigger deleted or its App key revoked. It is also an independent path: the heartbeat is
 Cloudflare→BetterStack, `/health` is BetterStack→Cloudflare, so a monitor here still fires if the

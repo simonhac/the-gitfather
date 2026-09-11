@@ -27,7 +27,7 @@ import {
   type Env,
 } from "./github.js";
 import { runWatchdogs, type WatchdogRecord } from "./watchdog.js";
-import { healthVerdict, tickDelivered } from "./health.js";
+import { healthVerdict, tickDelivered, type CronTickRecord } from "./health.js";
 
 export type { Env } from "./github.js";
 
@@ -114,6 +114,15 @@ async function pingHeartbeat(url: string): Promise<void> {
   }
 }
 
+/** Cron-only health record. Separate from state.json, which /trigger also writes. */
+const CRON_HEALTH_KEY = "_scheduler/cron.json";
+
+async function writeCronHealth(env: Env, rec: CronTickRecord): Promise<void> {
+  await env.STATE.put(CRON_HEALTH_KEY, JSON.stringify(rec), {
+    httpMetadata: { contentType: "application/json" },
+  }).catch((e) => console.error(`cron.json put failed: ${String(e)}`));
+}
+
 interface TickRecord {
   tick: string;
   cadences: Cadence[];
@@ -185,17 +194,20 @@ async function handleFetch(req: Request, env: Env): Promise<Response> {
     // Reading the last tick also makes this INDEPENDENT of the heartbeat: the heartbeat is
     // Cloudflare→BetterStack, this is BetterStack→Cloudflare, so an uptime monitor here still fires
     // if the Worker loses outbound fetch, which would silence the heartbeat.
-    const obj = await env.STATE.get("_scheduler/state.json").catch(() => null);
-    let lastTick: string | null = null;
+    // Reads the CRON-ONLY record, not state.json — /trigger overwrites state.json, so a single
+    // manual trigger would otherwise refresh the whole scheduler's health and mask a dead cron.
+    const obj = await env.STATE.get(CRON_HEALTH_KEY).catch(() => null);
+    let last: CronTickRecord | null = null;
     if (obj) {
       try {
-        lastTick = (JSON.parse(await obj.text()) as TickRecord).tick ?? null;
+        const parsed = JSON.parse(await obj.text()) as Partial<CronTickRecord>;
+        last = typeof parsed.tick === "string" ? { tick: parsed.tick, delivered: parsed.delivered === true } : null;
       } catch {
-        lastTick = null; // unparseable state is indistinguishable from no state, and just as bad
+        last = null; // unparseable is indistinguishable from absent, and just as bad
       }
     }
     const roster = safeParseClients(env)?.length ?? 0;
-    const v = healthVerdict(lastTick, roster, new Date());
+    const v = healthVerdict(last, roster, new Date());
     return Response.json(v.body, { status: v.status });
   }
 
@@ -249,6 +261,11 @@ export default {
     // returns, which would cancel an un-awaited fetch and leave the heartbeat reading dead while
     // the scheduler is fine.
     const delivered = tickDelivered(watchdog, clients.filter((c) => subscribes(c, "staleness")).map((c) => c.id));
+
+    // Written on EVERY cron tick, delivered or not: "ran but did not deliver" has to be visible to
+    // /health, otherwise an all-`error` tick keeps it green forever while nothing is watched.
+    await writeCronHealth(env, { tick: t.toISOString(), delivered });
+
     if (env.SCHEDULER_HEARTBEAT_URL && delivered) {
       await pingHeartbeat(env.SCHEDULER_HEARTBEAT_URL);
     } else if (!delivered) {

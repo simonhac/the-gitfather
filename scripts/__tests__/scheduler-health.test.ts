@@ -8,9 +8,11 @@ import {
   healthVerdict,
   HEALTH_MAX_TICK_AGE_MS,
   type WatchdogRecord,
+  type CronTickRecord,
 } from "../../scheduler/src/health.js";
 
-const rec = (id: string, outcome: WatchdogRecord["outcome"]): WatchdogRecord => ({ id, name: id, outcome });
+const rec = (id: string, outcome: WatchdogRecord["outcome"], name = id): WatchdogRecord => ({ id, name, outcome });
+const cron = (tick: string, delivered = true): CronTickRecord => ({ tick, delivered });
 const ROSTER = ["liveone", "mrtippy", "boost"];
 
 test("tickDelivered: a full set of real verdicts is delivery", () => {
@@ -62,17 +64,17 @@ test("tickAgeMs: missing or unparseable state is infinitely old", () => {
 test("healthVerdict: 200 while ticks are recent, 503 once they stop", () => {
   const now = new Date("2026-09-12T00:00:00Z");
 
-  const fresh = healthVerdict("2026-09-11T23:52:00Z", 3, now); // 8 min
+  const fresh = healthVerdict(cron("2026-09-11T23:52:00Z"), 3, now); // 8 min
   assert.equal(fresh.status, 200);
   assert.equal(fresh.body.ok, true);
   assert.equal(fresh.body.ageSeconds, 480);
   assert.equal(fresh.body.roster, 3);
 
   // 25 min tolerates two consecutive missed ticks; Cron Triggers are best-effort and one skip is normal.
-  const twoMissed = healthVerdict("2026-09-11T23:38:00Z", 3, now); // 22 min
+  const twoMissed = healthVerdict(cron("2026-09-11T23:38:00Z"), 3, now); // 22 min
   assert.equal(twoMissed.status, 200);
 
-  const stale = healthVerdict("2026-09-11T23:30:00Z", 3, now); // 30 min
+  const stale = healthVerdict(cron("2026-09-11T23:30:00Z"), 3, now); // 30 min
   assert.equal(stale.status, 503);
   assert.equal(stale.body.ok, false);
   assert.match(stale.body.reason ?? "", /stale/);
@@ -80,13 +82,63 @@ test("healthVerdict: 200 while ticks are recent, 503 once they stop", () => {
   const none = healthVerdict(null, 0, now);
   assert.equal(none.status, 503);
   assert.equal(none.body.lastTick, null);
-  assert.match(none.body.reason ?? "", /no tick/);
+  assert.match(none.body.reason ?? "", /no cron tick/);
 });
 
 test("healthVerdict: the boundary is exclusive, so exactly-max is still healthy", () => {
   const now = new Date("2026-09-12T00:00:00Z");
   const at = new Date(now.getTime() - HEALTH_MAX_TICK_AGE_MS).toISOString();
-  assert.equal(healthVerdict(at, 3, now).status, 200);
+  assert.equal(healthVerdict(cron(at), 3, now).status, 200);
   const past = new Date(now.getTime() - HEALTH_MAX_TICK_AGE_MS - 1000).toISOString();
-  assert.equal(healthVerdict(past, 3, now).status, 503);
+  assert.equal(healthVerdict(cron(past), 3, now).status, 503);
+});
+
+// ─── regression tests for what a review caught (2026-09-12) ────────────────────────────────────
+
+test("tickDelivered: ONE CLIENT CAN YIELD SEVERAL RECORDS — a failed profile must not be masked", () => {
+  // runWatchdogs() flattens one record per published watchdog config, so a client backing up two
+  // databases produces two records with the same id. Keying a Map by id kept only the LAST, so this
+  // read as delivered and the reversed order read as not — a false green on a dead-man's switch,
+  // order-dependent. Both orders must now be false.
+  const twoProfiles = ["liveone"];
+  assert.equal(
+    tickDelivered([rec("liveone", "error", "db-a"), rec("liveone", "fresh", "db-b")], twoProfiles),
+    false,
+    "error first",
+  );
+  assert.equal(
+    tickDelivered([rec("liveone", "fresh", "db-b"), rec("liveone", "error", "db-a")], twoProfiles),
+    false,
+    "error last — this is the order the old Map-by-id silently accepted",
+  );
+  // Both healthy is still delivery.
+  assert.equal(
+    tickDelivered([rec("liveone", "fresh", "db-a"), rec("liveone", "recovered", "db-b")], twoProfiles),
+    true,
+  );
+});
+
+test("healthVerdict: a tick that RAN but did not DELIVER is not health", () => {
+  // An all-`error` tick still writes a cron record. Checking only the timestamp would keep /health
+  // green forever while nothing was actually being watched.
+  const now = new Date("2026-09-12T00:00:00Z");
+  const v = healthVerdict(cron("2026-09-11T23:55:00Z", false), 3, now);
+  assert.equal(v.status, 503);
+  assert.equal(v.body.delivered, false);
+  assert.match(v.body.reason ?? "", /did not deliver/);
+});
+
+test("healthVerdict: an empty or unparseable roster is a misconfiguration, not health", () => {
+  const now = new Date("2026-09-12T00:00:00Z");
+  const v = healthVerdict(cron("2026-09-11T23:55:00Z"), 0, now);
+  assert.equal(v.status, 503);
+  assert.match(v.body.reason ?? "", /roster/);
+});
+
+test("healthVerdict: a future timestamp is rejected, not treated as fresh", () => {
+  // Otherwise a bogus/skewed future tick reads healthy for 25 minutes BEYOND that future instant.
+  const now = new Date("2026-09-12T00:00:00Z");
+  const v = healthVerdict(cron("2026-09-12T02:00:00Z"), 3, now);
+  assert.equal(v.status, 503);
+  assert.match(v.body.reason ?? "", /future/);
 });
