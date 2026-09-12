@@ -27,6 +27,7 @@ import {
   type Env,
 } from "./github.js";
 import { runWatchdogs, type WatchdogRecord } from "./watchdog.js";
+import { healthVerdict, tickDelivered, type CronTickRecord } from "./health.js";
 
 export type { Env } from "./github.js";
 
@@ -92,6 +93,36 @@ async function runTick(env: Env, cadences: Cadence[], clients: Client[], now: Da
   return { results, watchdog };
 }
 
+/**
+ * Dead-man's-switch ping. Best-effort by design: a failed ping must never fail the tick, because
+ * the tick's real work (dispatching backups, running the watchdog) has already happened. A missed
+ * ping costs one heartbeat interval of grace; a thrown exception here would cost a backup.
+ *
+ * Bounded at 5s — shorter than the backup script's 10s, because a Worker tick has far less budget
+ * and this is the last thing it does.
+ */
+async function pingHeartbeat(url: string): Promise<void> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5_000);
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    if (!res.ok) console.warn(`heartbeat ping returned ${res.status}`);
+  } catch (e) {
+    console.warn(`heartbeat ping failed: ${String(e)}`);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Cron-only health record. Separate from state.json, which /trigger also writes. */
+const CRON_HEALTH_KEY = "_scheduler/cron.json";
+
+async function writeCronHealth(env: Env, rec: CronTickRecord): Promise<void> {
+  await env.STATE.put(CRON_HEALTH_KEY, JSON.stringify(rec), {
+    httpMetadata: { contentType: "application/json" },
+  }).catch((e) => console.error(`cron.json put failed: ${String(e)}`));
+}
+
 interface TickRecord {
   tick: string;
   cadences: Cadence[];
@@ -155,7 +186,30 @@ async function writeState(env: Env, rec: TickRecord): Promise<void> {
 async function handleFetch(req: Request, env: Env): Promise<Response> {
   const url = new URL(req.url);
 
-  if (url.pathname === "/health") return new Response("ok\n"); // open liveness
+  if (url.pathname === "/health") {
+    // Open liveness, but STATEFUL. It used to return a constant "ok", which is false comfort: a
+    // Worker's fetch handler answers even with its Cron Trigger deleted, its ROSTER invalid, or its
+    // App key revoked — green through exactly the outages worth knowing about.
+    //
+    // Reading the last tick also makes this INDEPENDENT of the heartbeat: the heartbeat is
+    // Cloudflare→BetterStack, this is BetterStack→Cloudflare, so an uptime monitor here still fires
+    // if the Worker loses outbound fetch, which would silence the heartbeat.
+    // Reads the CRON-ONLY record, not state.json — /trigger overwrites state.json, so a single
+    // manual trigger would otherwise refresh the whole scheduler's health and mask a dead cron.
+    const obj = await env.STATE.get(CRON_HEALTH_KEY).catch(() => null);
+    let last: CronTickRecord | null = null;
+    if (obj) {
+      try {
+        const parsed = JSON.parse(await obj.text()) as Partial<CronTickRecord>;
+        last = typeof parsed.tick === "string" ? { tick: parsed.tick, delivered: parsed.delivered === true } : null;
+      } catch {
+        last = null; // unparseable is indistinguishable from absent, and just as bad
+      }
+    }
+    const roster = safeParseClients(env)?.length ?? 0;
+    const v = healthVerdict(last, roster, new Date());
+    return Response.json(v.body, { status: v.status });
+  }
 
   if (req.headers.get("X-Trigger-Secret") !== env.TRIGGER_SECRET) {
     return new Response("forbidden\n", { status: 403 });
@@ -197,6 +251,26 @@ export default {
     const fired = results.filter((r) => r.status !== 0).length;
     const outcomes = watchdog.map((w) => `${w.id}${w.name ? `/${w.name}` : ""}=${w.outcome}`).join(",");
     console.log(`tick ${t.toISOString()} cron=${event.cron} cadences=[${cadences.join(",")}] dispatches=${fired} watchdog=[${outcomes}]`);
+
+    // Ping ONLY from the cron path, never from /trigger: a manual trigger must not be able to keep
+    // the heartbeat green, because debugging a dead scheduler is exactly when someone would hit
+    // /trigger repeatedly and mask the very thing they are investigating. (liveone's collector
+    // heartbeat carries the same `isCron` condition, for the same reason.)
+    //
+    // Awaited, not fire-and-forget: a Worker's `scheduled` handler may be torn down as soon as it
+    // returns, which would cancel an un-awaited fetch and leave the heartbeat reading dead while
+    // the scheduler is fine.
+    const delivered = tickDelivered(watchdog, clients.filter((c) => subscribes(c, "staleness")).map((c) => c.id));
+
+    // Written on EVERY cron tick, delivered or not: "ran but did not deliver" has to be visible to
+    // /health, otherwise an all-`error` tick keeps it green forever while nothing is watched.
+    await writeCronHealth(env, { tick: t.toISOString(), delivered });
+
+    if (env.SCHEDULER_HEARTBEAT_URL && delivered) {
+      await pingHeartbeat(env.SCHEDULER_HEARTBEAT_URL);
+    } else if (!delivered) {
+      console.warn(`tick ${t.toISOString()} did NOT deliver — heartbeat withheld`);
+    }
   },
 
   async fetch(req: Request, env: Env): Promise<Response> {

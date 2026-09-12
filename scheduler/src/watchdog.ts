@@ -36,26 +36,11 @@ import {
 import { parseWatchdogConfig, WATCHDOG_CONFIG_PREFIX, type WatchdogConfig } from "../../scripts/lib/watchdogConfig.js";
 import { dispatchWorkflow, listWorkflowRuns, type Client, type Env } from "./github.js";
 
-export type WatchdogOutcome =
-  | "fresh" // current slot satisfied
-  | "recovered" // fresh, and an alert episode was open → closed it with a 🟢 note
-  | "stale-healed" // overdue → dispatched a catch-up backup
-  | "stale-inflight" // overdue, but a backup is already queued/running → waited
-  | "stale-broken" // overdue AND the two newest completed runs failed → paged, not retried
-  | "stale-dry-run" // overdue; config dryRun → logged what it would do
-  | "stale-no-heal" // overdue; selfHeal off → paged
-  | "stale-unhealed" // overdue; the catch-up dispatch itself failed → paged
-  | "broken-size" // newest object smaller than minBytes → paged, never healed
-  | "no-objects" // nothing under <prefix>/2hourly/ → paged
-  | "bad-stamp" // newest object's name doesn't carry a parseable stamp → paged
-  | "no-config" // no _config/*/watchdog.json in the bucket yet (run the backup once)
-  | "error"; // unexpected exception — logged, never propagated
-
-export interface WatchdogRecord {
-  id: string; // the roster's opaque client id
-  name: string; // the backup's profile name ("" for no-config / error before a config was read)
-  outcome: WatchdogOutcome;
-}
+// Outcome codes live in health.ts so that module can stay free of Worker types (it is imported by
+// the Node-typed test side). Imported for use here, and re-exported so every existing
+// `from "./watchdog.js"` import elsewhere keeps working.
+import type { WatchdogOutcome, WatchdogRecord } from "./health.js";
+export type { WatchdogOutcome, WatchdogRecord };
 
 /** A client-scoped secret: `<NAME>_<ID>` (id upper-cased, non-alphanumerics → `_`) falling back to `<NAME>`. */
 export function clientSecret(env: Env, name: string, clientId: string): string {

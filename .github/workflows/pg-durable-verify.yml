@@ -49,6 +49,11 @@ on:
         required: false
       ALERT_WEBHOOK_URL:        # optional generic failure webhook (Slack-compatible); redundant to the bot
         required: false
+      VERIFY_HEARTBEAT_URL:     # optional dead-man's-switch, pinged only on a CLEAN verify
+        required: false         # DISTINCT from the backup's HEARTBEAT_URL on purpose — they guard
+                                # different failures (a backup not landing vs one that will not
+                                # restore) and one caller repo can hold both. Sharing a name would
+                                # let a green backup silence a broken restore.
 
 jobs:
   verify-durable:
@@ -112,5 +117,6 @@ jobs:
           SLACK_CHANNEL: ${{ inputs.slack_channel }}
           AGE_IDENTITY: ${{ secrets.AGE_IDENTITY }}
           ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+          VERIFY_HEARTBEAT_URL: ${{ secrets.VERIFY_HEARTBEAT_URL }}
           GITHUB_TOKEN: ${{ github.token }}   # read-only: lets a failure alert link to THIS job's log page (jobs API)
         run: npx tsx scripts/verify-durable-pg.ts

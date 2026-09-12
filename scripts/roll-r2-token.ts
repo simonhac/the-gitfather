@@ -28,7 +28,7 @@
 import { createInterface } from "node:readline";
 import { capture, commandExists } from "./lib/proc.js";
 import { appendCredential } from "./runlog.js";
-import { secretFromTokenValue, isMate, opItemNames, parseRollArgs, type RollArgs } from "./lib/r2Token.js";
+import { secretFromTokenValue, isMate, opFieldNames, parseRollArgs, type RollArgs } from "./lib/r2Token.js";
 
 function die(msg: string): never {
   process.stderr.write(`\nERROR: ${msg}\n`);
@@ -78,22 +78,31 @@ function makePrompter(): { ask: (label: string) => Promise<string>; done: () => 
   };
 }
 
-/** Does an item already exist in the vault? Determines create-vs-edit; a roll is usually an edit. */
-function itemExists(vault: string, title: string): boolean {
-  return capture("op", ["item", "get", title, "--vault", vault, "--format=json"]).ok;
+/** Does the destination note exist yet? Determines create-vs-edit; a roll is usually an edit. */
+function itemExists(vault: string, item: string): boolean {
+  return capture("op", ["item", "get", item, "--vault", vault, "--format=json"]).ok;
 }
 
-function putItem(vault: string, title: string, value: string, note: string): void {
-  const r = itemExists(vault, title)
-    ? capture("op", ["item", "edit", title, "--vault", vault, `credential=${value}`, `notesPlain=${note}`, "--format=json"])
-    : capture("op", ["item", "create", "--category", "API Credential", "--vault", vault, "--title", title,
-        `credential=${value}`, `notesPlain=${note}`, "--format=json"]);
-  if (!r.ok) die(`could not write ${title} to 1Password: ${r.stderr.trim()}`);
+/**
+ * Write all three fields into ONE Secure Note, in a single call.
+ *
+ * Deliberately does NOT touch notesPlain. The note is shared — it carries a header describing the
+ * whole backup credential set — and this tool no longer owns the item, only three of its fields.
+ * The per-credential provenance those three items used to carry (bucket, account, roll date) now
+ * lives in the <PREFIX>_ROLLED_AT field instead.
+ */
+function putFields(vault: string, item: string, fields: Record<string, string>): void {
+  const assignments = Object.entries(fields).map(([k, v]) => `${k}=${v}`);
+  const r = itemExists(vault, item)
+    ? capture("op", ["item", "edit", item, "--vault", vault, ...assignments, "--format=json"])
+    : capture("op", ["item", "create", "--category", "Secure Note", "--vault", vault, "--title", item,
+        ...assignments, "--format=json"]);
+  if (!r.ok) die(`could not write ${item} to 1Password: ${r.stderr.trim()}`);
 }
 
-function readItem(vault: string, title: string): string {
-  const r = capture("op", ["read", `op://${vault}/${title}/credential`]);
-  if (!r.ok) die(`could not read ${title} back from 1Password: ${r.stderr.trim()}`);
+function readField(vault: string, item: string, field: string): string {
+  const r = capture("op", ["read", `op://${vault}/${item}/${field}`]);
+  if (!r.ok) die(`could not read ${item}/${field} back from 1Password: ${r.stderr.trim()}`);
   return r.out.replace(/\n$/, "");
 }
 
@@ -128,7 +137,7 @@ function setGhSecret(repo: string, name: string, value: string): void {
 
 async function main(): Promise<void> {
   const args = parseRollArgs(process.argv.slice(2));
-  const names = opItemNames(args.prefix);
+  const names = opFieldNames(args.prefix);
 
   for (const bin of ["rclone", ...(args.dryRun ? [] : ["op", ...(args.repo ? ["gh"] : [])])]) {
     if (!commandExists(bin)) die(`${bin} not found on PATH`);
@@ -141,7 +150,7 @@ async function main(): Promise<void> {
   console.log(
     args.dryRun
       ? "  escrow  → NONE (dry run: the credential is checked, not stored)"
-      : `  escrow  → 1Password vault ${args.vault} (${names.tokenValue}, ${names.accessKeyId}, ${names.secretAccessKey})`,
+      : `  escrow  → 1Password ${args.vault}/${args.item} (${names.tokenValue}, ${names.accessKeyId}, ${names.secretAccessKey})`,
   );
   console.log(
     args.dryRun ? "  publish → NONE (dry run)"
@@ -189,16 +198,24 @@ async function main(): Promise<void> {
   const consumers = args.repo
     ? `Published to GitHub secrets ${names.accessKeyId} / ${names.secretAccessKey} on ${args.repo}. A GitHub secret cannot be read back, so THIS is the source of truth — always set the secret from here, never the reverse.`
     : "Deliberately NOT published to CI: operator credential only.";
-  putItem(args.vault, names.tokenValue, tokenValue,
-    `${scope} The TOKEN VALUE — the Secret Access Key is its SHA-256, so this item alone can regenerate it. ${consumers}`);
-  putItem(args.vault, names.accessKeyId, accessKeyId, `${scope} Access Key ID = the token's id; a roll does not change it. ${consumers}`);
-  putItem(args.vault, names.secretAccessKey, secret, `${scope} SHA-256 of ${names.tokenValue}. ${consumers}`);
+  // One call, three fields, plus a provenance field carrying what the old per-item notes carried.
+  // Field types matter: the Access Key ID is not secret (it is the token's id), the other two are.
+  putFields(args.vault, args.item, {
+    [`${names.tokenValue}[password]`]: tokenValue,
+    [`${names.accessKeyId}[text]`]: accessKeyId,
+    [`${names.secretAccessKey}[password]`]: secret,
+    [`${args.prefix}_ROLLED_AT[text]`]: `${scope} ${consumers}`,
+  });
 
-  const back = { keyId: readItem(args.vault, names.accessKeyId), secret: readItem(args.vault, names.secretAccessKey), value: readItem(args.vault, names.tokenValue) };
+  const back = {
+    keyId: readField(args.vault, args.item, names.accessKeyId),
+    secret: readField(args.vault, args.item, names.secretAccessKey),
+    value: readField(args.vault, args.item, names.tokenValue),
+  };
   if (back.keyId !== accessKeyId || back.secret !== secret || back.value !== tokenValue) {
     die("1Password did not return what was written — do not publish. Inspect the vault by hand.");
   }
-  console.log(`✓ escrowed in ${args.vault}, and read back byte-identical`);
+  console.log(`✓ escrowed in ${args.vault}/${args.item}, and read back byte-identical`);
 
   // ── 4. PUBLISH from the escrow ─────────────────────────────────────────────
   if (!args.repo) {

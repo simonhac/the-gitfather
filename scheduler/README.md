@@ -1,5 +1,37 @@
 # gitfather-scheduler
 
+## Who watches the watchdog
+
+`SCHEDULER_HEARTBEAT_URL` (optional Worker secret) — a BetterStack heartbeat pinged at the end of
+each **cron** tick, and only when the tick actually DELIVERED: every rostered client must yield a
+watchdog verdict other than `error`/`no-config`.
+
+The staleness watchdog is the only thing that notices a missed backup, and it runs inside this
+Worker. The per-client `HEARTBEAT_URL` does cover a dead scheduler, but only after a full 8-hour
+slot elapses. This closes that to ~30 minutes.
+
+Three conditions are deliberate, and loosening any of them breaks the signal:
+
+- **Not "the Worker woke up".** `scheduled()` runs happily with an invalid `ROSTER`, revoked App
+  auth, or a watchdog throwing on every client.
+- **`stale-broken` and friends STILL ping.** Those mean the watchdog looked, formed a verdict and
+  paged — it is working. Withholding the ping would duplicate the Slack alert and drop the
+  scheduler's liveness signal at exactly the moment a backup needs attention. See `src/health.ts`.
+- **Cron path only, never `/trigger`.** Debugging a dead scheduler is precisely when someone hits
+  `/trigger` repeatedly, which would mask the thing they are investigating.
+
+Unset means off, so `wrangler dev` can never keep production's monitor green.
+
+`GET /health` is stateful: it reads `_scheduler/cron.json` — a **cron-only** record, deliberately not
+`state.json`, which `/trigger` also overwrites — and returns **503** when the last cron tick is older
+than 25 minutes (two missed ticks; Cron Triggers are best-effort), when it **did not deliver**, when
+the roster is empty or unparseable, or when the timestamp is in the future. It previously returned a
+constant `"ok"`, which was false comfort — a Worker's fetch handler answers even with its Cron
+Trigger deleted or its App key revoked. It is also an independent path: the heartbeat is
+Cloudflare→BetterStack, `/health` is BetterStack→Cloudflare, so a monitor here still fires if the
+Worker loses outbound fetch.
+
+
 A single Cloudflare Worker that **replaces GitHub Actions cron and runs the staleness watchdog**. One
 Cron Trigger (`*/10 * * * *`) wakes the Worker every 10 minutes; it works out which cadences are due,
 fires each client's caller workflow via GitHub's REST [`workflow_dispatch`][dispatch] API for the
