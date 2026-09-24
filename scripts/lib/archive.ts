@@ -523,6 +523,35 @@ export function planArchive(state: WeekState | undefined, live: Fingerprint): Ar
   };
 }
 
+/**
+ * The per-run work budget — `max-weeks-per-run`, "the backfill throttle".
+ *
+ * It throttles WRITING, so only a week that actually wrote something spends it. A `skip` is
+ * free: `planArchive` re-offers an already-archived week solely so a drifted fingerprint can be
+ * caught and superseded, and in the steady state that costs one fingerprint query and writes
+ * nothing.
+ *
+ * This exists as a named unit because the rule used to be implicit — the caller capped the
+ * CANDIDATE list instead, so the oldest non-pruned week (already archived, fingerprint
+ * unchanged, `skip`) consumed the whole budget on every run and the walk never reached a week
+ * that had never been archived. The archive frontier could not advance past the prune frontier,
+ * and each run reported success having archived nothing. Boost sat at `2026-W32` for weeks.
+ */
+export function workBudget(maxWeeks: number): {
+  exhausted(): boolean;
+  record(action: ArchivePlan["action"]): void;
+  spent(): number;
+} {
+  let spent = 0;
+  return {
+    exhausted: () => spent >= maxWeeks,
+    record: (action) => {
+      if (action !== "skip") spent++;
+    },
+    spent: () => spent,
+  };
+}
+
 export interface PrunePlan {
   action: "prune" | "refuse" | "skip";
   expectRows?: number;

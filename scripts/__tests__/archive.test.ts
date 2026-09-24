@@ -13,6 +13,7 @@ import {
   xorDigest,
   fingerprintOf,
   planArchive,
+  workBudget,
   planPrune,
   parsePruneManifest,
   activePart,
@@ -151,6 +152,42 @@ test("eligibleWeeks: walks oldest→newest, caps at maxWeeks, skips already-done
     done: new Set(["2026-W23", "2026-W25"]),
   });
   assert.deepEqual(resumed.map((w) => w.label), ["2026-W24", "2026-W26"], "already-archived weeks are skipped");
+});
+
+test("workBudget: a skip is free, so a run of already-archived weeks never exhausts it", () => {
+  // The regression. `max-weeks-per-run` defaults to 1, and the candidate list is oldest-first
+  // from the oldest live row, so in the steady state the first several weeks are already
+  // archived with unchanged fingerprints — `planArchive` returns `skip` for each. If a skip
+  // spent the budget, the walk stopped on the first one and a week that had never been
+  // archived was never reached. Boost stalled at 2026-W32 that way, reporting success.
+  const budget = workBudget(1);
+  for (let i = 0; i < 8; i++) {
+    assert.equal(budget.exhausted(), false, `skip #${i + 1} must not exhaust a budget of 1`);
+    budget.record("skip");
+  }
+  assert.equal(budget.spent(), 0, "eight skips cost nothing");
+  assert.equal(budget.exhausted(), false, "still able to reach a week that needs archiving");
+
+  budget.record("archive");
+  assert.equal(budget.spent(), 1);
+  assert.equal(budget.exhausted(), true, "one real archive spends a budget of 1");
+});
+
+test("workBudget: every non-skip action spends, and the budget is a hard stop", () => {
+  for (const action of ["archive", "supersede", "supplement"] as const) {
+    const b = workBudget(1);
+    b.record(action);
+    assert.equal(b.exhausted(), true, `${action} must spend the budget`);
+  }
+
+  const b = workBudget(3);
+  b.record("archive");
+  b.record("skip");
+  b.record("supersede");
+  assert.equal(b.spent(), 2, "skips between real work still cost nothing");
+  assert.equal(b.exhausted(), false);
+  b.record("supplement");
+  assert.equal(b.exhausted(), true, "the third write stops the run");
 });
 
 test("eligibleWeeks: no rows → nothing to do", () => {
