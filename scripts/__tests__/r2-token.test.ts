@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { secretFromTokenValue, isMate, opFieldNames, parseRollArgs } from "../lib/r2Token.js";
+import { secretFromTokenValue, isMate, opFieldNames, parseRollArgs, runlogEnv } from "../lib/r2Token.js";
 
 test("secretFromTokenValue is SHA-256 hex of the token value", () => {
   // Cloudflare documents `echo -n "<token>" | shasum -a 256`; this is that, with no trailing newline.
@@ -61,4 +61,19 @@ test("parseRollArgs: --repo is optional, everything else is required", () => {
   assert.throws(() => parseRollArgs(["--vault", "--bucket", "b", "--account-id", "a"]), /--vault/);
   assert.throws(() => parseRollArgs(["--vault", "v", "--account-id", "a"]), /--bucket/);
   assert.throws(() => parseRollArgs(["--vault", "v", "--bucket", "b"]), /--account-id/);
+});
+
+test("runlogEnv builds the environment the run-log needs from the verified credential", () => {
+  // Construction only. Delivery — that the CLI actually hands this to the logger — is
+  // roll-r2-delivery.test.ts; this test alone would stay green if the result were discarded.
+  const env = runlogEnv({ bucket: "boost-pg-backups", accountId: "acc123" }, "KEYID", "SECRET");
+  assert.deepEqual(env, {
+    RUNLOG_RCLONE_REMOTE: "r2",
+    R2_BUCKET: "boost-pg-backups",
+    RCLONE_CONFIG_R2_TYPE: "s3",
+    RCLONE_CONFIG_R2_PROVIDER: "Cloudflare",
+    RCLONE_CONFIG_R2_ACCESS_KEY_ID: "KEYID",
+    RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: "SECRET",
+    RCLONE_CONFIG_R2_ENDPOINT: "https://acc123.r2.cloudflarestorage.com",
+  });
 });

@@ -49,6 +49,31 @@ export function opFieldNames(prefix: string): { accessKeyId: string; secretAcces
   };
 }
 
+/**
+ * The environment `runlog.ts` needs to append the rotation record, built from the credential we
+ * have just proven lists the bucket.
+ *
+ * Pure and named so the construction is readable at the call site. Note what this does NOT buy:
+ * asserting its shape proves the environment is BUILT, not that it is delivered to the logger —
+ * discard the return value and a shape test stays green while the bug returns. Delivery is covered
+ * by __tests__/roll-r2-delivery.test.ts, which drives the CLI and inspects what rclone was run with.
+ */
+export function runlogEnv(
+  args: Pick<RollArgs, "bucket" | "accountId">,
+  accessKeyId: string,
+  secret: string,
+): Record<string, string> {
+  return {
+    RUNLOG_RCLONE_REMOTE: "r2",
+    R2_BUCKET: args.bucket,
+    RCLONE_CONFIG_R2_TYPE: "s3",
+    RCLONE_CONFIG_R2_PROVIDER: "Cloudflare",
+    RCLONE_CONFIG_R2_ACCESS_KEY_ID: accessKeyId,
+    RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: secret,
+    RCLONE_CONFIG_R2_ENDPOINT: `https://${args.accountId}.r2.cloudflarestorage.com`,
+  };
+}
+
 export interface RollArgs {
   /** Empty only under --dry-run, which never touches 1Password. */
   vault: string;
