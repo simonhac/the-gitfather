@@ -70,12 +70,14 @@ import {
   shortTableName,
   planArchive,
   planPrune,
+  workBudget,
   parsePruneManifest,
   activePart,
   sameFingerprint,
   parseDryRun,
   guardsFor,
   FingerprintAccumulator,
+  type ArchivePlan,
   type Fingerprint,
   type IsoWeek,
   type WeekState,
@@ -276,7 +278,7 @@ async function archiveWeek(ctx: {
   states: Map<string, WeekRecord>;
   mayWriteStore: boolean;
   result: TableRun;
-}): Promise<void> {
+}): Promise<ArchivePlan["action"]> {
   const { cfg, pg, store, workDir, prefix, name, table, timeColumn, week, states, mayWriteStore, result } = ctx;
   const short = shortTableName(table);
 
@@ -284,7 +286,7 @@ async function archiveWeek(ctx: {
   const plan = planArchive(states.get(week.label), live);
   if (plan.action === "skip") {
     result.skipped++;
-    return;
+    return "skip";
   }
   if (plan.anomaly) {
     const msg = `${table} ${week.label}: ${live.n} row(s) present in an ALREADY-PRUNED week — archiving as a supplement`;
@@ -406,6 +408,7 @@ async function archiveWeek(ctx: {
   result.bytesWritten += manifest.objectBytes ?? 0;
   const size = manifest.objectBytes === null ? "no data object" : `${(manifest.objectBytes / 1024).toFixed(1)} KiB`;
   log(`  ${plan.action} ${week.label} p${part}: ${live.n} rows, ${size}${mayWriteStore ? "" : " (store suppressed)"}`);
+  return plan.action;
 }
 
 // ── Per-week prune ───────────────────────────────────────────────────────────
@@ -540,11 +543,24 @@ async function processTable(ctx: {
   if (mode === "archive" || mode === "both") {
     const maxWeeks = maxWeeksOverride ?? spec.maxWeeksPerRun;
     const pruned = new Set([...states.values()].filter((s) => s.state === "pruned").map((s) => s.label));
+    // Enumerate EVERY eligible week, not `maxWeeks` of them. `maxWeeks` is the backfill
+    // throttle — a budget on WORK — and an already-archived week is not work: `planArchive`
+    // re-offers it only so a drifted fingerprint can be caught and superseded, which in the
+    // steady state costs one fingerprint query and writes nothing.
+    //
+    // Capping the CANDIDATE list instead spent the whole budget on that no-op. The list is
+    // built oldest-first from the oldest live row, so with the default `max-weeks-per-run: 1`
+    // the single slot always went to the oldest non-pruned week — already archived, fingerprint
+    // unchanged, `skip` — and the walk never reached a week that had never been archived. The
+    // archive frontier could not advance past the prune frontier, and every run reported
+    // success having done nothing. Boost stalled at 2026-W32 for weeks that way.
+    //
+    // The eligibility horizon still bounds the walk, so this is not unbounded.
     const candidates = eligibleWeeks({
       now,
       oldestRowAt: oldest,
       afterWeeks: spec.archiveAfterWeeks,
-      maxWeeks,
+      maxWeeks: Number.MAX_SAFE_INTEGER,
       done: pruned,
     });
 
@@ -563,8 +579,13 @@ async function processTable(ctx: {
     }
 
     log(`  archive: ${candidates.length} week(s) eligible (cap ${maxWeeks})`);
+    // `maxWeeks` budgets WORK, so only a week that actually wrote something spends it — see
+    // `workBudget`. A `skip` is free, so the walk keeps going and reaches weeks that have never
+    // been archived.
+    const budget = workBudget(maxWeeks);
     for (const week of candidates) {
-      await archiveWeek({
+      if (budget.exhausted()) break;
+      const action = await archiveWeek({
         cfg,
         pg,
         store,
@@ -578,6 +599,7 @@ async function processTable(ctx: {
         mayWriteStore: guards.mayWriteStore,
         result,
       });
+      budget.record(action);
       touchedYears.add(week.year);
     }
   }
