@@ -70,4 +70,7 @@ runs:
         curl -fsSL -o /tmp/rclone.zip "https://downloads.rclone.org/${RCLONE_VERSION}/rclone-${RCLONE_VERSION}-linux-amd64.zip"
         unzip -q -j /tmp/rclone.zip "*/rclone" -d /tmp/rclone-bin
         sudo install -m 755 /tmp/rclone-bin/rclone /usr/local/bin/rclone
-        rclone version | head -1
+        # `sed -n 1p`, never `head -1`: under pipefail, head exits after one line, and if rclone is
+        # still writing it dies of SIGPIPE — exit 141 fails the step (mrtippy's verify, 2026-09-25).
+        # sed reads to EOF, so the writer always finishes.
+        rclone version | sed -n 1p
