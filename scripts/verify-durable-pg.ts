@@ -26,6 +26,8 @@ import { stampToEpochMs } from "./lib/schedule.js";
 import { loadLog, stampFromKey, type LogStore } from "./lib/logStore.js";
 import { DURABLE_TIERS, expectedDurableKeys } from "./lib/durableCensus.js";
 import { verifyHeartbeatVerdict } from "./lib/verifyHeartbeat.js";
+import { pingHeartbeat } from "./lib/heartbeat.js";
+import { publishJobProof } from "./lib/jobProofPublish.js";
 import { credentialVerdicts, needsAttention } from "./lib/credentialAge.js";
 import { drillObject, drillCoreFromProfile, isDumpObject, stampToIso, type DrillGate } from "./restore-drill-pg.js";
 import { appendVerify } from "./runlog.js";
@@ -53,20 +55,6 @@ function priorCountsFrom(log: LogStore): Record<string, number> | null {
     .filter((v) => v.ok && v.counts && v.kind !== "hash")
     .sort((a, b) => (a.ts < b.ts ? 1 : -1))[0];
   return prior?.counts ?? null;
-}
-
-/** Best-effort dead-man's-switch ping. Mirrors backup-pg-to-r2.ts; failures must never fail the run. */
-async function pingHeartbeat(url: string): Promise<void> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 10_000);
-  try {
-    const res = await fetch(url, { signal: controller.signal });
-    if (!res.ok) process.stderr.write("warning: verify heartbeat ping failed\n");
-  } catch {
-    process.stderr.write("warning: verify heartbeat ping failed\n");
-  } finally {
-    clearTimeout(timer);
-  }
 }
 
 async function main(): Promise<void> {
@@ -320,25 +308,30 @@ async function main(): Promise<void> {
   //
   // Credential-rotation warnings deliberately do NOT withhold the ping: they are an advisory note
   // about key age, not a statement about whether these backups restore.
-  const verifyHeartbeatUrl = cfg.credentials.verifyHeartbeatUrl;
-  if (verifyHeartbeatUrl) {
-    // "Nothing was DUE" (healthy) vs "nothing was POSSIBLE" (nobody checked) — see
-    // lib/verifyHeartbeat.ts. An earlier version required only failures===0 and a non-empty
-    // listing, which pinged on runs that restored nothing at all.
-    const verdict = verifyHeartbeatVerdict({
-      failures,
-      listingOk,
-      objectCount: all.length,
-      canRestore,
-      restoreLegEnabled: cfg.verifyDurable.fresh || cfg.verifyDurable.aged,
-      maxRestores: cfg.verifyDurable.maxRestores,
-      restoresThisRun,
-      // The "nothing was due" case: an object newer than retest-days already carries a successful
-      // restore, so restorability IS currently proven even though this run restored nothing.
-      recentRestoreOnRecord: all.some((o) => o.ageMs < retestMs && restoreVerifiedOk(o)),
-    });
-    if (verdict.allowed) await pingHeartbeat(verifyHeartbeatUrl);
-    else process.stderr.write(`verify heartbeat withheld: ${verdict.reason}\n`);
+  //
+  // The SAME verdict gates two outputs: the job proof (`_health/<name>/durableVerify.json`, always —
+  // read by the scheduler's /health/jobs, see lib/jobProof.ts) and the optional push heartbeat.
+  // "Nothing was DUE" (healthy) vs "nothing was POSSIBLE" (nobody checked) — see
+  // lib/verifyHeartbeat.ts. An earlier version required only failures===0 and a non-empty
+  // listing, which pinged on runs that restored nothing at all.
+  const verdict = verifyHeartbeatVerdict({
+    failures,
+    listingOk,
+    objectCount: all.length,
+    canRestore,
+    restoreLegEnabled: cfg.verifyDurable.fresh || cfg.verifyDurable.aged,
+    maxRestores: cfg.verifyDurable.maxRestores,
+    restoresThisRun,
+    // The "nothing was due" case: an object newer than retest-days already carries a successful
+    // restore, so restorability IS currently proven even though this run restored nothing.
+    recentRestoreOnRecord: all.some((o) => o.ageMs < retestMs && restoreVerifiedOk(o)),
+  });
+  if (verdict.allowed) {
+    publishJobProof({ bucket: r2Bucket, name: fileBasename, job: "durableVerify" });
+    const verifyHeartbeatUrl = cfg.credentials.verifyHeartbeatUrl;
+    if (verifyHeartbeatUrl) await pingHeartbeat(verifyHeartbeatUrl, "verify heartbeat");
+  } else {
+    process.stderr.write(`durable-verify proof withheld: ${verdict.reason}\n`);
   }
 }
 

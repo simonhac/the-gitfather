@@ -28,6 +28,7 @@ import {
 } from "./github.js";
 import { runWatchdogs, type WatchdogRecord } from "./watchdog.js";
 import { healthVerdict, tickDelivered, type CronTickRecord } from "./health.js";
+import { jobsHealth } from "./jobs.js";
 
 export type { Env } from "./github.js";
 
@@ -208,6 +209,19 @@ async function handleFetch(req: Request, env: Env): Promise<Response> {
     }
     const roster = safeParseClients(env)?.length ?? 0;
     const v = healthVerdict(last, roster, new Date());
+    return Response.json(v.body, { status: v.status });
+  }
+
+  if (url.pathname === "/health/jobs") {
+    // Open, like /health, and for the same reason: it is what an external uptime monitor polls. The
+    // body carries only opaque client ids, job names and ages — no profile names, no bucket names.
+    // A separate URL from /health because it answers a different question: /health is "is the
+    // scheduler ticking", this is "did every job PROVE its claim recently" (see jobs.ts).
+    const clients = safeParseClients(env);
+    if (!clients) {
+      return Response.json({ ok: false, checked: 0, failing: 0, checks: [], reason: "empty or invalid roster" }, { status: 503 });
+    }
+    const v = await jobsHealth(env, clients, new Date());
     return Response.json(v.body, { status: v.status });
   }
 

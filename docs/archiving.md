@@ -42,6 +42,28 @@ handled without set subtraction, because objects are additive parts and never re
 | rows changed between archive and prune | re-archive the full window as `p002`, mark `p001` superseded, prune against `p002` |
 | rows appear in a week that was already pruned | archive them as a supplement part, and raise a loud alert — this should not happen |
 
+### The floor: a run that owed work must do it
+
+A run that archives nothing is usually healthy — nothing was eligible. That is exactly why a
+*stalled* archiver is invisible: CB-264's ran every Sunday for weeks, archived nothing, and printed
+`✓ done`. So every archive phase ends with a conditional floor (`archiveFloor` in `lib/archive.ts`):
+
+```
+backlog = eligible weeks the index has NEVER archived
+owed    = min(backlog, max-weeks-per-run)
+spent < owed  ⟹  "archive stalled" — an anomaly: it pages, marks the run-log record not-ok, exits 1
+```
+
+It tolerates the throttle (backlog 8, cap 1, one archived is progress) and never fires on an idle
+run. The backlog is enumerated **independently** of the loop's candidate list — CB-264 was a bug in
+how that list was built, and a floor derived from it read a backlog of 0 and passed the stall.
+
+A real, clean archiving run then writes its **job proof**, `_health/<name>/archive.json`. A dry run,
+a local target, a prune-only or `--rebuild-index` run doesn't write one, and neither does a run with
+any failure, refusal or anomaly. The stall counts as an anomaly, so the proof means *"ran, and did the
+work it owed"*, not just *"ran"*. The scheduler's `/health/jobs` goes red when the proof is more than
+8 days old. See [slack-and-alerting.md](slack-and-alerting.md#job-proofs-one-monitor-for-every-job).
+
 ### The two levels of dry run
 
 | flag | source database | store |

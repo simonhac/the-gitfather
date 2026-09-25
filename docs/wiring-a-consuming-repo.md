@@ -116,6 +116,7 @@ jobs:
       SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}   # optional
       AGE_IDENTITY: ${{ secrets.AGE_IDENTITY }}   # only if backups are .age-encrypted
       ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}   # optional failure webhook
+      VERIFY_HEARTBEAT_URL: ${{ secrets.VERIFY_HEARTBEAT_URL }}   # optional push switch; omit it here and setting the secret does nothing
 ```
 
 `pg-dashboard.yml` — runs after each backup, isolated so a dashboard failure never affects backups:
@@ -204,7 +205,8 @@ The caller reads these and passes them in (explicit `secrets:` + `with:` inputs,
 | **variable** | `R2_BUCKET` | private dump bucket name |
 | secret | `SLACK_BOT_TOKEN` | (optional) `xoxb-…`, scope `chat:write` |
 | **variable** | `SLACK_CHANNEL` | (optional) channel id `C…` — the non-secret id paired with the bot token. May instead live in the profile as `slack.channel`; the variable wins when both are set |
-| secret | `HEARTBEAT_URL` | (optional) dead-man's-switch ping URL |
+| secret | `HEARTBEAT_URL` | (optional) dead-man's-switch ping URL — the backup |
+| secret | `VERIFY_HEARTBEAT_URL` | (optional) push dead-man's-switch for durable-verify — pinged only on a clean verify. The scheduler's `/health/jobs` already covers this with no secret (see [slack-and-alerting.md](slack-and-alerting.md#job-proofs-one-monitor-for-every-job)) |
 | secret | `ALERT_WEBHOOK_URL` | (optional) generic **failure** webhook (Slack-compatible `{"text":…}` POST) — a no-bot alert fallback, or a redundant failure channel into a host app's existing incoming webhook when the bot is also set |
 | secret | `AGE_RECIPIENT` / `AGE_IDENTITY` | (optional) only when `encryption: age` |
 | secret | `PG_ARCHIVE_DATABASE_URL` | (archive) the same DB, kept separate because this is the only task that **deletes** |

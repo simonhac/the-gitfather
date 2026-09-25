@@ -50,7 +50,7 @@ export function clientSecret(env: Env, name: string, clientId: string): string {
 }
 
 /** Read an object as text; null when absent. Throws on a real R2 error (callers decide the failure direction). */
-async function getText(bucket: R2Bucket, key: string): Promise<string | null> {
+export async function getText(bucket: R2Bucket, key: string): Promise<string | null> {
   const obj = await bucket.get(key);
   return obj ? obj.text() : null;
 }
@@ -60,7 +60,7 @@ async function putJson(bucket: R2Bucket, key: string, value: unknown): Promise<v
 }
 
 /** Every published watchdog config in a bucket (one per backup name). */
-async function readConfigs(bucket: R2Bucket): Promise<{ key: string; cfg: WatchdogConfig | null }[]> {
+export async function readConfigs(bucket: R2Bucket): Promise<{ key: string; cfg: WatchdogConfig | null }[]> {
   const listed = await bucket.list({ prefix: WATCHDOG_CONFIG_PREFIX });
   const keys = listed.objects.map((o) => o.key).filter((k) => k.endsWith("/watchdog.json"));
   return Promise.all(keys.map(async (key) => ({ key, cfg: parseWatchdogConfig((await getText(bucket, key)) ?? "") })));

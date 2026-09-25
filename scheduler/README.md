@@ -22,6 +22,16 @@ Three conditions are deliberate, and loosening any of them breaks the signal:
 
 Unset means off, so `wrangler dev` can never keep production's monitor green.
 
+`GET /health/jobs` answers a different question: did every job **prove** its claim recently? The
+verify and archive jobs write `_health/<name>/<job>.json` to their own bucket behind the same gates
+their push heartbeats used. This reads every one that is owed, from the roster's cadences crossed
+with each published `_config/` (`archives` says whether that database archives anything). It
+returns 503 on any missing, stale or unreadable proof, and on zero owed proofs. One uptime monitor
+here replaces a heartbeat per job per project. See
+[`docs/slack-and-alerting.md`](../docs/slack-and-alerting.md#job-proofs-one-monitor-for-every-job).
+Cost: about 1 + 2 subrequests per database per poll (config list, config get, one get per proof),
+which stays well inside the 50-per-invocation limit.
+
 `GET /health` is stateful: it reads `_scheduler/cron.json` — a **cron-only** record, deliberately not
 `state.json`, which `/trigger` also overwrites — and returns **503** when the last cron tick is older
 than 25 minutes (two missed ticks; Cron Triggers are best-effort), when it **did not deliver**, when
@@ -280,6 +290,7 @@ Before this version the Worker dispatched a `pg-staleness-check.yml` caller ever
 | Path                                  | Auth                  | Purpose                                   |
 | ------------------------------------- | --------------------- | ----------------------------------------- |
 | `GET /health`                         | open                  | liveness                                  |
+| `GET /health/jobs`                    | open                  | every client's job proofs; 503 if any owed one is missing or stale (`src/jobs.ts`) |
 | `GET /trigger?cadence=<c>&client=<id>`| `X-Trigger-Secret`    | manually fire one cadence (`client` opt.); `staleness` runs the watchdog and returns its outcomes |
 | `GET /state`                          | `X-Trigger-Secret`    | return `_scheduler/state.json`            |
 

@@ -34,6 +34,7 @@ export interface WatchdogSource {
   };
   slack: { alertMention: string };
   dashboard: { url?: string };
+  archive?: { tables: readonly unknown[] };
 }
 
 /** Where a backup publishes its watchdog config. The Worker lists `_config/` to find every backup in a bucket. */
@@ -62,6 +63,11 @@ export interface WatchdogConfig {
   slackChannel: string | null;
   alertMention: string;
   dashboardUrl: string | null;
+  /**
+   * Whether this database archives any table — so /health/jobs expects an `archive` proof from it
+   * only when it does (see jobProof.ts owedJobs). Undefined on configs published before the field.
+   */
+  archives?: boolean;
   /** ISO-8601 — when this was published (which backup run's view of the profile this is). */
   publishedAt: string;
 }
@@ -84,6 +90,7 @@ export function watchdogConfigFrom(cfg: WatchdogSource, now: Date, slackChannel:
     slackChannel: slackChannel || null,
     alertMention: cfg.slack.alertMention || "<!here>",
     dashboardUrl: cfg.dashboard.url ?? null,
+    archives: (cfg.archive?.tables.length ?? 0) > 0,
     publishedAt: now.toISOString(),
   };
 }
@@ -131,6 +138,7 @@ export function parseWatchdogConfig(raw: string): WatchdogConfig | null {
     slackChannel: strOrNull(v.slackChannel),
     alertMention: isStr(v.alertMention) ? v.alertMention : "<!here>",
     dashboardUrl: strOrNull(v.dashboardUrl),
+    ...(typeof v.archives === "boolean" ? { archives: v.archives } : {}),
     publishedAt: typeof v.publishedAt === "string" ? v.publishedAt : "",
   };
 }

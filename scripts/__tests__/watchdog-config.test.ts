@@ -33,6 +33,7 @@ test("watchdog config: a validated profile round-trips through publish → parse
   assert.equal(published.slackChannel, null); // no channel anywhere → Slack off for the watchdog
   assert.equal(published.alertMention, "<!here>");
   assert.equal(published.dashboardUrl, null);
+  assert.equal(published.archives, false, "no archive tables → owes no archive proof");
   assert.equal(published.publishedAt, "2026-09-10T03:00:00.000Z");
 
   const parsed = parseWatchdogConfig(JSON.stringify(published));
@@ -78,4 +79,19 @@ test("watchdog config: the parser refuses anything the watchdog cannot run on (�
 
 test("watchdog config: one object per backup name, under _config/", () => {
   assert.equal(watchdogConfigKey("example"), "_config/example/watchdog.json");
+});
+
+test("watchdog config: `archives` says whether this database owes an archive proof, and is optional on read", () => {
+  const archiving = backupSchema.parse({
+    ...base,
+    archive: { storePrefix: "archive/example", tables: [{ table: "public.api_logs", timeColumn: "created_at" }] },
+  });
+  const published = watchdogConfigFrom(archiving, NOW, "");
+  assert.equal(published.archives, true);
+  assert.equal(parseWatchdogConfig(JSON.stringify(published))?.archives, true);
+
+  // A config published before the field existed: undefined, so the roster alone decides.
+  const { archives: _drop, ...legacy } = published;
+  void _drop;
+  assert.equal(parseWatchdogConfig(JSON.stringify(legacy))?.archives, undefined);
 });

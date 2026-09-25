@@ -35,6 +35,7 @@ import type { PgFailureCode } from "./lib/pg-classify.js";
 import { computeTiers, runOrigin } from "./lib/schedule.js";
 import { appendRun } from "./runlog.js";
 import { githubLogUrl } from "./lib/github.js";
+import { pingHeartbeat } from "./lib/heartbeat.js";
 import { publishWatchdogConfig } from "./lib/watchdogPublish.js";
 import { slackEnabled, slackPost, slackDailyRecord, dailyLabel, alertWebhook, failAlertText } from "./lib/slack.js";
 import type { BackupTier } from "./lib/backupTypes.js";
@@ -53,20 +54,6 @@ function utcStamp(d: Date): string {
     `${d.getUTCFullYear()}${pad2(d.getUTCMonth() + 1)}${pad2(d.getUTCDate())}` +
     `T${pad2(d.getUTCHours())}${pad2(d.getUTCMinutes())}${pad2(d.getUTCSeconds())}Z`
   );
-}
-
-/** Best-effort dead-man's-switch ping (curl -fsS -m 10 equivalent). */
-async function pingHeartbeat(url: string): Promise<void> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 10_000);
-  try {
-    const res = await fetch(url, { signal: controller.signal });
-    if (!res.ok) process.stderr.write("warning: heartbeat ping failed\n");
-  } catch {
-    process.stderr.write("warning: heartbeat ping failed\n");
-  } finally {
-    clearTimeout(timer);
-  }
 }
 
 /**
@@ -421,7 +408,7 @@ async function main(): Promise<void> {
   // Dead-man's-switch ping (success only) — its absence is the staleness signal.
   if (cfg.credentials.heartbeatUrl) {
     const heartbeatUrl = cfg.credentials.heartbeatUrl;
-    await bestEffort("heartbeat", () => pingHeartbeat(heartbeatUrl));
+    await bestEffort("heartbeat", () => pingHeartbeat(heartbeatUrl, "heartbeat"));
   }
 
   cleanup();

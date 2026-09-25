@@ -21,6 +21,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { xorDigest, isoWeekOf, prevWeek, type IsoWeek } from "../lib/archive.js";
+import { parseJobProof } from "../lib/jobProof.js";
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const ADMIN_URL = process.env.ARCHIVE_TEST_DATABASE_URL ?? "postgresql://localhost:5432/postgres?sslmode=disable";
@@ -446,6 +447,35 @@ test("a row back-dated into an already-pruned week becomes a supplement, and pag
   assert.equal(rows[0].service, "late");
 });
 
+test("capped runs walk past archived weeks, one new week each, and the floor stays quiet", { skip }, async (t) => {
+  // CB-264 + CB-299, end to end. With max-weeks 1 the second run's oldest candidate is already
+  // archived; the budget must not be spent on it (CB-264), and a run that fails that test must
+  // not exit 0 (the floor). Reintroduce the candidate cap and this run exits 1 "archive stalled".
+  const work = mkdtempSync(join(tmpdir(), "gf-archive-floor-"));
+  const storeDir = join(work, "store");
+  t.after(() => {
+    try {
+      psql(ADMIN_URL, `DROP DATABASE IF EXISTS ${DB} WITH (FORCE)`);
+    } catch {
+      /* best effort */
+    }
+    rmSync(work, { recursive: true, force: true });
+  });
+
+  seed();
+  const profile = writeProfile(work);
+  const dataKey = (w: IsoWeek): string =>
+    `archive/test/widget_logs/${w.year}/test-widget_logs-${w.label}-p001.ndjson.zst`;
+
+  for (const [run, week] of DATA_WEEKS.slice(0, 2).entries()) {
+    const res = runArchiverAllowFail(profile, ["--mode", "archive", "--max-weeks", "1", "--target", `local:${storeDir}`]);
+    assert.equal(res.code, 0, `capped run ${run + 1} must pass the floor:\n${res.out}`);
+    assert.doesNotMatch(res.out, /archive stalled/);
+    assert.ok(listFiles(storeDir).includes(dataKey(week)), `capped run ${run + 1} must archive ${week.label}`);
+  }
+  assert.ok(!listFiles(storeDir).includes(dataKey(DATA_WEEKS[2])), "and only one week per run");
+});
+
 test("the R2 store path runs end to end via an rclone alias backend (no credentials)", { skip }, async (t) => {
   // R2Store is the one substantial surface the local sink never touches: rclone lsf/copyto/cat, the
   // staged-file putText (rcat does NOT work against R2), the exists() parent-listing trick, and the
@@ -507,6 +537,12 @@ test("the R2 store path runs end to end via an rclone alias backend (no credenti
   assert.equal(rec.rowsArchived, 12);
   assert.equal(rec.weeksPruned, 0, "this was --mode archive");
   assert.ok(rec.bytes > 0);
+
+  // A clean real run publishes its job proof — what the scheduler's /health/jobs reads (CB-299).
+  const proof = parseJobProof(readFileSync(join(bucketDir, "_health/test/archive.json"), "utf8"));
+  assert.ok(proof, `expected a parseable archive proof, got: ${written.join(", ")}`);
+  assert.equal(proof.job, "archive");
+  assert.equal(proof.name, "test");
 
   // A second archive pass must be a no-op — proving exists() reads the bucket correctly rather
   // than blindly re-writing (which would also hit the never-overwrite guard).

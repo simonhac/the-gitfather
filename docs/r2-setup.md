@@ -47,8 +47,9 @@ npx wrangler r2 bucket lifecycle add <your-bucket> expire-monthly <prefix>/month
 npx wrangler r2 bucket lifecycle add <your-bucket> abort-mpu      <prefix>/         --abort-multipart-days 1
 npx wrangler r2 bucket lifecycle add <your-bucket> expire-status  _status/          --expire-days 14
 npx wrangler r2 bucket lifecycle add <your-bucket> expire-log     _log/             --expire-days 760
-# _config/ (the watchdog config the backup publishes for the Worker) is overwritten every run and must
-# NOT be locked or expired — like _status/, it is control-plane state, not a backup.
+# _config/ (the watchdog config the backup publishes for the Worker) and _health/ (the job proofs
+# verify and archive publish for /health/jobs) are overwritten every run and must NOT be locked or
+# expired — like _status/, they are control-plane state, not backups.
 
 # Bucket locks (WORM): 14-day immutability on the DURABLE tiers only — NOT on 2hourly/ (a lock there
 # would block its 2-day expiry, since locks take precedence over lifecycle).

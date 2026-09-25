@@ -196,7 +196,11 @@ export interface LogArchive {
   bytes: number | null;
   /** Prune refusals — the fingerprint gate declining to delete. Non-zero means a human must look. */
   refusals: number;
-  /** Rows found in an already-pruned week. Should always be 0. */
+  /**
+   * Invariant violations that need a human: rows found in an already-pruned week, or an archive
+   * STALL (eligible weeks waiting and the run did less than its budget — see archiveFloor). Should
+   * always be 0.
+   */
   anomalies: number;
   /** Raw failure reason — PRIVATE, never published. */
   error: string | null;

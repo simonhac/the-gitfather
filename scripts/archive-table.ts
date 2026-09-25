@@ -71,6 +71,8 @@ import {
   planArchive,
   planPrune,
   workBudget,
+  archiveFloor,
+  archiveProofVerdict,
   parsePruneManifest,
   activePart,
   sameFingerprint,
@@ -84,6 +86,7 @@ import {
   type ArchivedPart,
 } from "./lib/archive.js";
 import { makeStore, parseTarget, SuppressedStore, type Store } from "./lib/store.js";
+import { publishJobProof } from "./lib/jobProofPublish.js";
 
 const SCRIPT_START_MS = Date.now();
 
@@ -578,7 +581,19 @@ async function processTable(ctx: {
       candidates.sort((a, b) => a.start.getTime() - b.start.getTime());
     }
 
-    log(`  archive: ${candidates.length} week(s) eligible (cap ${maxWeeks})`);
+    // The floor's backlog: every eligible week the index has NEVER seen. Enumerated on its own,
+    // NOT derived from `candidates` — CB-264 was precisely a bug in how that list was built, and a
+    // floor computed from it would share the blind spot it exists to catch (red-proven: with the
+    // candidate cap reintroduced, a backlog counted from `candidates` read 0 and the stall passed).
+    // Counted BEFORE the loop, because archiveWeek adds each week it writes to `states`.
+    const backlog = eligibleWeeks({
+      now,
+      oldestRowAt: oldest,
+      afterWeeks: spec.archiveAfterWeeks,
+      maxWeeks: Number.MAX_SAFE_INTEGER,
+      done: new Set(states.keys()),
+    }).length;
+    log(`  archive: ${candidates.length} week(s) eligible, ${backlog} never archived (cap ${maxWeeks})`);
     // `maxWeeks` budgets WORK, so only a week that actually wrote something spends it — see
     // `workBudget`. A `skip` is free, so the walk keeps going and reaches weeks that have never
     // been archived.
@@ -601,6 +616,16 @@ async function processTable(ctx: {
       });
       budget.record(action);
       touchedYears.add(week.year);
+    }
+
+    // The floor (CB-299). Without it a run that archived nothing while work was waiting exits 0
+    // and reads exactly like a healthy idle run — which is how CB-264's stall went unseen for
+    // weeks. As an anomaly it pages, marks the run-log record not-ok and withholds the heartbeat.
+    const stall = archiveFloor({ backlog, maxWeeks, spent: budget.spent() });
+    if (stall) {
+      const msg = `${table}: ${stall}`;
+      warn(`⚠ ${msg}`);
+      result.anomalies.push(msg);
     }
   }
 
@@ -820,6 +845,20 @@ async function main(): Promise<void> {
       .join("\n");
     await bestEffort("slack summary", () => slackPost(`🗄️ *${label}* ok in ${(durationMs / 1000).toFixed(1)}s\n${summary}`));
   }
+
+  // The job proof (CB-299) — `_health/<name>/archive.json`, read by the scheduler's /health/jobs
+  // (lib/jobProof.ts). Reached only by a run that neither failed nor raised a refusal or anomaly, and
+  // the floor's stall IS an anomaly, so the proof means "ran, and did the work it owed".
+  const verdict = archiveProofVerdict({
+    failed: failure !== null,
+    refusals: refusals.length,
+    anomalies: anomalies.length,
+    dryRun,
+    toR2: target.kind === "r2",
+    archived: mode !== "prune" && results.length > 0,
+  });
+  if (verdict.allowed) publishJobProof({ bucket: cfg.credentials.r2.bucket, name: cfg.name, job: "archive" });
+  else log(`archive proof withheld: ${verdict.reason}`);
 
   log(`\n✓ done in ${(durationMs / 1000).toFixed(1)}s`);
 }
