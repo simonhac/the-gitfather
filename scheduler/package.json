@@ -8,7 +8,8 @@
     "dev": "wrangler dev --test-scheduled",
     "deploy": "wrangler deploy",
     "tail": "wrangler tail --format pretty",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "config:pull": "scripts/pull-config.sh"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4",

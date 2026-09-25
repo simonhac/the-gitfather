@@ -92,7 +92,11 @@ Two kinds of configuration, deliberately kept apart:
 
 - **`wrangler.jsonc`** (gitignored — copy from `wrangler.example.jsonc`) holds the NON-secret deployment
   shape: the R2 bucket bindings and the client **roster** (a `vars.ROSTER` array). It is a commented
-  JSONC file you can read back and diff, not a secret you paste blind.
+  JSONC file you can read back and diff, not a secret you paste blind. The real one lives in a private
+  repo (`npm run config:pull` fetches it; defaults to `simonhac/infra`, override with
+  `GITFATHER_CONFIG_REPO` / `_PATH` / `_REF`). Edit it there first, then deploy. Before deploying from a
+  pulled copy, diff it against the live Worker, which is the only guaranteed-current copy:
+  `npx wrangler deployments list`, then `npx wrangler versions view <id> --json`.
 - **Secrets** (`wrangler secret put …`, never committed):
   - `GH_APP_ID` — the GitHub App's id (the JWT `iss`). See [GitHub App setup](#github-app-setup).
   - `GH_APP_PRIVATE_KEY` — the App private key as a **PKCS#8** PEM (`-----BEGIN PRIVATE KEY-----`). GitHub
@@ -217,7 +221,8 @@ A token-mint failure (vs. a dispatch rejection) is logged as a dispatch `status 
 ```sh
 cd scheduler
 npm install
-cp wrangler.example.jsonc wrangler.jsonc      # then set the real bucket names + ROSTER
+npm run config:pull                           # existing deployment; or, first time:
+# cp wrangler.example.jsonc wrangler.jsonc    #   then set the real bucket names + ROSTER
 wrangler login                                 # or export CLOUDFLARE_API_TOKEN
 wrangler secret put GH_APP_ID                   # the App ID (setup step 1)
 wrangler secret put GH_APP_PRIVATE_KEY < app.pkcs8.pem  # multi-line: pipe the file in (the prompt only reads one line)
