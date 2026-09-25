@@ -45,20 +45,54 @@ channel you actually watch (Slack with a mention, SMS/PagerDuty — not just an 
 the alert that fires when GitHub is the thing that's broken. Put its ping URL in `HEARTBEAT_URL`; the
 backup pings it on success, so its absence pages independently of GitHub.
 
-## Two heartbeats, not one
+## Job proofs: one monitor for every job
 
-`HEARTBEAT_URL` and `VERIFY_HEARTBEAT_URL` are deliberately separate names, because they guard
-different failures and one caller repo holds both:
+A pushed heartbeat per job per project doesn't scale, and it fails silently. Three projects times
+(backup, verify) plus the scheduler used up all ten heartbeats on Better Stack's free plan before
+the archiver got one. Each ping URL is also an optional secret the caller has to pass explicitly, so
+a job that was never wired looks exactly like one that opted out. Better Stack adds a second trap: a
+heartbeat that has never had a first beat sits in `pending` and **cannot alert**. CB-299 found four
+stuck there for twelve days, with green jobs underneath.
+
+So the jobs after the backup **publish a proof instead of pinging**. At exactly the point they would
+have pinged, and behind the same gate, they write `_health/<name>/<job>.json` to their own bucket.
+The scheduler Worker already binds every client's bucket, so it reads all of the proofs and serves
+them at **`GET /health/jobs`**. It returns 503 when any owed proof is missing, stale, or can't be
+read (see [`scripts/lib/jobProof.ts`](../scripts/lib/jobProof.ts)).
+**One uptime monitor on that URL covers every job in every project**, and adding a project costs
+nothing.
+
+| proof | written by | when | stale after |
+| --- | --- | --- | --- |
+| `durableVerify` | `verify-durable-pg.ts` | the verify verdict below allows it | 30 h — one missed daily run |
+| `archive` | `archive-table.ts` | a clean real run that met its [floor](archiving.md#the-floor-a-run-that-owed-work-must-do-it) | 8 days — one missed Sunday |
+
+A client owes a proof for each cadence the roster subscribes it to. The `archive` proof is also
+skipped for a database whose published config says it archives nothing. A proof that has **never
+been written is red**, not `pending`, so a caller that isn't wired up shows immediately. Zero owed
+proofs is also red, because nothing was checked.
+
+Point a Better Stack **status** monitor (it expects a 2xx) at `https://<worker>/health/jobs`, and
+a second one at `/health` for the scheduler itself. The body carries opaque client ids, job names
+and ages only.
+
+## The push heartbeats that remain
+
+`HEARTBEAT_URL` and `VERIFY_HEARTBEAT_URL` are still supported. `HEARTBEAT_URL` stays the backup's
+switch because it is independent of both GitHub and the Worker. The two names are deliberately
+separate because they guard different failures, and one caller repo can hold both:
 
 | secret | pinged by | catches |
 | --- | --- | --- |
 | `HEARTBEAT_URL` | `pg-backup.yml`, on a successful dump+upload | the backup not landing at all |
-| `VERIFY_HEARTBEAT_URL` | `pg-durable-verify.yml`, on a clean verify | dumps that land on schedule but **will not restore** |
+| `VERIFY_HEARTBEAT_URL` | `pg-durable-verify.yml`, on a clean verify | dumps that land on schedule but **will not restore** — now also covered by the `durableVerify` proof |
 
-If these ever collapsed into one name, a green backup would silence a broken restore — which is the
-more dangerous of the two failures, because it looks healthy right up until you need it.
+If the two names were merged, a green backup would silence a broken restore. That is the more
+dangerous failure, because it looks healthy right up until you need it. Both are off when unset, and
+a reusable workflow can't tell "unset" from "opted out", so after wiring one, confirm it leaves
+`pending`.
 
-The verify ping's claim is **"these backups are provably restorable"**, which is far stronger than
+The verify proof's (and ping's) claim is **"these backups are provably restorable"**, which is far stronger than
 "the job exited 0", so the gate is correspondingly strict (`scripts/lib/verifyHeartbeat.ts`):
 
 | blocks the ping | why |

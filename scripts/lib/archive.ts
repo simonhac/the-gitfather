@@ -552,6 +552,57 @@ export function workBudget(maxWeeks: number): {
   };
 }
 
+/**
+ * The archive FLOOR: given the weeks that were waiting and the budget the run had, did it do
+ * at least the work it owed? Returns the violation, or null when the run is healthy.
+ *
+ * The obvious assertion — "archived > 0" — is wrong, because a run with nothing eligible is
+ * correct and common. That is exactly why the CB-264 stall hid: its output was
+ * indistinguishable from a healthy idle run. So the floor is conditional:
+ *
+ *     owed = min(backlog, maxWeeks)      spent < owed  ⟹  stalled
+ *
+ * where `backlog` is the eligible weeks the index has NEVER archived. It tolerates the throttle —
+ * backlog 8, cap 1, spent 1 is healthy progress — and fires only when work was waiting and the
+ * run did less than its budget allowed. A supersede spends the budget without shrinking the
+ * backlog, and still counts: that is real work, just not the backlog's.
+ *
+ * `workBudget` fixed THAT stall; this is what makes the NEXT one visible. It is a pure predicate
+ * for the same reason `workBudget` is: CB-264 shipped because the rule was implicit in a loop.
+ */
+export function archiveFloor(i: { backlog: number; maxWeeks: number; spent: number }): string | null {
+  const owed = Math.min(i.backlog, i.maxWeeks);
+  if (i.spent >= owed) return null;
+  return (
+    `archive stalled — ${i.backlog} eligible week(s) never archived, budget ${i.maxWeeks}, ` +
+    `but only ${i.spent} week(s) written (expected at least ${owed})`
+  );
+}
+
+/**
+ * May this run publish its job proof (lib/jobProof.ts)? The proof claims "the archiver ran for real
+ * and did the work it owed", so it is withheld from anything that is not a real, clean archiving run:
+ * a rehearsal (dry-run or a local target), a prune-only or --rebuild-index run (which never
+ * face the floor), and any failure, refusal or anomaly — the floor's stall included.
+ */
+export function archiveProofVerdict(i: {
+  failed: boolean;
+  refusals: number;
+  anomalies: number;
+  dryRun: DryRun;
+  toR2: boolean;
+  archived: boolean;
+}): { allowed: true } | { allowed: false; reason: string } {
+  if (i.failed) return { allowed: false, reason: "the run failed" };
+  if (i.refusals > 0 || i.anomalies > 0) {
+    return { allowed: false, reason: `${i.refusals} refusal(s), ${i.anomalies} anomaly(ies)` };
+  }
+  if (i.dryRun !== "none") return { allowed: false, reason: `--dry-run=${i.dryRun} is a rehearsal` };
+  if (!i.toR2) return { allowed: false, reason: "a local target is a rehearsal" };
+  if (!i.archived) return { allowed: false, reason: "no archive phase ran, so the floor was never checked" };
+  return { allowed: true };
+}
+
 export interface PrunePlan {
   action: "prune" | "refuse" | "skip";
   expectRows?: number;

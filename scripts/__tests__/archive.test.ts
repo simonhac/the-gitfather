@@ -14,6 +14,8 @@ import {
   fingerprintOf,
   planArchive,
   workBudget,
+  archiveFloor,
+  archiveProofVerdict,
   planPrune,
   parsePruneManifest,
   activePart,
@@ -172,6 +174,29 @@ test("workBudget: a skip is free, so a run of already-archived weeks never exhau
   assert.equal(budget.spent(), 1);
   assert.equal(budget.exhausted(), true, "one real archive spends a budget of 1");
 });
+
+// ── The archive floor ────────────────────────────────────────────────────────
+// CB-299: a run that did no work exited 0 and reported green. The floor turns "work was
+// waiting and none was done" into a page, without firing on a genuinely idle run.
+
+for (const [name, input, stalled] of [
+  ["idle: nothing eligible, nothing done", { backlog: 0, maxWeeks: 1, spent: 0 }, false],
+  ["throttled progress: backlog 8, cap 1, one written", { backlog: 8, maxWeeks: 1, spent: 1 }, false],
+  ["backlog smaller than the cap, all of it written", { backlog: 2, maxWeeks: 5, spent: 2 }, false],
+  ["a supersede spent the budget instead of the backlog", { backlog: 3, maxWeeks: 1, spent: 1 }, false],
+  ["CB-264: backlog waiting, nothing written", { backlog: 1, maxWeeks: 1, spent: 0 }, true],
+  ["partial stall: owed 3, wrote 1", { backlog: 5, maxWeeks: 3, spent: 1 }, true],
+] as const) {
+  test(`archiveFloor: ${name}`, () => {
+    const verdict = archiveFloor(input);
+    if (stalled) {
+      assert.ok(verdict, "must report a stall");
+      assert.match(verdict, /archive stalled/);
+    } else {
+      assert.equal(verdict, null);
+    }
+  });
+}
 
 test("workBudget: every non-skip action spends, and the budget is a hard stop", () => {
   for (const action of ["archive", "supersede", "supplement"] as const) {
@@ -590,3 +615,26 @@ test("parsePruneManifest: a manifest with no rowCount refuses", () => {
   const r = parsePruneManifest(MANIFEST({ rowCount: undefined }), 1);
   assert.ok("error" in r && /rowCount/.test(r.error));
 });
+
+// ── The archive job proof ────────────────────────────────────────────────────
+// The proof claims "ran for real and did the work it owed", so only a clean, real archiving run
+// may publish it. Each row withholds it for exactly one reason.
+
+const CLEAN = { failed: false, refusals: 0, anomalies: 0, dryRun: "none", toR2: true, archived: true } as const;
+
+test("archiveProofVerdict: a clean, real archiving run publishes", () => {
+  assert.deepEqual(archiveProofVerdict(CLEAN), { allowed: true });
+});
+
+for (const [name, patch] of [
+  ["the run failed", { failed: true }],
+  ["a prune refusal", { refusals: 1 }],
+  ["an anomaly — including the floor's stall", { anomalies: 1 }],
+  ["--dry-run=source", { dryRun: "source" }],
+  ["a local target", { toR2: false }],
+  ["no archive phase (prune-only / --rebuild-index)", { archived: false }],
+] as const) {
+  test(`archiveProofVerdict: withheld for ${name}`, () => {
+    assert.equal(archiveProofVerdict({ ...CLEAN, ...patch }).allowed, false);
+  });
+}
