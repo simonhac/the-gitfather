@@ -34,7 +34,14 @@
 name: example                  # db shortname → R2 key basename + Slack header
 backup-prefix: pg/example      # R2 object-key prefix
 timezone: UTC                  # IANA tz for the dashboard + Slack row (day boundary, HH:MM, abbrev)
-encryption: none               # none | age | aes-gcm  (age = client-side; needs AGE_RECIPIENT/AGE_IDENTITY)
+encryption: none               # none | age | aes-gcm  (age = client-side; needs AGE_RECIPIENT)
+# expect-recipient: age1…      # OPTIONAL but recommended with `encryption: age`: the recipient
+                               # AGE_RECIPIENT must equal, pinned here in git. An age header carries
+                               # an ephemeral share, NOT the recipient's public key, so nothing can
+                               # tell you afterwards what an object was encrypted to — a silently
+                               # rotated secret produces a bucket of objects nobody can open, and
+                               # the first sign is a failed decrypt months later. A public key is
+                               # not a secret; this is the only keyless guard there is.
 anchor-hour-utc: 16            # the 8-hourly run at this UTC hour is also promoted to daily/weekly/monthly
 
 dump:
@@ -43,9 +50,17 @@ dump:
   min-bytes: 1048576           # abort (don't upload) below this; also staleness's fresh-but-broken floor
 
 integrity:                     # backup-time integrity checks
+  # The dump is written as PLAINTEXT first and encrypted afterwards, so both checks below read it
+  # with no decrypt key involved — whatever `encryption:` says. That ordering is the whole reason
+  # AGE_IDENTITY does not need to exist in the backup job, or in CI at all.
   checksum: true               # record a SHA-256 of the uploaded object (the durable hash-verify baseline)
-  check-structure: true        # pg_restore -l TOC check before declaring success (encryption: none)
-  verify-after-upload: false   # opt-in: re-download + (decrypt) + pg_restore -l after upload (age structural check)
+  check-structure: true        # pg_restore -l TOC check on the plaintext, before it is encrypted
+  verify-before-encrypt: false # opt-in: full pg_restore + drill row-checks of the plaintext, into
+                               # `drill-database-url`, on EVERY run. The strongest proof available
+                               # and it needs no key; costs one restore per run. Requires
+                               # drill.row-count-table + DRILL_DATABASE_URL.
+  verify-after-upload: false   # opt-in: re-download + (decrypt) + pg_restore -l. Needs AGE_IDENTITY
+                               # under `encryption: age`, so prefer verify-before-encrypt.
 
 archive:                       # OPTIONAL — archive-table.ts. Move old rows of an append-only table
                                # OUT of Postgres into per-week objects, then delete them from the source.
@@ -93,6 +108,21 @@ verify-durable:                # daily durable-tier verification (verify-durable
   aged: true                   # re-restore the newest weekly/monthly ≥ retest-days old
   retest-days: 14              # age at which a weekly/monthly is aged-due (13 to stay inside the WORM lock)
   max-restores: 2              # cap full restores per run (hash-checks uncapped)
+  rehash-per-run: 1            # ALSO re-hash the N least-recently-hashed objects each run, so
+                               # "the bytes are unchanged" stays a CURRENT claim and not one made
+                               # once on first sight. Oldest-first, so the budget lands on the
+                               # long-lived tiers by itself. 0 disables.
+  rehash-max-age-days: 90      # page if the least-recently-hashed object exceeds this (0 = off).
+                               # Roughly 2x your sweep time = objects / rehash-per-run runs.
+  drill-max-age-days: 0        # warn when the newest MANUAL drill (drill-object.ts) is older than
+                               # this. Set it if you run keyless: that drill is then the ONLY proof
+                               # your escrowed identity still opens a stored object.
+  keyless: false               # true = hash checks ONLY: no AGE_IDENTITY, no database, no restores.
+                               # For a deployment that keeps the identity offline and proves
+                               # restorability at BACKUP time (integrity.verify-before-encrypt)
+                               # plus a periodic human decrypt drill. Requires `aged: false`, and
+                               # REFUSES an AGE_IDENTITY in the environment — a key this job has
+                               # declared it cannot use is just a secret nobody is watching.
 
 # Credential-rotation ageing. The rotation date is recorded by roll-r2-token.ts when it publishes —
 # that is the only durable trace, since a GitHub secret cannot be read back and listing repository

@@ -174,7 +174,7 @@ Everything here has a safe default or is feature-gated. Ask, but offer the defau
 |---|---|---|
 | `encryption` | `none` | `none` \| `age` \| `aes-gcm` (aes-gcm not implemented) |
 | `AGE_RECIPIENT` | — | **required when `encryption: age`** (public key, `age1…`); used to encrypt |
-| `AGE_IDENTITY` | — | **required when `encryption: age`** (private key); used by the drill + durable-verify to decrypt (and by the backup when `integrity.verify-after-upload`) |
+| `AGE_IDENTITY` | — | private key; used by the drill + durable-verify to decrypt (and by the backup only when `integrity.verify-after-upload`). NOT needed to take a backup, and not needed by `integrity.verify-before-encrypt` |
 
 ### 3c. Slack status row (→ profile + secrets)
 
@@ -246,12 +246,18 @@ All default-on and safe — surface them only if the user asks *"how do you know
 | Variable | Default | Meaning |
 |---|---|---|
 | `integrity.checksum` | `true` | record a SHA-256 of each uploaded object (the durable hash-verify baseline) |
-| `integrity.check-structure` | `true` | `pg_restore -l` TOC check before declaring a backup good (`encryption: none`) |
-| `integrity.verify-after-upload` | `false` | opt-in: re-download + (decrypt) + `pg_restore -l` after upload; the only **backup-time** structural check for age (needs `AGE_IDENTITY` in the backup job). **Caveat:** the reusable `pg-backup.yml` does not currently accept an `AGE_IDENTITY` secret, so this is effectively unavailable for `encryption: age` until that secret is wired into the backup workflow. |
+| `integrity.check-structure` | `true` | `pg_restore -l` TOC check on the PLAINTEXT, before it is encrypted — so it applies to every `encryption:` mode |
+| `integrity.verify-before-encrypt` | `false` | opt-in: full `pg_restore` + `drill.*` row gates on the plaintext, EVERY run. Needs `drill.row-count-table` + `DRILL_DATABASE_URL`, and deliberately NOT `AGE_IDENTITY`. Records a `pre-encrypt` verification |
+| `expect-recipient` | — | the recipient `AGE_RECIPIENT` must match, pinned in the profile. An age header does not name its recipient, so this is the only keyless guard against encrypting to a key you no longer hold |
+| `integrity.verify-after-upload` | `false` | opt-in: re-download + (decrypt) + `pg_restore -l` after upload. Under `encryption: age` this needs `AGE_IDENTITY` in the backup job, which the reusable `pg-backup.yml` deliberately does not accept — prefer `verify-before-encrypt`, which proves more and needs no key |
 | `verify-durable.fresh` | `true` | daily verify: hash-check each new durable object + restore the freshest `daily` |
 | `verify-durable.aged` | `true` | daily verify: restore the newest `weekly`/`monthly` ≥ `verify-durable.retest-days` old not yet restore-verified |
 | `verify-durable.retest-days` | `14` | age at which a weekly/monthly becomes secondary-due (set `13` to re-test inside the 14-day WORM lock) |
 | `verify-durable.max-restores` | `2` | cap on full restores per daily verify run (hash-checks uncapped) |
+| `verify-durable.rehash-per-run` | `1` | re-hash the N least-recently-hashed durable objects every run, so "the bytes are unchanged" stays a CURRENT claim rather than one made once on first sight. One per run sweeps a ~46-object corpus in ~46 days |
+| `verify-durable.rehash-max-age-days` | `90` | page when the least-recently-hashed object exceeds this (0 disables). A rotation that stops decays coverage with no symptom otherwise |
+| `verify-durable.drill-max-age-days` | `0` | warn when the newest MANUAL restore drill is older than this (0 disables). In keyless mode that drill is the only proof the escrowed key still opens a stored object, and it runs on a human cadence — so "somebody forgot" is otherwise the one failure mode with no signal at all |
+| `verify-durable.keyless` | `false` | hash checks ONLY — no `AGE_IDENTITY`, no `DRILL_DATABASE_URL`/`PG_LIVE_DATABASE_URL`, no restores. Requires `aged: false`, and REFUSES an identity in the environment. Pair with `integrity.verify-before-encrypt` + a periodic manual decrypt drill |
 | `drill.max-row-drop` | `0` (off) | if set (0–1), fail a drill when a table shrank more than this fraction vs the prior passing drill |
 
 These power `verify-durable-pg.ts` (the daily `pg-durable-verify.yml` workflow), which guarantees every

@@ -31,7 +31,7 @@ import { fileURLToPath } from "node:url";
 import { buildRawProfile } from "./lib/profile.js";
 import { githubRunInfo } from "./lib/github.js";
 import { pickLatestRun, runlogKey, runlogMonthsToTry } from "./lib/runlogParse.js";
-import type { LogRun, LogVerification, LogArchive, BackupTier } from "./lib/backupTypes.js";
+import type { LogRun, LogVerification, LogArchive, BackupTier, VerificationKind } from "./lib/backupTypes.js";
 import type { LogCredential } from "./lib/credentialAge.js";
 
 function warn(msg: string): void {
@@ -213,10 +213,15 @@ export interface VerifyRecordInput {
   /** Which durable copy / object was tested + how (see LogVerification). */
   tier?: BackupTier | null;
   key?: string | null;
-  kind?: "restore" | "hash";
+  kind?: VerificationKind;
   counts?: Record<string, number> | null;
   /** Private failure reason — never published. */
   reason?: string | null;
+  /** "manual" for a drill someone ran by hand with the offline identity. Defaults to "ci". */
+  by?: "ci" | "manual";
+  /** How long THIS verification took. Separate from the run's own durationMs, so the cost of
+   * verifying every dump can be judged from numbers rather than impressions. */
+  durationMs?: number | null;
 }
 
 /** Append a verification record to the private R2 run-log. Best-effort (never throws). */
@@ -234,6 +239,8 @@ export function appendVerify(input: VerifyRecordInput): void {
     kind: input.kind ?? "restore",
     counts: input.counts ?? null,
     reason: input.reason ?? null,
+    by: input.by ?? "ci",
+    durationMs: input.durationMs ?? null,
   };
   appendRecord("verifications", input.ts, record);
 }

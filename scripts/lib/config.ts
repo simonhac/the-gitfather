@@ -125,8 +125,12 @@ const dumpGroup = z
 const integrityGroup = z
   .object({
     checksum: boolIn(true), // record a SHA-256 of the uploaded object (durable hash baseline)
-    checkStructure: boolIn(true), // pg_restore -l TOC check before declaring success (none-mode)
-    verifyAfterUpload: boolIn(false), // re-download + (decrypt) + pg_restore -l (only age-mode structural check)
+    checkStructure: boolIn(true), // pg_restore -l TOC check on the plaintext, before it is encrypted
+    verifyAfterUpload: boolIn(false), // re-download + (decrypt) + pg_restore -l — needs the identity
+    // Full pg_restore + row checks of the dump BEFORE it is encrypted, into a throwaway database.
+    // The strongest proof available, and it needs no decrypt key, because at that point the
+    // plaintext is simply in hand. It also covers EVERY run rather than only the promoted ones.
+    verifyBeforeEncrypt: boolIn(false),
   })
   .strict().prefault({} as never);
 
@@ -158,6 +162,31 @@ const verifyDurableGroup = z
     aged: boolIn(true), // re-restore the newest weekly/monthly ≥ retest-days old
     retestDays: intIn(14, 1, 365), // 13 to re-validate while still inside the 14-day WORM lock
     maxRestores: intIn(2, 0, 100), // cap full restores per run (hash-checks uncapped)
+    // Hash checks only: no decrypt key, no database, no restores. For a deployment that keeps the
+    // age identity OFFLINE and proves restorability at backup time (integrity.verify-before-encrypt)
+    // plus a periodic human drill, instead of by decrypting in CI every day.
+    //
+    // This has to be DECLARED rather than inferred from a missing AGE_IDENTITY, because those are
+    // opposite situations: a profile that intends to decrypt and has lost its key must fail loudly,
+    // not quietly downgrade to hash-only and keep reporting success. So the flag is also checked
+    // the other way — with `keyless` on, an identity being present is itself an error.
+    keyless: boolIn(false),
+    // Re-hash the N least-recently-hashed durable objects EVERY run, on top of hashing each new
+    // one on first sight. Without this a stored object is byte-checked exactly once in its life,
+    // which was tolerable only while the aged restore leg was the recurring proof. One object per
+    // run is a single download and sweeps a ~46-object corpus in ~46 days. Defaults to 1 rather
+    // than 0: every deployment has the hash-once weakness, and this is what fixes it.
+    rehashPerRun: intIn(1, 0, 1000),
+    // Page when the least-recently-hashed object is older than this. A rotation that stops — set
+    // to 0, or outgrown by the corpus — otherwise degrades coverage with no symptom whatsoever.
+    // 0 disables the check. Set it to roughly twice your sweep time.
+    rehashMaxAgeDays: intIn(90, 0, 3650),
+    // Warn when the newest MANUAL restore drill is older than this. In keyless mode that drill is
+    // the only thing that ever proves the escrowed key still opens a stored object, and it runs on
+    // a human's cadence — so the one failure mode with no signal at all is somebody forgetting.
+    // 0 disables. A warning, not a failure, for the same reason credential ageing is: a missed
+    // drill is not corruption, and a hard page on a human-cadence task trains people to ignore it.
+    drillMaxAgeDays: intIn(0, 0, 3650),
   })
   .strict().prefault({} as never);
 
@@ -331,6 +360,13 @@ export const profileSchema = z.object({
   backupPrefix: opt(nonEmpty()),
   timezone,
   encryption: z.enum(ENCRYPTIONS).default("none"),
+  // The recipient we EXPECT $AGE_RECIPIENT to be, pinned in the profile (which is in git) rather
+  // than only in the secret store. An age header carries an ephemeral share, NOT the recipient's
+  // public key, so nothing downstream can tell you what an object was encrypted to without the
+  // identity — a rotated or fat-fingered secret would otherwise produce a bucket full of objects
+  // nobody can open, and the first sign of it would be a failed restore months later. A public key
+  // is not a secret; pinning it here is the only keyless guard available.
+  expectRecipient: opt(nonEmpty()),
   anchorHourUtc: intIn(16, 0, 23),
   dump: dumpGroup,
   integrity: integrityGroup,
@@ -388,22 +424,104 @@ export const backupSchema = profileSchema
     if (v.integrity.verifyAfterUpload && v.encryption === "age" && !v.credentials.age.identity) {
       miss(ctx, ["credentials", "age", "identity"], "required when integrity.verify-after-upload is on and encryption=age");
     }
+    // A pinned recipient that does not match the secret is a hard config error, not a warning: it
+    // means we are about to write objects to a key we may not hold. Checked here so it fails before
+    // the dump rather than after it.
+    if (v.expectRecipient && v.credentials.age.recipient && v.expectRecipient !== v.credentials.age.recipient) {
+      miss(
+        ctx,
+        ["credentials", "age", "recipient"],
+        `does not match the pinned expect-recipient (got ${v.credentials.age.recipient}, expected ${v.expectRecipient}) — ` +
+          `refusing to encrypt to an unexpected key. Update expect-recipient in the profile if the rotation was intended`,
+      );
+    }
+    // verify-before-encrypt runs a real restore, so it needs a throwaway target and the drill gates.
+    // Note it does NOT need age.identity, which is the entire point.
+    if (v.integrity.verifyBeforeEncrypt) {
+      if (!v.drill.rowCountTable) miss(ctx, ["drill", "rowCountTable"], "required when integrity.verify-before-encrypt is on");
+      if (!v.credentials.drillDatabaseUrl) {
+        miss(ctx, ["credentials", "drillDatabaseUrl"], "required when integrity.verify-before-encrypt is on");
+      }
+    }
   });
+
+/** What any task that RESTORES an object needs: a throwaway target, a live reference, and gates. */
+function requireRestoreTarget(v: Profile, ctx: Ctx): void {
+  if (!v.drill.rowCountTable) miss(ctx, ["drill", "rowCountTable"], "must be set");
+  if (!v.credentials.drillDatabaseUrl) miss(ctx, ["credentials", "drillDatabaseUrl"], "must be set");
+  if (!v.credentials.liveDatabaseUrl) miss(ctx, ["credentials", "liveDatabaseUrl"], "must be set");
+}
 
 function requireDrillCreds(v: Profile, ctx: Ctx): void {
   requireNameAndPrefix(v, ctx);
   requireR2(v, ctx);
   requireSlackChannel(v, ctx);
-  if (!v.drill.rowCountTable) miss(ctx, ["drill", "rowCountTable"], "must be set");
-  if (!v.credentials.drillDatabaseUrl) miss(ctx, ["credentials", "drillDatabaseUrl"], "must be set");
-  if (!v.credentials.liveDatabaseUrl) miss(ctx, ["credentials", "liveDatabaseUrl"], "must be set");
+  requireRestoreTarget(v, ctx);
   if (v.encryption === "age" && !v.credentials.age.identity) {
     miss(ctx, ["credentials", "age", "identity"], "required when encryption=age (needed to decrypt .age objects)");
   }
 }
 
+/**
+ * Durable-verify is the one task with two legitimate shapes, so it cannot share the drill's rule.
+ *
+ * Default: it restores, so it needs the identity and a target — and a MISSING identity must fail
+ * the run rather than silently reduce it to a hash-only check that still reports success.
+ *
+ * `keyless`: it only re-hashes stored objects, which needs neither a key nor a database. Both are
+ * then refused rather than merely unused: an identity sitting in the environment of a job that has
+ * declared it does not decrypt is the exact thing this mode exists to eliminate, and the only way
+ * anyone would notice is a check that says so.
+ */
+function requireVerifyDurableCreds(v: Profile, ctx: Ctx): void {
+  requireNameAndPrefix(v, ctx);
+  requireR2(v, ctx);
+  requireSlackChannel(v, ctx);
+  if (!v.verifyDurable.keyless) {
+    requireRestoreTarget(v, ctx);
+    if (v.encryption === "age" && !v.credentials.age.identity) {
+      miss(ctx, ["credentials", "age", "identity"], "required when encryption=age (needed to decrypt .age objects)");
+    }
+    return;
+  }
+  if (v.credentials.age.identity) {
+    miss(
+      ctx,
+      ["credentials", "age", "identity"],
+      "must NOT be set when verify-durable.keyless is on — the point of keyless mode is that this job " +
+        "cannot decrypt, so an identity in its environment is a live secret nothing uses",
+    );
+  }
+  if (v.verifyDurable.aged) {
+    miss(ctx, ["verifyDurable", "aged"], "cannot be on with verify-durable.keyless — the aged leg is a restore");
+  }
+}
+
 export const drillSchema = profileSchema.superRefine(requireDrillCreds);
-export const verifyDurableSchema = profileSchema.superRefine(requireDrillCreds);
+export const verifyDurableSchema = profileSchema.superRefine(requireVerifyDurableCreds);
+
+/**
+ * The MANUAL drill (drill-object.ts) — someone proving by hand that a named stored object still
+ * opens with the escrowed identity. Its requirements differ from the CI drill's in two ways that
+ * both matter:
+ *
+ *   - no `PG_LIVE_DATABASE_URL`. Its default gate is `nonempty`, because a durable copy is usually
+ *     weeks old and a ratio against a live table that has moved on means nothing. Requiring it
+ *     anyway would hand production database credentials to a laptop for no gain.
+ *   - no Slack channel. A human is watching the terminal; paging a channel about a drill someone
+ *     is running on purpose is noise.
+ *
+ * The identity is checked at the call site instead of here, because it is only needed for a `.age`
+ * object and the key is not known until the argument is parsed.
+ */
+function requireManualDrillCreds(v: Profile, ctx: Ctx): void {
+  requireNameAndPrefix(v, ctx);
+  requireR2(v, ctx);
+  if (!v.drill.rowCountTable) miss(ctx, ["drill", "rowCountTable"], "must be set");
+  if (!v.credentials.drillDatabaseUrl) miss(ctx, ["credentials", "drillDatabaseUrl"], "must be set");
+}
+
+export const manualDrillSchema = profileSchema.superRefine(requireManualDrillCreds);
 
 function requireValidStalenessSlot(v: Profile, ctx: Ctx): void {
   // The slot width has to tile a day exactly. Everything that buckets a run into a slot does
@@ -520,6 +638,7 @@ export function dashboardSchema(opts: { fromR2?: boolean; upload?: boolean } = {
 export type BackupConfig = Profile;
 export type DrillConfig = Profile;
 export type VerifyDurableConfig = Profile;
+export type ManualDrillConfig = Profile;
 export type DashboardConfig = Profile;
 export type ArchiveConfig = Profile;
 
@@ -588,6 +707,7 @@ export function loadConfig<T extends z.ZodType>(schema: T): z.infer<T> {
 export const loadBackupConfig = (): BackupConfig => loadConfig(backupSchema);
 export const loadDrillConfig = (): DrillConfig => loadConfig(drillSchema);
 export const loadVerifyDurableConfig = (): VerifyDurableConfig => loadConfig(verifyDurableSchema);
+export const loadManualDrillConfig = (): ManualDrillConfig => loadConfig(manualDrillSchema);
 export const loadDashboardConfig = (opts?: { fromR2?: boolean; upload?: boolean }): DashboardConfig =>
   loadConfig(dashboardSchema(opts));
 export const loadArchiveConfig = (opts?: { toR2?: boolean }): ArchiveConfig => loadConfig(archiveSchema(opts));

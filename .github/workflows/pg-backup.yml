@@ -31,6 +31,29 @@ on:
         type: string
         required: false
         default: ""
+      ram_disk_mb:
+        description: >-
+          Hold the PLAINTEXT dump in RAM instead of on the runner's disk, by mounting a tmpfs of this
+          size and pointing TMPDIR at it. 0 (default) keeps the runner's normal temp dir.
+
+          The dump is written as plaintext before it is encrypted, so for an age profile there is now
+          a window where production data is at rest on the runner. GitHub calls its hosted runners
+          "ephemeral and clean isolated virtual machines" but documents NOTHING about disk encryption
+          or secure erase, so this closes the question by construction rather than by trusting the
+          teardown. MEASURE FIRST: a standard private-repo runner has 8 GB of RAM total, shared with
+          the restore target if verify-before-encrypt is on, so this must comfortably exceed the dump
+          and leave room. Too small and the dump fails — which is the intended failure, rather than
+          silently spilling to disk.
+        type: number
+        required: false
+        default: 0
+      pg_service_image:
+        description: >-
+          Postgres image the pre-encryption restore drill restores INTO — must be >= your server's
+          major. Only started when the profile sets integrity.verify-before-encrypt.
+        type: string
+        required: false
+        default: postgres:17
     # Secrets are passed EXPLICITLY by the caller (not `secrets: inherit`): inherit only works when the
     # called workflow is in the same org/enterprise, and this repo is owned by a different account than
     # its consumers. Non-secret config (bucket, channel) is threaded via inputs above for the same
@@ -55,6 +78,8 @@ on:
 
 jobs:
   backup:
+    # NOT a single-CPU runner. GitHub documents those as "hosted in a container on a shared VM"
+    # rather than a VM of our own, and this job now holds the PLAINTEXT dump (see ram_disk_mb).
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -94,9 +119,45 @@ jobs:
       - name: Verify pg_dump version
         run: pg_dump --version
 
+      # The plaintext dump, and the restore target below, are kept OFF the runner's block device.
+      # See the ram_disk_mb input for why trusting the VM teardown is not the same as not writing
+      # the bytes. Sized by the caller because only the caller knows how big its dump is.
+      - name: Mount a RAM disk for the plaintext dump
+        if: inputs.ram_disk_mb > 0
+        run: |
+          set -euo pipefail
+          echo "runner memory:"; free -m | sed -n '1,2p'
+          echo "default /dev/shm:"; df -h /dev/shm | tail -1
+          sudo mkdir -p /mnt/ram
+          sudo mount -t tmpfs -o size=${{ inputs.ram_disk_mb }}m,mode=1777 tmpfs /mnt/ram
+          df -h /mnt/ram | tail -1
+          echo "TMPDIR=/mnt/ram" >> "$GITHUB_ENV"
+
+      # A service container cannot be conditional, and most consumers do not restore at backup time,
+      # so this is a plain `docker run` gated on the profile. PGDATA is a tmpfs too: restoring the
+      # dump materialises the same rows a second time, and that copy deserves the same treatment as
+      # the first.
+      - name: Start the throwaway restore target
+        if: env.VERIFY_BEFORE_ENCRYPT == 'true'
+        run: |
+          set -euo pipefail
+          docker run -d --name gf-drill \
+            -e POSTGRES_PASSWORD=drill \
+            -p 5432:5432 \
+            --tmpfs /var/lib/postgresql/data:rw,size=${{ inputs.ram_disk_mb > 0 && inputs.ram_disk_mb || 2048 }}m \
+            ${{ inputs.pg_service_image }}
+          for i in $(seq 1 40); do
+            if docker exec gf-drill pg_isready -U postgres >/dev/null 2>&1; then echo "ready after ${i}s"; exit 0; fi
+            sleep 1
+          done
+          echo "restore target never became ready"; docker logs gf-drill; exit 1
+
       - name: Dump + upload to R2
         working-directory: engine
         env:
+          # Only reached when the profile asked for the pre-encryption drill; the config schema
+          # requires it in that case, and the script never touches it otherwise.
+          DRILL_DATABASE_URL: postgresql://postgres:drill@localhost:5432/postgres?sslmode=disable
           PROFILE: ${{ github.workspace }}/caller/${{ inputs.profile }}
           PG_BACKUP_DATABASE_URL: ${{ secrets.PG_BACKUP_DATABASE_URL }}
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}

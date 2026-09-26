@@ -30,6 +30,35 @@ function escapePgpass(s: string): string {
   return s.replace(/\\/g, "\\\\").replace(/:/g, "\\:");
 }
 
+/** The sslmodes libpq refuses to combine with `sslrootcert=system` — everything below verify-ca. */
+const WEAK_SSLMODES = new Set(["disable", "allow", "prefer", "require"]);
+
+/**
+ * Drop an ambient `PGSSLROOTCERT=system` when the URL asks for an sslmode weaker than verify-ca.
+ *
+ * libpq rejects that pairing outright — `weak sslmode "disable" may not be used with
+ * sslrootcert=system` — so an environment variable the caller never set silently overrides the
+ * sslmode they explicitly wrote in the connection string, and the tool refuses to connect at all.
+ * The URL is the caller's stated intent; ambient env is not. This is the same reason the password
+ * is taken off the argv here rather than trusted to the environment.
+ *
+ * Only the incompatible combination is cleared: a URL asking for verify-ca/verify-full still gets
+ * the root cert it needs.
+ */
+function withoutConflictingSslRootCert(env: NodeJS.ProcessEnv, url: string): NodeJS.ProcessEnv {
+  if (env.PGSSLROOTCERT !== "system") return env;
+  let sslmode: string | null;
+  try {
+    sslmode = new URL(url).searchParams.get("sslmode");
+  } catch {
+    return env;
+  }
+  if (!sslmode || !WEAK_SSLMODES.has(sslmode)) return env;
+  const rest = { ...env };
+  delete rest.PGSSLROOTCERT;
+  return rest;
+}
+
 let seq = 0; // unique pgpass filenames when several pgConn() share one caller dir
 
 /**
@@ -50,7 +79,7 @@ export function pgConn(url: string, dir?: string): PgConn {
     password = u.password;
   }
   if (!password) {
-    return { safeUrl: url, env: process.env, cleanup: () => {} };
+    return { safeUrl: url, env: withoutConflictingSslRootCert(process.env, url), cleanup: () => {} };
   }
   u.password = "";
   const safeUrl = u.toString();
@@ -70,7 +99,7 @@ export function pgConn(url: string, dir?: string): PgConn {
     }
   };
 
-  return { safeUrl, env: { ...process.env, PGPASSFILE: passFile }, cleanup };
+  return { safeUrl, env: withoutConflictingSslRootCert({ ...process.env, PGPASSFILE: passFile }, url), cleanup };
 }
 
 /**

@@ -221,13 +221,105 @@ export interface LogVerification {
   tier?: BackupTier | null;
   /** The exact object key tested (null on legacy records). */
   key?: string | null;
-  /** "restore" = full pg_restore + row counts; "hash" = byte-integrity check of the stored object.
-   * Missing on legacy records → treat as "restore". */
-  kind?: "restore" | "hash";
+  /** What was actually proved — see VerificationKind. Missing on legacy records → "restore". */
+  kind?: VerificationKind;
   /** Restored per-table row counts (drift signal). PRIVATE — never published. */
   counts?: Record<string, number> | null;
   /** Private failure reason (mirrors LogRun.error) — never published. */
   reason?: string | null;
+  /** How long THIS verification took (ms). PRIVATE. */
+  durationMs?: number | null;
+  /** Who ran it. A MANUAL record is written from someone's laptop with the offline identity, so it
+   * carries no runId/runUrl — but those are nullable for other reasons too, so absence cannot stand
+   * in for provenance. Missing on records written before this field → "ci". */
+  by?: "ci" | "manual";
+}
+
+/**
+ * What a verification record actually PROVES. The three are not interchangeable, and conflating
+ * them is how a dashboard comes to claim more than it knows:
+ *
+ *   "restore"     — the STORED object was fetched, decrypted and pg_restored, and its rows checked.
+ *                   The strongest claim, and the only one that needs the decrypt key.
+ *   "pre-encrypt" — the dump was restored and row-checked BEFORE it was encrypted and uploaded.
+ *                   Proves the dump is good; says nothing about whether the stored ciphertext opens.
+ *   "hash"        — the stored object's bytes still match their recorded SHA-256. Says nothing
+ *                   about whether they ever restored.
+ *
+ * Missing on legacy records, which predate the field and were all full restores → treat as "restore".
+ */
+export type VerificationKind = "restore" | "pre-encrypt" | "hash";
+
+/**
+ * Does this record prove the STORED object restores? Only a full restore of the object as stored
+ * does. `pre-encrypt` deliberately does NOT: the dump it restored had not been encrypted or
+ * uploaded yet, so it cannot speak for what is in the bucket.
+ *
+ * This is the predicate behind the dashboard's bright green and behind "don't re-restore this one",
+ * and both must answer it the same way — a `kind !== "hash"` test at either site silently promotes
+ * `pre-encrypt` to a full restore.
+ */
+export function provesStoredObjectRestores(kind: VerificationKind | undefined): boolean {
+  return kind === undefined || kind === "restore";
+}
+
+/** Did this record come from a real pg_restore, so its per-table counts are a usable drift baseline?
+ * True for `pre-encrypt` too — those counts come from an actual restore, just an earlier one. */
+export function hasRestoredCounts(kind: VerificationKind | undefined): boolean {
+  return kind !== "hash";
+}
+
+/** One object's re-hash candidacy: when its bytes were last confirmed, or null for never. */
+export interface RehashCandidate {
+  key: string;
+  /** ms since epoch of the newest PASSING `kind: "hash"` record, or null if it has never had one. */
+  lastHashedMs: number | null;
+}
+
+/**
+ * Which objects to re-hash this run, least-recently-hashed first, never-hashed before all.
+ *
+ * Hashing each object ONCE on first sight was sufficient while the aged RESTORE leg was the
+ * recurring proof. With the identity offline that leg is gone, so "the stored bytes are unchanged"
+ * became the only ongoing claim — and a claim made once is not ongoing. Re-hashing everything
+ * daily would download the whole corpus every night; rotating one object per run costs a single
+ * download and sweeps the lot.
+ *
+ * Deterministic on purpose (no randomness): the same state picks the same object, so a run is
+ * reproducible and the rotation is provably fair. Three properties fall out without special-casing:
+ *
+ *   - a MISSED run skips nothing — the queue head simply stays put;
+ *   - the budget lands on LONG-LIVED objects by itself. A daily copy lives 21 days and a full
+ *     sweep takes ~46, so its last-hash age never reaches the front of the queue; weekly and
+ *     monthly copies, which would otherwise sit unchecked for up to a year, do;
+ *   - never-hashed objects drain FIRST, which is also how a backlog of them gets cleared.
+ */
+export function selectRehashTargets(candidates: RehashCandidate[], perRun: number): string[] {
+  if (perRun <= 0) return [];
+  return [...candidates]
+    .sort((a, b) => {
+      if (a.lastHashedMs === b.lastHashedMs) return a.key < b.key ? -1 : a.key > b.key ? 1 : 0;
+      if (a.lastHashedMs === null) return -1; // never hashed outranks any hashed object
+      if (b.lastHashedMs === null) return 1;
+      return a.lastHashedMs - b.lastHashedMs; // oldest first
+    })
+    .slice(0, perRun)
+    .map((c) => c.key);
+}
+
+/**
+ * The staleness of the rotation itself: how long ago the LEAST-recently-hashed object was checked,
+ * in days, or null when nothing has ever been hashed and there is nothing to measure.
+ *
+ * A rotation that quietly stops — `rehash-per-run` set to 0, or a corpus growing faster than the
+ * budget — degrades coverage with no symptom at all, which is the exact failure class this work
+ * exists to close. Compare against `rehash-max-age-days` and page.
+ */
+export function oldestHashAgeDays(candidates: RehashCandidate[], nowMs: number): number | null {
+  if (candidates.length === 0) return null;
+  if (candidates.some((c) => c.lastHashedMs === null)) return Infinity; // never hashed is maximally stale
+  const oldest = Math.min(...candidates.map((c) => c.lastHashedMs as number));
+  return (nowMs - oldest) / 86_400_000;
 }
 
 // ── Public (scrubbed) payload inlined into the dashboard ──────────────────────
@@ -241,10 +333,52 @@ export interface PublicRun {
 }
 
 export interface PublicVerification {
-  vt: string; // verifiedTs
+  vt: string; // verifiedTs — the DUMP's stamp, i.e. which cell this is about
+  /** When the verification RAN. Several records share one `vt` (a pre-encrypt at dump time, a hash
+   * check every day after, a manual restore whenever someone runs one), so without this there is no
+   * way to tell whether a pass came before or after a failure. Absent on legacy records. */
+  t?: string;
   ok: boolean;
   ratio: number | null;
-  kind?: "restore" | "hash"; // for the dashboard tooltip; counts/reason/key/tier stay private
+  kind?: VerificationKind; // drives the cell state AND the tooltip; counts/reason/key/tier stay private
+  by?: "ci" | "manual"; // tooltip only — "restore-verified by hand on <date>" reads differently
+}
+
+/** How strong a claim each kind makes. Legacy records (no kind) were full restores. */
+export function verificationRank(kind: VerificationKind | undefined): number {
+  return kind === "hash" ? 1 : kind === "pre-encrypt" ? 2 : 3;
+}
+
+/**
+ * Which ONE record speaks for a dump, out of every verification recorded against it.
+ *
+ * A stamp now collects several: a `pre-encrypt` at dump time, a `hash` check every day after, and a
+ * `restore` if and when someone runs the manual drill. The old rule — first one wins, unless a
+ * passing record replaces a failing one — breaks both ways under that traffic:
+ *
+ *   - the pre-encrypt record arrives FIRST and passes, so a later manual restore could never take
+ *     the cell, and the bright green nobody could earn would never appear;
+ *   - a failure would be wiped by the next day's routine hash check, so a failed restore drill
+ *     would show amber for at most a day. Bytes being intact is entirely consistent with an object
+ *     that will not open — that is the one pass that must NOT clear that one failure.
+ *
+ * So: a failure stands until a LATER record of the same or stronger kind passes; otherwise the
+ * strongest passing claim wins. Records with no `t` (legacy) cannot be ordered, so a pass of
+ * sufficient rank is taken to clear them — which is what the old rule did.
+ */
+export function pickVerification(records: PublicVerification[]): PublicVerification | null {
+  if (records.length === 0) return null;
+  const at = (v: PublicVerification): number => (v.t ? Date.parse(v.t) : 0);
+  const strongestLatestFirst = (a: PublicVerification, b: PublicVerification): number =>
+    verificationRank(b.kind) - verificationRank(a.kind) || at(b) - at(a);
+
+  const passes = records.filter((v) => v.ok);
+  const clears = (p: PublicVerification, f: PublicVerification): boolean =>
+    verificationRank(p.kind) >= verificationRank(f.kind) && (at(p) === 0 || at(f) === 0 || at(p) > at(f));
+
+  const uncleared = records.filter((v) => !v.ok).filter((f) => !passes.some((p) => clears(p, f)));
+  if (uncleared.length > 0) return uncleared.sort(strongestLatestFirst)[0] ?? null;
+  return passes.sort(strongestLatestFirst)[0] ?? null;
 }
 
 /**

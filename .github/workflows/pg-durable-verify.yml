@@ -35,8 +35,12 @@ on:
     # Secrets passed EXPLICITLY by the caller (inherit only works same-org/enterprise; this repo is
     # owned by a different account than its consumers). Non-secret config is threaded via inputs.
     secrets:
-      PG_BACKUP_DATABASE_URL:   # read-only, used only as the live row-count reference
-        required: true
+      # Read-only, and used ONLY as the live row-count reference for a restore. Optional because
+      # verify-durable.keyless never restores, and a job that cannot use a production database
+      # credential should not be handed one. The profile's own validation is the real gate: without
+      # `keyless` the schema requires PG_LIVE_DATABASE_URL and the run fails before doing anything.
+      PG_BACKUP_DATABASE_URL:
+        required: false
       R2_ACCOUNT_ID:
         required: true
       R2_ACCESS_KEY_ID:

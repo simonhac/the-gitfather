@@ -7,12 +7,12 @@ keys). Credentials are **never** in it — they come from the environment (GitHu
 `name` (db shortname), `backup-prefix`, `timezone`, `encryption`, `anchor-hour-utc`. Groups:
 
 - **`dump:`** — `flags`, `client-major`, `min-bytes`
-- **`integrity:`** — `checksum`, `check-structure`, `verify-after-upload`
+- **`integrity:`** — `checksum`, `check-structure`, `verify-before-encrypt`, `verify-after-upload`
 - **`retention:`** — `grandson` / `son` / `father` / `grandfather` as natural-language durations
   (e.g. `13 weeks`, `2 years`); defaults `2 days` / `3 weeks` / `13 weeks` / `2 years`
 - **`drill:`** — `row-count-table`, `present-tables` (must exist), `nonempty-tables` (must exist +
   non-empty), `min-row-ratio`, `max-row-ratio`, `max-row-drop`
-- **`verify-durable:`** — `fresh`, `aged`, `retest-days`, `max-restores`
+- **`verify-durable:`** — `fresh`, `aged`, `retest-days`, `max-restores`, `keyless`, `rehash-per-run`, `rehash-max-age-days`, `drill-max-age-days`
 - **`archive:`** *(optional — see [Archiving a table out of Postgres](archiving.md))* — `store-prefix`, `encryption` (`none`|`age`), `compression` (`zstd`|`gzip`|`none`), `compression-level`, and `tables:` — a list of `{ table, time-column, archive-after-weeks, prune-after-weeks, delete-batch-rows, max-weeks-per-run }`
 - **`staleness:`** — `slot-minutes`, `grace-minutes`, `max-age-hours` (unset → derived from the cadence), `repage-minutes`, `heal-workflow`, `self-heal`, `dry-run`. Consumed by the [Worker's watchdog](../scheduler/README.md): the backup publishes the validated block to `_config/<name>/watchdog.json` on every run
 - **`credential-rotation:`** — `max-age-days` (default `365`; 0 disables) and `track:` — the credential prefixes to
@@ -34,10 +34,16 @@ The grammars are strict where a typo is genuinely catchable and lenient where th
 
 | Strict (catches typos) | Lenient (presence + light shape) |
 |---|---|
-| `encryption` ∈ {`none`,`age`,`aes-gcm`} · `anchor-hour-utc` 0–23 · `drill.min-row-ratio` 0–1 · `drill.max-row-ratio` ≥ 1 · `drill.max-row-drop` 0–1 · `staleness.max-age-hours` > slot + grace (unset → derived) · `staleness.slot-minutes` 1–1440 · `staleness.grace-minutes` 0–720 · `archive.*` (`compression` ∈ {`zstd`,`gzip`,`none`}, `encryption` ∈ {`none`,`age`}, per-table `prune-after-weeks` ≥ `archive-after-weeks`, no duplicate table entries, `delete-batch-rows` 1–500000, `max-weeks-per-run` 1–10000) · `credential-rotation.max-age-days` 0–3650 · `dump.min-bytes`/`verify-durable.retest-days`/`verify-durable.max-restores` (ints) · `timezone` (real IANA zone) · `retention.*` (durations like `13 weeks`) · booleans `staleness.self-heal`/`dry-run` · `integrity.checksum`/`check-structure`/`verify-after-upload` · `verify-durable.fresh`/`aged` (YAML `true`/`false` or `1/0/yes/no/on/off`) | credential ENV vars: `*_DATABASE_URL` scheme = `postgres(ql)://` · R2 account id / keys · bucket names (whitespace-free) · `AGE_RECIPIENT`/`AGE_IDENTITY` · `SLACK_BOT_TOKEN` · table-name lists (`drill.present-tables`/`nonempty-tables`) · `archive.store-prefix` / `tables[].table` / `time-column` · `AGE_ARCHIVE_RECIPIENT` · `credential-rotation.track` (a list of prefix names) |
+| `encryption` ∈ {`none`,`age`,`aes-gcm`} · `anchor-hour-utc` 0–23 · `drill.min-row-ratio` 0–1 · `drill.max-row-ratio` ≥ 1 · `drill.max-row-drop` 0–1 · `staleness.max-age-hours` > slot + grace (unset → derived) · `staleness.slot-minutes` 1–1440 · `staleness.grace-minutes` 0–720 · `archive.*` (`compression` ∈ {`zstd`,`gzip`,`none`}, `encryption` ∈ {`none`,`age`}, per-table `prune-after-weeks` ≥ `archive-after-weeks`, no duplicate table entries, `delete-batch-rows` 1–500000, `max-weeks-per-run` 1–10000) · `credential-rotation.max-age-days` 0–3650 · `dump.min-bytes`/`verify-durable.retest-days`/`verify-durable.max-restores` (ints) · `timezone` (real IANA zone) · `retention.*` (durations like `13 weeks`) · booleans `staleness.self-heal`/`dry-run` · `integrity.checksum`/`check-structure`/`verify-before-encrypt`/`verify-after-upload` · `verify-durable.fresh`/`aged` (YAML `true`/`false` or `1/0/yes/no/on/off`) | credential ENV vars: `*_DATABASE_URL` scheme = `postgres(ql)://` · R2 account id / keys · bucket names (whitespace-free) · `AGE_RECIPIENT`/`AGE_IDENTITY` · `SLACK_BOT_TOKEN` · table-name lists (`drill.present-tables`/`nonempty-tables`) · `archive.store-prefix` / `tables[].table` / `time-column` · `AGE_ARCHIVE_RECIPIENT` · `credential-rotation.track` (a list of prefix names) |
 
 Conditional rules are enforced too: `encryption: age` ⇒ `AGE_RECIPIENT` (backup) / `AGE_IDENTITY`
-(drill, durable-verify); `integrity.verify-after-upload` + `encryption: age` ⇒ `AGE_IDENTITY` (backup);
+(drill, and durable-verify **unless** `verify-durable.keyless`, which instead REFUSES an identity and
+needs no database at all — a missing key must fail the run, never quietly reduce it to a hash-only
+check that still reports success, so the two situations are told apart by a declaration rather than
+by an absence); `integrity.verify-after-upload` + `encryption: age` ⇒ `AGE_IDENTITY` (backup);
+`integrity.verify-before-encrypt` ⇒ `drill.row-count-table` + `DRILL_DATABASE_URL` but **never**
+`AGE_IDENTITY`; `expect-recipient` set ⇒ it must equal `AGE_RECIPIENT`, or the config is rejected
+before the dump rather than after a bucket of unopenable objects has accumulated;
 `SLACK_BOT_TOKEN` set ⇒ `SLACK_CHANNEL`; an `archive:` block ⇒ `archive.store-prefix`, at least
 one entry in `archive.tables`, and `PG_ARCHIVE_DATABASE_URL`; `archive.encryption: age` ⇒
 `AGE_ARCHIVE_RECIPIENT`. Real credential/endpoint validity isn't guessed from a regex;

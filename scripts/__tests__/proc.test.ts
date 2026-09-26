@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { run, runToFile, pipeToFile, capture, captureStderr, sha256File, commandExists } from "../lib/proc.js";
+import { run, runToFile, capture, captureStderr, sha256File, commandExists } from "../lib/proc.js";
 
 const scratch = mkdtempSync(join(tmpdir(), "proc-test-"));
 
@@ -17,27 +17,6 @@ test("runToFile: streams stdout to the file and resolves 0", async () => {
 
 test("runToFile: a missing command resolves 127 (never rejects → fail() can run)", async () => {
   const code = await runToFile("definitely-not-a-real-binary-xyz", [], join(scratch, "b.txt"));
-  assert.equal(code, 127);
-});
-
-test("pipeToFile: pipes a→b to the file and resolves 0", async () => {
-  const out = join(scratch, "c.txt");
-  const code = await pipeToFile({ cmd: "printf", args: ["piped"] }, { cmd: "cat", args: [] }, out);
-  assert.equal(code, 0);
-  assert.equal(readFileSync(out, "utf8"), "piped");
-});
-
-test("pipeToFile: pipefail — a non-zero LEFT wins even though right (cat) exits 0", async () => {
-  const code = await pipeToFile({ cmd: "sh", args: ["-c", "exit 3"] }, { cmd: "cat", args: [] }, join(scratch, "d.txt"));
-  assert.equal(code, 3);
-});
-
-test("pipeToFile: a missing LEFT command resolves 127 and does not hang", async () => {
-  const code = await pipeToFile(
-    { cmd: "definitely-not-a-real-binary-xyz", args: [] },
-    { cmd: "cat", args: [] },
-    join(scratch, "e.txt"),
-  );
   assert.equal(code, 127);
 });
 

@@ -117,6 +117,24 @@ function probeCredentialAge(cfg: Profile): ProbeResult[] {
 
 async function probeVerifyDurable(): Promise<ProbeResult[]> {
   const cfg = loadVerifyDurableConfig();
+  // A keyless run never restores, so probing a drill target, a live database, pg_restore or age
+  // would fail a CORRECTLY configured profile — and a preflight that cries wolf on a good config is
+  // one people learn to ignore. Probe only what this shape actually uses: R2, and Slack.
+  if (cfg.verifyDurable.keyless) {
+    const r2 = cfg.credentials.r2;
+    configureRcloneRemote("r2", r2.accountId!, r2.accessKeyId!, r2.secretAccessKey!);
+    return [
+      checkBinary("rclone"),
+      checkR2("r2", r2.bucket!, "R2 dump bucket"),
+      {
+        name: "verify-durable mode",
+        ok: true,
+        detail: "keyless — hash checks only; no AGE_IDENTITY, no database, no restores",
+      },
+      ...(await maybeSlack(cfg)),
+      ...probeCredentialAge(cfg),
+    ];
+  }
   return [...(await probeRestore(cfg)), ...probeCredentialAge(cfg)];
 }
 
