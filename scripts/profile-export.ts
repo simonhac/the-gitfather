@@ -17,6 +17,7 @@ import { buildRawProfile } from "./lib/profile.js";
 const raw = buildRawProfile() as {
   dump?: { clientMajor?: unknown };
   encryption?: unknown;
+  integrity?: { verifyBeforeEncrypt?: unknown };
   archive?: { encryption?: unknown; compression?: unknown };
 };
 const clientMajor = raw.dump?.clientMajor;
@@ -27,7 +28,15 @@ const encryption = typeof raw.encryption === "string" ? raw.encryption : "none";
 const archiveEncryption = typeof raw.archive?.encryption === "string" ? raw.archive.encryption : "age";
 const archiveCompression = typeof raw.archive?.compression === "string" ? raw.archive.compression : "zstd";
 
+// Read tolerantly like everything else here, but note the asymmetry: an unreadable value must come
+// out FALSE, so a malformed profile skips starting a database rather than starting one the backup
+// then fails to use. The backup's own zod validation is what rejects the profile properly.
+const vbe = raw.integrity?.verifyBeforeEncrypt;
+const verifyBeforeEncrypt =
+  vbe === true || (typeof vbe === "string" && ["1", "true", "yes", "on"].includes(vbe.trim().toLowerCase()));
+
 process.stdout.write(`PG_CLIENT_MAJOR=${pgClientMajor}\n`);
 process.stdout.write(`ENCRYPTION=${encryption}\n`);
+process.stdout.write(`VERIFY_BEFORE_ENCRYPT=${verifyBeforeEncrypt}\n`);
 process.stdout.write(`ARCHIVE_ENCRYPTION=${archiveEncryption}\n`);
 process.stdout.write(`ARCHIVE_COMPRESSION=${archiveCompression}\n`);

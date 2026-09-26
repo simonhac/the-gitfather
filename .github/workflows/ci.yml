@@ -24,14 +24,53 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
+    # Two test files need a real Postgres and SKIP without one. Until this service existed they
+    # skipped on EVERY CI run — green, and proving nothing — which is exactly the trap they were
+    # written to close: `archive-integration.test.ts` covers psql round-tripping of nasty rows and
+    # the fingerprint agreement, and `verify-dump-file-integration.test.ts` covers the property the
+    # whole keyless design rests on (a dump can be proved to restore with no decrypt key in scope).
+    # A skipped test is invisible inside a passing job, so neither was ever run here.
+    services:
+      pg:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
           cache: npm
+      # Both inputs matter now that the integration tests actually run here, and the assertion
+      # below turns a skip into a failure: without `pg-client-major` the runner's preinstalled
+      # (older) psql/pg_restore refuses to talk to the postgres:17 service, and without
+      # `install-age` the archive test's age sub-test skips. Every sibling workflow in this repo
+      # already passes both; this job did not, because nothing here had ever needed them.
       - uses: ./.github/actions/setup-tools
+        with:
+          pg-client-major: "17"
+          install-age: "true"
       - run: npm ci
       - run: npm run typecheck
       - run: npm run lint
-      - run: npm test
+      # A skipped test still reports green, so the run is asserted to have skipped NOTHING. Without
+      # that, removing the service or typo'ing its URL would put CI straight back to proving less
+      # than it appears to — which is the failure this whole job exists to stop, so it should not
+      # be guarded by a comment.
+      - name: Test (integration tests must actually run)
+        env:
+          DRILL_TEST_DATABASE_URL: postgresql://postgres:ci@localhost:5432/postgres?sslmode=disable
+          ARCHIVE_TEST_DATABASE_URL: postgresql://postgres:ci@localhost:5432/postgres?sslmode=disable
+        run: |
+          set -euo pipefail
+          npm test 2>&1 | tee /tmp/test.out
+          if ! grep -qE "^# skipped 0$" /tmp/test.out; then
+            echo "::error::a test SKIPPED — Postgres unreachable? CI proved less than its green tick suggests"
+            grep -E "SKIPPED|^# skipped" /tmp/test.out || true
+            exit 1
+          fi

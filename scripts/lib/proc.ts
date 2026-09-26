@@ -3,15 +3,14 @@
 //
 // Two distinct concerns, because the data plane is multi-GB:
 //   • DATA-PLANE (pg_dump / age / pg_restore / rclone download): use spawn() wired
-//     to OS file descriptors and pipes so bytes NEVER transit the V8 heap. The shell
-//     equivalents (`pg_dump > out`, `pg_dump | age > out`) buffer nothing; neither do
-//     runToFile()/pipeToFile() here. (execFileSync's default 1 MiB maxBuffer would
-//     throw on a real dump — see runlog.ts, which only ever handles tiny outputs.)
+//     to OS file descriptors so bytes NEVER transit the V8 heap. The shell equivalent
+//     (`pg_dump > out`) buffers nothing; neither does runToFile() here. (execFileSync's
+//     default 1 MiB maxBuffer would throw on a real dump — see runlog.ts, which only
+//     ever handles tiny outputs.)
 //   • CONTROL-PLANE (rclone lsf/cat/copyto of jsonl + small objects, gh, psql counts):
 //     small, bounded output — capture() via spawnSync, mirroring runlog.ts:28-35.
 //
-// `set -euo pipefail` fidelity: each helper resolves a numeric exit code; pipeToFile()
-// awaits BOTH children and reports failure if EITHER is non-zero (Node has no pipefail).
+// Each helper resolves a numeric exit code rather than throwing.
 // Best-effort `|| true` legs are modelled by bestEffort(); fatal `|| fail` legs stay the
 // caller's responsibility (each script owns a fatal() that records ❌ then process.exit(1)).
 // ─────────────────────────────────────────────────────────────────────────────
@@ -95,95 +94,6 @@ export function runToFile(
 }
 
 /**
- * `a aArgs | b bArgs > outPath` with pipefail semantics. Spawns both children, wires
- * a.stdout → b.stdin and b.stdout → the file fd, awaits BOTH, and resolves the FIRST non-zero
- * exit code (0 only if both succeed). This is the safety-critical piece: `age` exits 0 on a
- * truncated stream, so checking only the right-hand process would mask a pg_dump failure (the
- * dump.min-bytes floor in the caller is the second line of defence). A spawn-time error on either
- * child kills the other and resolves 127 — never rejects, so fail() still runs.
- */
-export function pipeToFile(
-  a: { cmd: string; args: string[] },
-  b: { cmd: string; args: string[] },
-  outPath: string,
-  env: Env = process.env,
-  opts: { onStderrA?: (chunk: string) => void; onStderrB?: (chunk: string) => void } = {},
-): Promise<number> {
-  const fd = openSync(outPath, "w");
-  return new Promise((resolve) => {
-    let settled = false;
-    let aCode: number | null = null;
-    let bCode: number | null = null;
-    let closed = 0;
-
-    const finish = (code: number) => {
-      if (settled) return;
-      settled = true;
-      try {
-        closeSync(fd);
-      } catch {
-        /* ignore */
-      }
-      resolve(code);
-    };
-
-    // Each child's stderr is captured SEPARATELY when asked for. Merging them would let the
-    // encryptor's noise be classified as a dump failure (or vice versa) — the two legs fail for
-    // completely different reasons and only the left one speaks libpq.
-    const left = spawn(a.cmd, a.args, { stdio: ["ignore", "pipe", opts.onStderrA ? "pipe" : "inherit"], env });
-    const right = spawn(b.cmd, b.args, { stdio: ["pipe", fd, opts.onStderrB ? "pipe" : "inherit"], env });
-    if (opts.onStderrA) {
-      left.stderr?.setEncoding("utf8");
-      left.stderr?.on("data", (chunk: string) => opts.onStderrA!(chunk));
-    }
-    if (opts.onStderrB) {
-      right.stderr?.setEncoding("utf8");
-      right.stderr?.on("data", (chunk: string) => opts.onStderrB!(chunk));
-    }
-
-    if (left.stdout && right.stdin) {
-      // If `right` dies first, swallow the resulting EPIPE on the left's stdout rather
-      // than crashing the process with an unhandled 'error'.
-      left.stdout.on("error", () => {});
-      left.stdout.pipe(right.stdin);
-    }
-
-    left.on("error", (e) => {
-      process.stderr.write(`${a.cmd}: ${(e as Error).message}\n`);
-      try {
-        right.kill();
-      } catch {
-        /* ignore */
-      }
-      finish(127);
-    });
-    right.on("error", (e) => {
-      process.stderr.write(`${b.cmd}: ${(e as Error).message}\n`);
-      try {
-        left.kill();
-      } catch {
-        /* ignore */
-      }
-      finish(127);
-    });
-
-    const maybeDone = () => {
-      if (closed === 2) finish(aCode ? aCode : (bCode ?? 0)); // pipefail: leftmost non-zero wins
-    };
-    left.on("close", (code) => {
-      aCode = code ?? 1;
-      closed++;
-      maybeDone();
-    });
-    right.on("close", (code) => {
-      bCode = code ?? 1;
-      closed++;
-      maybeDone();
-    });
-  });
-}
-
-/**
  * Run `cmd args` and capture its stdout — for rclone lsf/cat/copyto and psql counts. Returns
  * ok=false (not a throw) on non-zero so the caller can distinguish "command ran, empty result"
  * from "command failed". stderr is RETURNED rather than discarded — it used to go to /dev/null,
@@ -191,7 +101,7 @@ export function pipeToFile(
  * only ever be reported as "could not count". Nothing prints it; a caller that wants it asks.
  * maxBuffer is raised to 256 MiB so a long-retention recursive `rclone lsf -R` listing
  * cannot trip the default 1 MiB limit (which would masquerade as an empty bucket). Do NOT use
- * this for a dump-sized stream — that path uses runToFile/pipeToFile.
+ * this for a dump-sized stream — that path uses runToFile.
  */
 export function capture(cmd: string, args: string[], env: Env = process.env): { ok: boolean; out: string; stderr: string } {
   const r = spawnSync(cmd, args, {
@@ -207,7 +117,7 @@ export function capture(cmd: string, args: string[], env: Env = process.env): { 
 }
 
 /**
- * A bounded stderr sink for runToFile/pipeToFile. Writes every chunk THROUGH to this process's
+ * A bounded stderr sink for runToFile. Writes every chunk THROUGH to this process's
  * stderr (so the job log is byte-identical to the inherit-only behaviour) while retaining the
  * first `maxBytes` for classification. The head is kept, not the tail: libpq reports the causal
  * error first and everything after it is cascade.

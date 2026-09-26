@@ -77,3 +77,52 @@ test("pgConn: a literal '%' in the password does not throw (URIError) and round-
     c.cleanup();
   }
 });
+
+// ── An ambient PGSSLROOTCERT must not override the URL's stated sslmode ──────
+// libpq refuses `sslrootcert=system` with any sslmode below verify-ca, so an env var the caller
+// never set makes the tool decline to connect at all. The URL is the caller's intent; env is not.
+
+const sslEnv = (url: string): NodeJS.ProcessEnv => {
+  const prev = process.env.PGSSLROOTCERT;
+  process.env.PGSSLROOTCERT = "system";
+  try {
+    return pgConn(url).env;
+  } finally {
+    if (prev === undefined) delete process.env.PGSSLROOTCERT;
+    else process.env.PGSSLROOTCERT = prev;
+  }
+};
+
+test("pgConn drops PGSSLROOTCERT=system for the sslmodes libpq refuses to pair it with", () => {
+  for (const mode of ["disable", "allow", "prefer", "require"]) {
+    assert.equal(
+      sslEnv(`postgresql://u:p@h:5432/db?sslmode=${mode}`).PGSSLROOTCERT,
+      undefined,
+      `sslmode=${mode} must not keep sslrootcert=system`,
+    );
+  }
+});
+
+test("pgConn KEEPS PGSSLROOTCERT=system when the URL actually verifies", () => {
+  // Dropping it here would silently weaken a connection that asked to be verified — the opposite
+  // failure, and a much worse one than an error message.
+  for (const mode of ["verify-ca", "verify-full"]) {
+    assert.equal(sslEnv(`postgresql://u:p@h:5432/db?sslmode=${mode}`).PGSSLROOTCERT, "system", mode);
+  }
+});
+
+test("pgConn leaves PGSSLROOTCERT alone when the URL names no sslmode, and when it is not 'system'", () => {
+  assert.equal(sslEnv("postgresql://u:p@h:5432/db").PGSSLROOTCERT, "system", "no sslmode → no opinion");
+  const prev = process.env.PGSSLROOTCERT;
+  process.env.PGSSLROOTCERT = "/etc/ssl/my-root.crt";
+  try {
+    assert.equal(pgConn("postgresql://u:p@h:5432/db?sslmode=require").env.PGSSLROOTCERT, "/etc/ssl/my-root.crt");
+  } finally {
+    if (prev === undefined) delete process.env.PGSSLROOTCERT;
+    else process.env.PGSSLROOTCERT = prev;
+  }
+});
+
+test("pgConn applies the same rule to a passwordless URL (the early-return path)", () => {
+  assert.equal(sslEnv("postgresql://localhost:5432/postgres?sslmode=disable").PGSSLROOTCERT, undefined);
+});

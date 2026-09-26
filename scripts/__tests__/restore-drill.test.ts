@@ -1,6 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { checkRestoredTables, evalRowRatio, stampToIso, extForEncryption, isDumpObject, type TableProbe } from "../restore-drill-pg.js";
+import { checkRestoredTables, evalRowRatio, stampToIso, extForEncryption, isDumpObject, planDecrypt, type TableProbe } from "../restore-drill-pg.js";
+
+test("planDecrypt dispatches on the object's OWN extension, not the configured encryption", () => {
+  assert.deepEqual(planDecrypt("daily/boost-20260925T160306Z.dump.age"), { kind: "age" });
+  // The CB-265 failure mode in miniature: a bucket holds both generations for a whole retention
+  // window after the `encryption:` flip, so a plaintext object must still copy while the profile
+  // says age. Nothing is passed here but the key, which is the point — there is no config to get
+  // wrong, because the signature has nowhere to put it.
+  assert.deepEqual(planDecrypt("monthly/boost-20260901T160102Z.dump"), { kind: "copy" });
+  assert.equal(planDecrypt("weekly/boost-20260920T160000Z.dump.enc").kind, "unsupported");
+});
 
 test("extForEncryption maps the encryption mode to the object extension", () => {
   assert.equal(extForEncryption("none"), "dump");

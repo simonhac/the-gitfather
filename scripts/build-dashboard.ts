@@ -142,7 +142,7 @@ function scrub(
     // Privacy: drop key + raw error text; keep label, sizes, tiers, run links (toggleable).
     runs: runs.map((r) => ({ t: r.ts, ok: r.ok, tiers: r.tiers, bytes: r.bytes, runUrl: hideLinks ? null : r.runUrl })),
     // kind drives the tooltip wording (restore vs byte-check); counts/reason/key/tier stay private.
-    verifications: verifications.map((v) => ({ vt: v.verifiedTs, ok: v.ok, ratio: v.ratio, kind: v.kind })),
+    verifications: verifications.map((v) => ({ vt: v.verifiedTs, t: v.ts, ok: v.ok, ratio: v.ratio, kind: v.kind, by: v.by })),
   };
 
   const order = archiveTableOrder(archives, archiveSpecs);

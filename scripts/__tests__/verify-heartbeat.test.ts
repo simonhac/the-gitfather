@@ -69,3 +69,54 @@ test("capability is checked even when a restore somehow happened", () => {
   assert.equal(w({ canRestore: false, restoresThisRun: 5 }).allowed, false);
   assert.equal(w({ maxRestores: 0, restoresThisRun: 5 }).allowed, false);
 });
+
+// ── Keyless mode (CB-303) ───────────────────────────────────────────────────
+// A job that deliberately cannot restore, because the age identity is offline. Its claim is
+// narrower — "the stored bytes are unchanged" — and it must still be able to make it.
+
+/** What a healthy keyless run looks like: no restore is possible, and one object was re-hashed. */
+const KEYLESS: VerifyHeartbeatInputs = {
+  failures: 0,
+  listingOk: true,
+  objectCount: 37,
+  canRestore: false, // hard-set by keyless mode, not a broken runner
+  restoreLegEnabled: false,
+  maxRestores: 0,
+  restoresThisRun: 0,
+  recentRestoreOnRecord: false,
+  keyless: true,
+  hashesThisRun: 1,
+};
+const k = (o: Partial<VerifyHeartbeatInputs>) => verifyHeartbeatVerdict({ ...KEYLESS, ...o });
+
+test("keyless: a clean run DOES publish its proof — the regression that started CB-303's rework", () => {
+  // Before this branch existed, `!canRestore` returned allowed:false, which keyless sets
+  // unconditionally. The proof was therefore withheld on EVERY run, forever, and /health/jobs
+  // would have reported the job dead ~30h after it shipped while the job itself exited 0 nightly.
+  assert.deepEqual(verifyHeartbeatVerdict(KEYLESS), { allowed: true });
+});
+
+test("keyless: nothing hash-checked this run withholds the proof", () => {
+  // Not a free pass. The rotating re-hash guarantees something is always due, so this is a
+  // REACHABLE failure meaning "nobody checked anything today" — the condition the whole gate
+  // exists to catch, preserved in the mode that no longer restores.
+  const v = k({ hashesThisRun: 0 });
+  assert.equal(v.allowed, false);
+  assert.match((v as { reason: string }).reason, /nothing was hash-checked/);
+});
+
+test("keyless: a hash-check FAILURE still withholds the proof", () => {
+  assert.equal(k({ failures: 1 }).allowed, false);
+});
+
+test("keyless: an incomplete listing or an empty corpus still withholds the proof", () => {
+  assert.equal(k({ listingOk: false }).allowed, false);
+  assert.equal(k({ objectCount: 0 }).allowed, false);
+});
+
+test("keyless does not leak into normal mode: an unrestorable non-keyless run is still withheld", () => {
+  // The old clauses must be untouched — this is the case that made the gate worth having.
+  const v = w({ canRestore: false });
+  assert.equal(v.allowed, false);
+  assert.match((v as { reason: string }).reason, /restorability was not tested/);
+});

@@ -10,6 +10,8 @@ import {
   SLOTS_PER_DAY,
   HOURS_PER_SLOT,
   DAYS_PER_WEEK,
+  provesStoredObjectRestores,
+  pickVerification,
   type RetentionMap,
   type PublicRun,
   type PublicVerification,
@@ -182,7 +184,14 @@ export function deriveState(
   if (now >= retainedUntil(run, retention)) return "expired";
   // A matching verification that FAILED → "unverified" (amber): the backup exists but a restore/hash
   // drill failed. run.ok short-circuited above, so this can never be confused with a failed BACKUP.
-  return verification ? (verification.ok ? "verified" : "unverified") : "ok";
+  if (!verification) return "ok";
+  if (!verification.ok) return "unverified";
+  // A PASS is not automatically "verified". The legend promises that the bright cell means the
+  // stored object was restored, so only a record that proves THAT may set it — see
+  // provesStoredObjectRestores. This line used to read `verification.ok ? "verified" : …`, which
+  // painted a byte-integrity check identically to a full restore and quietly overstated every
+  // hash-only cell.
+  return provesStoredObjectRestores(verification.kind) ? "verified" : "ok";
 }
 
 /**
@@ -277,11 +286,20 @@ export function buildBackupGrid(payload: PublicPayload, now: Date, weeks = 52): 
   const nowMs = now.getTime();
   const retention = payload.retention ?? DEFAULT_RETENTION;
 
-  const verByTs = new Map<string, PublicVerification>();
+  // Collect ALL records per stamp, then let pickVerification choose which one speaks for the dump.
+  // Folding them in as they arrive cannot work any more: the strongest claim is not the first to
+  // land, and a routine hash check must not clear a failed restore. See pickVerification.
+  const byTs = new Map<string, PublicVerification[]>();
   for (const v of payload.verifications) {
     const k = new Date(v.vt).toISOString();
-    const existing = verByTs.get(k);
-    if (!existing || (v.ok && !existing.ok)) verByTs.set(k, v);
+    const bucket = byTs.get(k);
+    if (bucket) bucket.push(v);
+    else byTs.set(k, [v]);
+  }
+  const verByTs = new Map<string, PublicVerification>();
+  for (const [k, records] of byTs) {
+    const picked = pickVerification(records);
+    if (picked) verByTs.set(k, picked);
   }
 
   const currentWeekStart = currentWeekStartOrdinal(now);

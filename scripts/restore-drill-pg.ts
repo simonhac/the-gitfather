@@ -12,6 +12,11 @@ import "./lib/bootEnv.js"; // MUST be first — loads $PROFILE before backupType
 // (verify-durable-pg.ts) can restore a SPECIFIC durable key, not just the newest 2hourly object.
 // Every drill — pass OR fail — now records a verification (gap #5: failed drills were unlogged).
 //
+// drillObject() is itself just materialiseDump() + verifyDumpFile(), split so that the half which
+// needs the decrypt key is separable from the half which does not. Only fetching needs an identity;
+// proving a dump restores never does. That is what lets the backup job verify its own plaintext
+// BEFORE encrypting it, so no AGE_IDENTITY has to live in CI at all (CB-303).
+//
 // Usage:
 //   PROFILE=profiles/example.yaml npx tsx scripts/restore-drill-pg.ts
 //
@@ -34,9 +39,9 @@ import { loadLog, stampFromKey } from "./lib/logStore.js";
 import { appendVerify } from "./runlog.js";
 import { slackOneoff, alertWebhook, failAlertText } from "./lib/slack.js";
 import { githubLogUrl } from "./lib/github.js";
-import type { BackupTier } from "./lib/backupTypes.js";
+import { hasRestoredCounts, type BackupTier } from "./lib/backupTypes.js";
 
-/** Throwaway database every restore is (re)created into — see drillObject()'s "Pristine restore target". */
+/** Throwaway database every restore is (re)created into — see verifyDumpFile()'s "Pristine restore target". */
 const SCRATCH_DB = "gitfather_drill";
 
 /** ISO-8601 UTC to seconds precision (matches bash `date -u +%Y-%m-%dT%H:%M:%SZ`). */
@@ -56,8 +61,8 @@ export function extForEncryption(encryption: string): string {
  * holds both generations for a whole retention window after `encryption:` changes, and pinning the
  * filter to today's setting makes yesterday's objects invisible rather than absent — which is how
  * a durable-verify run once passed on 1 object out of 35, silently, the day dumps were encrypted.
- * The decrypt path in drillObject() already dispatches on each object's OWN extension, so every
- * generation this matches genuinely restores.
+ * planDecrypt() already dispatches on each object's OWN extension, so every generation this
+ * matches genuinely restores.
  */
 export function isDumpObject(name: string): boolean {
   return /\.dump(\.age|\.enc)?$/.test(name);
@@ -97,8 +102,11 @@ export function drillCoreFromProfile(cfg: Profile): DrillCoreConfig {
   return {
     backupPrefix: cfg.backupPrefix!,
     r2Bucket: cfg.credentials.r2.bucket!,
-    drillDatabaseUrl: cfg.credentials.drillDatabaseUrl!,
-    liveDatabaseUrl: cfg.credentials.liveDatabaseUrl!,
+    // Empty rather than `!` when unset: verify-durable.keyless never restores, so its schema does
+    // not require these. A `!` on undefined would type as string and reach pgConn as the literal
+    // "undefined"; an empty string fails immediately and says what it is.
+    drillDatabaseUrl: cfg.credentials.drillDatabaseUrl ?? "",
+    liveDatabaseUrl: cfg.credentials.liveDatabaseUrl ?? "",
     rowCountTable: cfg.drill.rowCountTable!,
     presentTables: cfg.drill.presentTables,
     nonemptyTables: cfg.drill.nonemptyTables,
@@ -178,6 +186,66 @@ export function evalRowRatio(
   return { ok: true, ratio, reason: null };
 }
 
+/**
+ * The fields needed to FETCH and decrypt an object. Deliberately excludes the database URLs:
+ * getting the bytes never touches Postgres.
+ */
+export type DumpFetchConfig = Pick<DrillCoreConfig, "backupPrefix" | "r2Bucket" | "ageIdentity">;
+
+/**
+ * The fields needed to VERIFY a dump file that is already plaintext on disk. Deliberately excludes
+ * `ageIdentity`, and the type is what enforces it rather than a comment: verifying a dump NEVER
+ * needs the decrypt key. That is what lets the backup job verify its own pre-encryption plaintext
+ * with no identity anywhere in its environment — see the CB-303 note on materialiseDump().
+ */
+export type DumpVerifyConfig = Omit<DrillCoreConfig, "backupPrefix" | "r2Bucket" | "ageIdentity" | "encryption">;
+
+/** How an object's OWN extension says to turn it into a plain custom-format dump. */
+export type DecryptPlan =
+  | { kind: "copy" }
+  | { kind: "age" }
+  | { kind: "unsupported"; reason: string };
+
+/**
+ * Decide how to decrypt from the object's OWN extension — never from the configured `encryption`.
+ * A bucket legitimately holds several generations at once (see isDumpObject), so dispatching on
+ * today's setting would mis-handle yesterday's objects. Pure, so the dispatch is testable without
+ * R2, a key or a database.
+ */
+export function planDecrypt(key: string): DecryptPlan {
+  if (key.endsWith(".dump.age")) return { kind: "age" };
+  if (key.endsWith(".dump.enc")) {
+    return { kind: "unsupported", reason: "object is aes-gcm encrypted but decrypt is not implemented yet" };
+  }
+  return { kind: "copy" };
+}
+
+export interface MaterialiseDumpOpts {
+  /** Key UNDER backup-prefix, e.g. "2hourly/<file>" or "daily/<file>". */
+  key: string;
+  cfg: DumpFetchConfig;
+  tmp: string;
+}
+
+export interface MaterialiseDumpResult {
+  ok: boolean;
+  /** Path to the plain custom-format dump, or null when `ok` is false. */
+  dumpPath: string | null;
+  reason: string | null;
+}
+
+export interface VerifyDumpFileOpts {
+  /** A plain custom-format dump already on disk. NOT deleted — the caller owns it. */
+  dumpPath: string;
+  gate: DrillGate;
+  cfg: DumpVerifyConfig;
+  tmp: string;
+  /** Prior passing drill's per-table counts, for the optional drill.max-row-drop gate. */
+  priorCounts?: Record<string, number> | null;
+  /** The sentinel's row count recorded AT DUMP TIME, when known. See DrillObjectOpts.refCount. */
+  refCount?: number | null;
+}
+
 export interface DrillObjectOpts {
   /** Key UNDER backup-prefix, e.g. "2hourly/<file>" or "daily/<file>". */
   key: string;
@@ -201,18 +269,16 @@ export interface DrillObjectResult {
 }
 
 /**
- * Download one object, decrypt/decompress, pg_restore it into the throwaway target, and assert the
- * restored data. Returns a result (does NOT exit) so a caller can record + alert + continue. Cleans
- * up its own scratch files so it can be called repeatedly within one tmp dir.
+ * Download one object from R2 and turn it into a plain custom-format dump on disk. This is the ONLY
+ * half of a drill that needs the decrypt key — which is precisely why it is a separate function
+ * (CB-303): verifyDumpFile() below can then prove a dump restores with no identity in scope at all,
+ * so the backup job can verify its own plaintext BEFORE encrypting and CI never has to hold the key.
+ *
+ * Cleans up its own scratch files so it can be called repeatedly within one tmp dir.
  */
-export async function drillObject(opts: DrillObjectOpts): Promise<DrillObjectResult> {
-  const { key, gate, cfg, tmp } = opts;
-  // Keep the DB passwords off pg_restore/psql argv — they ride in 0600 PGPASSFILEs under `tmp`
-  // (removed wholesale when the caller tears `tmp` down, so no per-call cleanup needed here). The
-  // `drill` connection is built below, AFTER the scratch DB is (re)created, so it targets a fresh DB.
-  const live = pgConn(cfg.liveDatabaseUrl, tmp);
-  const counts: Record<string, number> = {};
-  const done = (ok: boolean, ratio: number | null, reason: string | null): DrillObjectResult => ({ ok, ratio, counts, reason });
+export async function materialiseDump(opts: MaterialiseDumpOpts): Promise<MaterialiseDumpResult> {
+  const { key, cfg, tmp } = opts;
+  const fail = (reason: string): MaterialiseDumpResult => ({ ok: false, dumpPath: null, reason });
 
   const obj = join(tmp, "obj");
   const dump = join(tmp, "restore.dump");
@@ -221,13 +287,15 @@ export async function drillObject(opts: DrillObjectOpts): Promise<DrillObjectRes
 
   console.log(`Downloading r2:${cfg.r2Bucket}/${cfg.backupPrefix}/${key} …`);
   const dlCode = await run("rclone", ["copyto", `r2:${cfg.r2Bucket}/${cfg.backupPrefix}/${key}`, obj, "--s3-no-check-bucket"]);
-  if (dlCode !== 0) return done(false, null, "download failed");
+  if (dlCode !== 0) return fail("download failed");
 
   // ── Decrypt / decompress to a plain custom-format dump ─────────────────────
-  if (key.endsWith(".dump.age")) {
-    if (!commandExists("age")) return done(false, null, "object is .age but 'age' not found");
+  const plan = planDecrypt(key);
+  if (plan.kind === "unsupported") return fail(plan.reason);
+  if (plan.kind === "age") {
+    if (!commandExists("age")) return fail("object is .age but 'age' not found");
     const identity = cfg.ageIdentity;
-    if (!identity) return done(false, null, "object is .age but AGE_IDENTITY is unset");
+    if (!identity) return fail("object is .age but AGE_IDENTITY is unset");
     let isRegularFile = false;
     try {
       isRegularFile = statSync(identity).isFile();
@@ -242,12 +310,29 @@ export async function drillObject(opts: DrillObjectOpts): Promise<DrillObjectRes
       writeFileSync(idfile, identity, { mode: 0o600 });
     }
     const code = await runToFile("age", ["-d", "-i", idfile, obj], dump);
-    if (code !== 0) return done(false, null, "age decrypt failed");
-  } else if (key.endsWith(".dump.enc")) {
-    return done(false, null, "object is aes-gcm encrypted but decrypt is not implemented yet");
+    if (code !== 0) return fail("age decrypt failed");
   } else {
     copyFileSync(obj, dump);
   }
+
+  return { ok: true, dumpPath: dump, reason: null };
+}
+
+/**
+ * pg_restore a plain custom-format dump into the throwaway target and assert the restored data.
+ * Returns a result (does NOT exit) so a caller can record + alert + continue.
+ *
+ * Takes a dump FILE, not an object key, and never deletes it — so the same gates run against an
+ * object fetched from R2 (via materialiseDump) or against a dump that has not been uploaded yet.
+ * Needs no decrypt key; see DumpVerifyConfig, whose type enforces that.
+ */
+export async function verifyDumpFile(opts: VerifyDumpFileOpts): Promise<DrillObjectResult> {
+  const { dumpPath: dump, gate, cfg, tmp } = opts;
+  // Keep the DB passwords off pg_restore/psql argv — they ride in 0600 PGPASSFILEs under `tmp`
+  // (removed wholesale when the caller tears `tmp` down, so no per-call cleanup needed here). The
+  // `drill` connection is built below, AFTER the scratch DB is (re)created, so it targets a fresh DB.
+  const counts: Record<string, number> = {};
+  const done = (ok: boolean, ratio: number | null, reason: string | null): DrillObjectResult => ({ ok, ratio, counts, reason });
 
   // ── Pristine restore target ────────────────────────────────────────────────
   // Every restore MUST start against an EMPTY database. A verify-durable job runs several restores
@@ -294,12 +379,19 @@ export async function drillObject(opts: DrillObjectOpts): Promise<DrillObjectRes
     const r = capture("psql", [drill.safeUrl, "-tAc", `SELECT count(*) FROM public.${table}`], drill.env);
     return { ok: r.ok, count: Number(r.out.replace(/\s/g, "")) || 0 };
   };
-  const liveEst = (table: string): string =>
-    capture("psql", [
+  // Built HERE, not at the top of the function: only the "live-ratio" gate consults a live
+  // database, and the manual drill (drill-object.ts) deliberately runs with no PG_LIVE_DATABASE_URL
+  // at all, so `cfg.liveDatabaseUrl` is legitimately "". Constructing it eagerly made `new URL("")`
+  // throw `TypeError: Invalid URL` and killed the manual drill in its DEFAULT invocation, before it
+  // had even downloaded the object.
+  const liveEst = (table: string): string => {
+    const live = pgConn(cfg.liveDatabaseUrl, tmp);
+    return capture("psql", [
       live.safeUrl,
       "-tAc",
       `SELECT n_live_tup FROM pg_stat_user_tables WHERE schemaname='public' AND relname='${table}'`,
     ], live.env).out.replace(/\s/g, "");
+  };
 
   const sentinel = cfg.rowCountTable;
   const sent = probe(sentinel);
@@ -352,6 +444,21 @@ export async function drillObject(opts: DrillObjectOpts): Promise<DrillObjectRes
   return done(true, ratio, null);
 }
 
+/**
+ * Download one object, decrypt/decompress, pg_restore it into the throwaway target, and assert the
+ * restored data — materialiseDump() then verifyDumpFile(). Returns a result (does NOT exit) so a
+ * caller can record + alert + continue. Cleans up its own scratch files so it can be called
+ * repeatedly within one tmp dir.
+ */
+export async function drillObject(opts: DrillObjectOpts): Promise<DrillObjectResult> {
+  const { key, gate, cfg, tmp, priorCounts, refCount } = opts;
+
+  const got = await materialiseDump({ key, cfg, tmp });
+  if (!got.ok || !got.dumpPath) return { ok: false, ratio: null, counts: {}, reason: got.reason };
+
+  return verifyDumpFile({ dumpPath: got.dumpPath, gate, cfg, tmp, priorCounts, refCount });
+}
+
 /** The sentinel's row count recorded at DUMP time for this object stamp — the live-ratio gate's dump-time
  * reference — or null (no run-log, no matching run, or a run predating the recorded count). Best-effort. */
 function dumpTimeRefCount(stamp: string | null, sentinel: string): number | null {
@@ -368,7 +475,7 @@ function priorDrillCounts(): Record<string, number> | null {
   try {
     const log = loadLog();
     const prior = log.verifications
-      .filter((v) => v.ok && v.counts && v.kind !== "hash")
+      .filter((v) => v.ok && v.counts && hasRestoredCounts(v.kind))
       .sort((a, b) => (a.ts < b.ts ? 1 : -1))[0];
     return prior?.counts ?? null;
   } catch {
