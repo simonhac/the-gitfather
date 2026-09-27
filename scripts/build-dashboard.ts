@@ -429,15 +429,14 @@ function makeSample(now: Date): {
   // pruned week that no run ever pruned. So one state machine per table emits both — the runs are
   // what it DID, and the index is where it ENDED UP.
   //
-  // The archiver runs weekly at Sunday 19:30 UTC — 3.5 h after the 16:00 UTC anchor that becomes
-  // the weekly backup — so in any display timezone the two land in the same week row. That
-  // alignment is the whole point of the sibling columns, so the sample reproduces it exactly.
+  // The archiver runs weekly at Monday 00:30 UTC, just after the UTC week boundary its eligibility
+  // math uses, so the sample reproduces that slot exactly.
   const archives: LogArchive[] = [];
   const index: SampleIndexRecord[] = [];
   const lastArchive = (() => {
     const d = new Date(end);
-    d.setUTCHours(19, 30, 0, 0);
-    while (d.getUTCDay() !== 0 || d.getTime() > end) d.setUTCDate(d.getUTCDate() - 1);
+    d.setUTCHours(0, 30, 0, 0);
+    while (d.getUTCDay() !== 1 || d.getTime() > end) d.setUTCDate(d.getUTCDate() - 1);
     return d.getTime();
   })();
   const archiveRecord = (t: number, table: string, over: Partial<LogArchive> = {}): LogArchive => ({

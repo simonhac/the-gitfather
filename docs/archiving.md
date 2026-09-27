@@ -175,15 +175,21 @@ operation you should be watching.
 
 Weekly is the natural cadence — the archiver works in whole ISO weeks. Two ways to fire it:
 
-- **GitHub cron** in the caller: `cron: "30 19 * * 0"` (Sundays 19:30 UTC).
+- **GitHub cron** in the caller: `cron: "30 0 * * 1"` (Mondays 00:30 UTC).
 - **The [Cloudflare scheduler](../scheduler/README.md)**, which has an `archive` cadence at the same
-  Sunday 19:30 UTC. Unlike the other cadences it is **opt-in**: a client runs it only if its roster
+  Monday 00:30 UTC. Unlike the other cadences it is **opt-in**: a client runs it only if its roster
   entry names `"archive"` in `cadences`.
 
-Either way the hour is the point. 19:30 UTC on a Sunday sits ~3.5 h after the Sunday anchor-hour
-backup that gets promoted to `weekly/`, and after that day's durable verify — so a fresh, hash-checked,
-WORM-locked weekly dump exists *before* any rows are pruned. Every delete is therefore preceded by a
-durable snapshot of the same data.
+Either way the hour is the point, for two reasons:
+
+- **It must come just after the UTC week boundary.** A week becomes eligible at its end plus N weeks,
+  which is always a Monday 00:00 UTC. A run shortly *before* that instant — Sunday evening UTC, which
+  is Monday morning in Australia — misses it and leaves the week for the next run, so every week is
+  archived and pruned a week later than the profile says.
+- **It must come after the weekly snapshot.** Sunday's anchor-hour backup gets promoted to `weekly/`,
+  and that day's durable verify checks it — so a fresh, hash-checked, WORM-locked weekly dump exists
+  *before* any rows are pruned. Every delete is therefore preceded by a durable snapshot of the same
+  data.
 
 ### In Slack
 

@@ -145,7 +145,7 @@ jobs:
 name: My DB table archive → R2
 on:
   schedule:
-    - cron: "30 19 * * 0"        # Sundays 19:30 UTC — after the weekly promotion and durable-verify
+    - cron: "30 0 * * 1"         # Mondays 00:30 UTC — just after the UTC week boundary
   workflow_dispatch:
     inputs:
       mode:           { type: choice, options: [both, archive, prune], default: both }
