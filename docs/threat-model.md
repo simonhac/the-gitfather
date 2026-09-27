@@ -39,7 +39,7 @@ dump this tool already produces is the natural feed for it.
   delete" mode). Accepted for a DR / leaked-token model.
 - **Compromised scheduler Worker**: holds the GitHub App key (`actions:write` on the installed repos —
   it can start workflows, never read source or secrets), the Slack bot token, and R2 bindings to every
-  client bucket (bindings are not verb-scoped, so it can delete *unlocked* objects: `2hourly/`,
+  client bucket (bindings are not verb-scoped, so it can delete *unlocked* objects: `intraday/`,
   `_status/`, `_config/`, `_log/`). The 14-day locks on the durable tiers hold. Deliberately, the Worker
   is **not** given `contents:read` — config flows GitHub → Cloudflare via the backup job, never the reverse.
 - **At rest**: with `encryption: none`, dumps sit unencrypted in a **private** bucket (R2 still encrypts at

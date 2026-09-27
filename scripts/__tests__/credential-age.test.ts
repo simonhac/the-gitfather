@@ -104,3 +104,17 @@ test("readLogDir picks up the file appendCredential writes — the writer/reader
   assert.equal(log.archives[0].table, "public.api_logs");
   assert.equal(credentialVerdicts(log.credentials, ["R2"], 365, NOW)[0].ageDays, 3);
 });
+
+test("readLogDir maps the legacy 2hourly tier onto intraday (runs + verifications)", async () => {
+  const { readLogDir } = await import("../lib/logStore.js");
+  const { mkdtempSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "tierlog-"));
+  writeFileSync(join(dir, "runs-2026-09.jsonl"), `${JSON.stringify({ ts: "2026-09-20T16:00:00Z", ok: true, tiers: ["2hourly", "daily"], key: "2hourly/x-20260920T160000Z.dump" })}\n`);
+  writeFileSync(join(dir, "verifications-2026-09.jsonl"), `${JSON.stringify({ ts: "2026-09-20T17:00:00Z", verifiedTs: "2026-09-20T16:00:00Z", ok: true, tier: "2hourly", key: "2hourly/x-20260920T160000Z.dump" })}\n`);
+  const log = readLogDir(dir);
+  assert.deepEqual(log.runs[0].tiers, ["intraday", "daily"]);
+  assert.equal(log.verifications[0].tier, "intraday");
+  assert.equal(log.runs[0].key, "2hourly/x-20260920T160000Z.dump", "keys name real objects — left as written");
+});

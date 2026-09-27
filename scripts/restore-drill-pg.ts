@@ -9,7 +9,7 @@ import "./lib/bootEnv.js"; // MUST be first — loads $PROFILE before backupType
 // non-zero exit on failure.
 //
 // The restore + assertion core is exported as drillObject() so the daily durable-verify job
-// (verify-durable-pg.ts) can restore a SPECIFIC durable key, not just the newest 2hourly object.
+// (verify-durable-pg.ts) can restore a SPECIFIC durable key, not just the newest intraday object.
 // Every drill — pass OR fail — now records a verification (gap #5: failed drills were unlogged).
 //
 // drillObject() is itself just materialiseDump() + verifyDumpFile(), split so that the half which
@@ -40,6 +40,7 @@ import { appendVerify } from "./runlog.js";
 import { slackOneoff, alertWebhook, failAlertText } from "./lib/slack.js";
 import { githubLogUrl } from "./lib/github.js";
 import { hasRestoredCounts, type BackupTier } from "./lib/backupTypes.js";
+import { INTRADAY_PREFIXES, INTRADAY_TIER, newestName } from "./lib/schedule.js";
 
 /** Throwaway database every restore is (re)created into — see verifyDumpFile()'s "Pristine restore target". */
 const SCRATCH_DB = "gitfather_drill";
@@ -221,7 +222,7 @@ export function planDecrypt(key: string): DecryptPlan {
 }
 
 export interface MaterialiseDumpOpts {
-  /** Key UNDER backup-prefix, e.g. "2hourly/<file>" or "daily/<file>". */
+  /** Key UNDER backup-prefix, e.g. "intraday/<file>" or "daily/<file>". */
   key: string;
   cfg: DumpFetchConfig;
   tmp: string;
@@ -247,7 +248,7 @@ export interface VerifyDumpFileOpts {
 }
 
 export interface DrillObjectOpts {
-  /** Key UNDER backup-prefix, e.g. "2hourly/<file>" or "daily/<file>". */
+  /** Key UNDER backup-prefix, e.g. "intraday/<file>" or "daily/<file>". */
   key: string;
   tier: BackupTier;
   gate: DrillGate;
@@ -529,22 +530,26 @@ async function main(): Promise<void> {
   process.env.RCLONE_CONFIG_R2_SECRET_ACCESS_KEY = r2Secret;
   process.env.RCLONE_CONFIG_R2_ENDPOINT = endpoint;
 
-  // Newest dump = the newest object in 2hourly/. Every run writes there; daily/weekly/monthly are
-  // server-side copies of OLDER 2hourly objects. Listing 2hourly/ NON-recursively keeps the lexical
-  // sort genuinely chronological, so the drill verifies the latest dump. Filtering to dump objects
-  // (any generation — see isDumpObject) means a manifest or a log shard can never be selected and
-  // mask a real backup, WITHOUT the newest dump going invisible the day `encryption:` changes.
-  console.log(`Finding newest dump object under r2:${r2Bucket}/${backupPrefix}/2hourly/ …`);
-  const ls = capture("rclone", ["lsf", "--files-only", `r2:${r2Bucket}/${backupPrefix}/2hourly/`, "--s3-no-check-bucket"]);
-  const objs = ls.out
-    .split("\n")
-    .map((s) => s.trim())
-    .filter(Boolean)
-    .filter(isDumpObject)
-    .sort();
-  const newest = objs.length ? objs[objs.length - 1] : "";
-  if (!newest) await fail(`no dump objects under ${backupPrefix}/2hourly/`);
-  const key = `2hourly/${newest}`;
+  // Newest dump = the newest object in intraday/. Every run writes there; daily/weekly/monthly are
+  // server-side copies of OLDER intraday objects. Listing NON-recursively keeps the lexical sort
+  // genuinely chronological, so the drill verifies the latest dump. Filtering to dump objects (any
+  // generation — see isDumpObject) means a manifest or a log shard can never be selected and mask a
+  // real backup, WITHOUT the newest dump going invisible the day `encryption:` changes.
+  // Transitionally also lists the LEGACY_INTRADAY_TIER prefix; names share a stamp format, so the
+  // newest across both is still a lexical max.
+  const candidates: { dir: string; name: string }[] = [];
+  for (const dir of INTRADAY_PREFIXES) {
+    console.log(`Finding newest dump object under r2:${r2Bucket}/${backupPrefix}/${dir}/ …`);
+    const ls = capture("rclone", ["lsf", "--files-only", `r2:${r2Bucket}/${backupPrefix}/${dir}/`, "--s3-no-check-bucket"]);
+    for (const line of ls.out.split("\n")) {
+      const name = line.trim();
+      if (name && isDumpObject(name)) candidates.push({ dir, name });
+    }
+  }
+  const picked = newestName(candidates, (c) => c.name);
+  if (!picked) await fail(`no dump objects under ${backupPrefix}/${INTRADAY_TIER}/`);
+  const newest = picked!.name;
+  const key = `${picked!.dir}/${newest}`;
   console.log(`Latest: ${backupPrefix}/${key}`);
 
   // verifiedTs known the moment the object is selected → fail() paths below can still attribute it.
@@ -552,7 +557,7 @@ async function main(): Promise<void> {
   const priorCounts = core.maxRowDrop > 0 ? priorDrillCounts() : null;
   const refCount = dumpTimeRefCount(stampFromKey(newest), core.rowCountTable);
 
-  const result = await drillObject({ key, tier: "2hourly", gate: "live-ratio", cfg: core, tmp, priorCounts, refCount });
+  const result = await drillObject({ key, tier: INTRADAY_TIER, gate: "live-ratio", cfg: core, tmp, priorCounts, refCount });
 
   // Record the verification — PASS or FAIL (gap #5). Pre-selection failures above have no dump to
   // attribute, so they fail() without a verification; here we always have a selected object.
@@ -562,7 +567,7 @@ async function main(): Promise<void> {
       verifiedTs,
       ok: result.ok,
       ratio: result.ratio,
-      tier: "2hourly",
+      tier: INTRADAY_TIER,
       key,
       kind: "restore",
       counts: result.counts,

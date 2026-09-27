@@ -12,7 +12,8 @@
 // (schedule.ts, alertDecision.ts, dailyRow.ts, runlogParse.ts, slackApi.ts), so the two runtimes
 // cannot drift on what "overdue", "broken" or a ⬜ mean.
 //
-// Freshness is slot-based: if the CURRENT cadence slot (slotMinutes) still has no backup once
+// Freshness is slot-based: if the CURRENT cadence slot (slotMinutes wide, phased from the profile's
+// anchor hour — the same grid the Worker dispatches on) still has no backup once
 // graceMinutes past its boundary, the slot is overdue — a missed tick is caught ~grace minutes later,
 // not after the multi-hour maxAgeHours backstop. The default assumption is a *missed* dispatch and it
 // re-triggers the backup once — but only when the backup isn't persistently failing (a *broken* backup
@@ -21,7 +22,7 @@
 
 import { advanceAlertState, alertStateKey, decideAlert, parseAlertState, type AlertState } from "../../scripts/lib/alertDecision.js";
 import { formatElapsed } from "../../scripts/lib/duration.js";
-import { backupLooksBroken, slotState, stampToEpochMs } from "../../scripts/lib/schedule.js";
+import { backupLooksBroken, INTRADAY_PREFIXES, newestName, slotPhaseMinutes, slotState, stampToEpochMs } from "../../scripts/lib/schedule.js";
 import { pickLatestRun, runlogKey, runlogMonthsToTry } from "../../scripts/lib/runlogParse.js";
 import { postMessage, postWebhook, updateMessage } from "../../scripts/lib/slackApi.js";
 import {
@@ -59,8 +60,24 @@ async function putJson(bucket: R2Bucket, key: string, value: unknown): Promise<v
   await bucket.put(key, JSON.stringify(value), { httpMetadata: { contentType: "application/json" } });
 }
 
+/** One bucket's published configs: a key per backup name, `cfg` null when the object doesn't parse. */
+export type PublishedConfigs = { key: string; cfg: WatchdogConfig | null }[];
+
+/**
+ * A config listing that has already SETTLED — the tick reads each client's configs once and hands the
+ * result to both the backup dispatch decision and the watchdog, so a failure must be a value rather
+ * than a rejected promise left waiting for its second reader.
+ */
+export type ConfigRead = { ok: true; configs: PublishedConfigs } | { ok: false; error: unknown };
+
+export const readConfigsSettled = (bucket: R2Bucket): Promise<ConfigRead> =>
+  readConfigs(bucket).then(
+    (configs): ConfigRead => ({ ok: true, configs }),
+    (error: unknown): ConfigRead => ({ ok: false, error }),
+  );
+
 /** Every published watchdog config in a bucket (one per backup name). */
-export async function readConfigs(bucket: R2Bucket): Promise<{ key: string; cfg: WatchdogConfig | null }[]> {
+export async function readConfigs(bucket: R2Bucket): Promise<PublishedConfigs> {
   const listed = await bucket.list({ prefix: WATCHDOG_CONFIG_PREFIX });
   const keys = listed.objects.map((o) => o.key).filter((k) => k.endsWith("/watchdog.json"));
   return Promise.all(keys.map(async (key) => ({ key, cfg: parseWatchdogConfig((await getText(bucket, key)) ?? "") })));
@@ -223,16 +240,23 @@ async function onStale(c: Check, msg: string): Promise<WatchdogOutcome> {
 async function checkOne(c: Check): Promise<WatchdogOutcome> {
   const { cfg, now } = c;
 
-  // Newest object under <prefix>/2hourly/ — key order is lexical = chronological (stamped names).
-  const prefix = `${cfg.backupPrefix}/2hourly/`;
-  const listed = await c.bucket.list({ prefix });
-  const objects = listed.objects.filter((o) => o.key.length > prefix.length).sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
-  const newestObj = objects.length ? objects[objects.length - 1] : null;
-  if (!newestObj) {
-    await fail(c, `no objects under ${prefix}`);
+  // Newest object under <prefix>/intraday/ — and, transitionally, under the LEGACY_INTRADAY_TIER
+  // prefix, so objects written before the rename still count. Key order is lexical = chronological
+  // (stamped names), and the names are the same shape under both prefixes, so compare basenames.
+  const primary = `${cfg.backupPrefix}/${INTRADAY_PREFIXES[0]}/`;
+  const listings = await Promise.all(
+    INTRADAY_PREFIXES.map(async (dir) => {
+      const prefix = `${cfg.backupPrefix}/${dir}/`;
+      const listed = await c.bucket.list({ prefix });
+      return listed.objects.filter((o) => o.key.length > prefix.length).map((o) => ({ o, name: o.key.slice(prefix.length) }));
+    }),
+  );
+  const picked = newestName(listings.flat(), (x) => x.name);
+  if (!picked) {
+    await fail(c, `no objects under ${primary}`);
     return "no-objects";
   }
-  const newest = newestObj.key.slice(prefix.length);
+  const { o: newestObj, name: newest } = picked;
 
   // Size gate: a fresh-but-truncated/empty object is BROKEN, not a missed tick — page directly (never
   // self-heal, which would just re-trigger a backup that may keep producing a bad object).
@@ -258,9 +282,10 @@ async function checkOne(c: Check): Promise<WatchdogOutcome> {
   // Refresh today's Slack row every tick (independent of freshness): re-renders ⬜ placeholders.
   await refreshDailyRow(c);
 
-  const { overdue, slotStartMs } = slotState(nowMs, epochMs, cfg.slotMinutes, cfg.graceMinutes);
+  const phase = slotPhaseMinutes(cfg.slotMinutes, cfg.anchorHourUtc);
+  const { overdue, slotStartMs } = slotState(nowMs, epochMs, cfg.slotMinutes, cfg.graceMinutes, phase);
   const slotIso = new Date(slotStartMs).toISOString();
-  c.log(`newest 2hourly object: ${newest} — ${ageText} old (slot ${slotIso}, grace ${cfg.graceMinutes}m, backstop ${cfg.maxAgeHours}h)`);
+  c.log(`newest intraday object: ${newest} — ${ageText} old (slot ${slotIso}, grace ${cfg.graceMinutes}m, backstop ${cfg.maxAgeHours}h)`);
 
   if (!overdue && ageH < cfg.maxAgeHours) {
     // Close the loop: an outage that ends should SAY so. Any problem reading the episode reads as "none".
@@ -283,17 +308,19 @@ async function checkOne(c: Check): Promise<WatchdogOutcome> {
   );
 }
 
-/** Run the watchdog for one client: every published config in its bucket. Never throws. */
-export async function runWatchdog(env: Env, client: Client, now: Date): Promise<WatchdogRecord[]> {
+/**
+ * Run the watchdog for one client: every published config in its bucket. Never throws. `read` is the
+ * tick's shared config listing (see ConfigRead); omitted, the watchdog lists the bucket itself.
+ */
+export async function runWatchdog(env: Env, client: Client, now: Date, read?: Promise<ConfigRead>): Promise<WatchdogRecord[]> {
   const log = (line: string) => console.log(`watchdog ${client.id}: ${line}`);
   const bucket = env[client.bucket] as R2Bucket;
-  let configs: { key: string; cfg: WatchdogConfig | null }[];
-  try {
-    configs = await readConfigs(bucket);
-  } catch (e) {
-    console.error(`watchdog ${client.id}: config listing failed: ${String(e)}`);
+  const settled = await (read ?? readConfigsSettled(bucket));
+  if (!settled.ok) {
+    console.error(`watchdog ${client.id}: config listing failed: ${String(settled.error)}`);
     return [{ id: client.id, name: "", outcome: "error" }];
   }
+  const configs = settled.configs;
   if (configs.length === 0) {
     console.warn(`watchdog ${client.id}: no ${WATCHDOG_CONFIG_PREFIX}*/watchdog.json in the bucket yet — run the backup once to publish it`);
     return [{ id: client.id, name: "", outcome: "no-config" }];
@@ -326,7 +353,12 @@ export async function runWatchdog(env: Env, client: Client, now: Date): Promise<
 }
 
 /** All clients that subscribe to the watchdog, concurrently; one client's failure never touches another. */
-export async function runWatchdogs(env: Env, clients: Client[], now: Date): Promise<WatchdogRecord[]> {
-  const records = await Promise.all(clients.map((c) => runWatchdog(env, c, now)));
+export async function runWatchdogs(
+  env: Env,
+  clients: Client[],
+  now: Date,
+  reads?: ReadonlyMap<string, Promise<ConfigRead>>,
+): Promise<WatchdogRecord[]> {
+  const records = await Promise.all(clients.map((c) => runWatchdog(env, c, now, reads?.get(c.id))));
   return records.flat();
 }

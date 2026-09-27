@@ -14,7 +14,8 @@ keys). Credentials are **never** in it — they come from the environment (GitHu
   non-empty), `min-row-ratio`, `max-row-ratio`, `max-row-drop`
 - **`verify-durable:`** — `fresh`, `aged`, `retest-days`, `max-restores`, `keyless`, `rehash-per-run`, `rehash-max-age-days`, `drill-max-age-days`
 - **`archive:`** *(optional — see [Archiving a table out of Postgres](archiving.md))* — `store-prefix`, `encryption` (`none`|`age`), `compression` (`zstd`|`gzip`|`none`), `compression-level`, and `tables:` — a list of `{ table, time-column, archive-after-weeks, prune-after-weeks, delete-batch-rows, max-weeks-per-run }`
-- **`staleness:`** — `slot-minutes`, `grace-minutes`, `max-age-hours` (unset → derived from the cadence), `repage-minutes`, `heal-workflow`, `self-heal`, `dry-run`. Consumed by the [Worker's watchdog](../scheduler/README.md): the backup publishes the validated block to `_config/<name>/watchdog.json` on every run
+- **`backups-per-day`** — a factor of 24 (default `3`), phased from `anchor-hour-utc`; the Worker dispatches each client on its own schedule.
+- **`staleness:`** — `grace-minutes`, `max-age-hours` (unset → derived from the cadence), `repage-minutes`, `heal-workflow`, `self-heal`, `dry-run`. Consumed by the [Worker's watchdog](../scheduler/README.md): the backup publishes the validated block to `_config/<name>/watchdog.json` on every run
 - **`credential-rotation:`** — `max-age-days` (default `365`; 0 disables) and `track:` (default
   `["R2"]`) — the credential prefixes to watch, matching the ENV names (`R2_ACCESS_KEY_ID` → `R2`).
   **Both have defaults, so omitting the block leaves the check ON**, age-checking R2. A tracked
@@ -37,7 +38,7 @@ The grammars are strict where a typo is genuinely catchable and lenient where th
 
 | Strict (catches typos) | Lenient (presence + light shape) |
 |---|---|
-| `encryption` ∈ {`none`,`age`,`aes-gcm`} · `anchor-hour-utc` 0–23 · `drill.min-row-ratio` 0–1 · `drill.max-row-ratio` ≥ 1 · `drill.max-row-drop` 0–1 · `staleness.max-age-hours` > slot + grace (unset → derived) · `staleness.slot-minutes` 1–1440 · `staleness.grace-minutes` 0–720 · `archive.*` (`compression` ∈ {`zstd`,`gzip`,`none`}, `encryption` ∈ {`none`,`age`}, per-table `prune-after-weeks` ≥ `archive-after-weeks`, no duplicate table entries, `delete-batch-rows` 1–500000, `max-weeks-per-run` 1–10000) · `credential-rotation.max-age-days` 0–3650 · `dump.min-bytes`/`verify-durable.retest-days`/`verify-durable.max-restores` (ints) · `timezone` (real IANA zone) · `retention.*` (durations like `13 weeks`) · booleans `staleness.self-heal`/`dry-run` · `integrity.checksum`/`check-structure`/`verify-before-encrypt`/`verify-after-upload` · `verify-durable.fresh`/`aged` (YAML `true`/`false` or `1/0/yes/no/on/off`) | credential ENV vars: `*_DATABASE_URL` scheme = `postgres(ql)://` · R2 account id / keys · bucket names (whitespace-free) · `AGE_RECIPIENT`/`AGE_IDENTITY` · `SLACK_BOT_TOKEN` · table-name lists (`drill.present-tables`/`nonempty-tables`) · `archive.store-prefix` / `tables[].table` / `time-column` · `AGE_ARCHIVE_RECIPIENT` · `credential-rotation.track` (a list of prefix names) |
+| `encryption` ∈ {`none`,`age`,`aes-gcm`} · `anchor-hour-utc` 0–23 · `drill.min-row-ratio` 0–1 · `drill.max-row-ratio` ≥ 1 · `drill.max-row-drop` 0–1 · `staleness.max-age-hours` > slot + grace (unset → derived) · `backups-per-day` a factor of 24 (`staleness.slot-minutes` is deprecated — accepted only if it agrees) · `staleness.grace-minutes` 0–720 · `archive.*` (`compression` ∈ {`zstd`,`gzip`,`none`}, `encryption` ∈ {`none`,`age`}, per-table `prune-after-weeks` ≥ `archive-after-weeks`, no duplicate table entries, `delete-batch-rows` 1–500000, `max-weeks-per-run` 1–10000) · `credential-rotation.max-age-days` 0–3650 · `dump.min-bytes`/`verify-durable.retest-days`/`verify-durable.max-restores` (ints) · `timezone` (real IANA zone) · `retention.*` (durations like `13 weeks`) · booleans `staleness.self-heal`/`dry-run` · `integrity.checksum`/`check-structure`/`verify-before-encrypt`/`verify-after-upload` · `verify-durable.fresh`/`aged` (YAML `true`/`false` or `1/0/yes/no/on/off`) | credential ENV vars: `*_DATABASE_URL` scheme = `postgres(ql)://` · R2 account id / keys · bucket names (whitespace-free) · `AGE_RECIPIENT`/`AGE_IDENTITY` · `SLACK_BOT_TOKEN` · table-name lists (`drill.present-tables`/`nonempty-tables`) · `archive.store-prefix` / `tables[].table` / `time-column` · `AGE_ARCHIVE_RECIPIENT` · `credential-rotation.track` (a list of prefix names) |
 
 Conditional rules are enforced too: `encryption: age` ⇒ `AGE_RECIPIENT` (backup) / `AGE_IDENTITY`
 (drill, and durable-verify **unless** `verify-durable.keyless`, which instead REFUSES an identity and
@@ -78,7 +79,7 @@ export PG_BACKUP_DATABASE_URL='postgresql://…:5432/…?sslmode=require'
 export R2_ACCOUNT_ID=… R2_BUCKET=<your-bucket> R2_ACCESS_KEY_ID=… R2_SECRET_ACCESS_KEY=…
 export SLACK_BOT_TOKEN=xoxb-…                            # optional
 # Run twice: the first posts the day's Slack message, the second UPDATES it with a 2nd tick.
-FORCE_TIERS="2hourly daily" PROFILE=profiles/example.yaml npx tsx scripts/backup-pg-to-r2.ts
+FORCE_TIERS="intraday daily" PROFILE=profiles/example.yaml npx tsx scripts/backup-pg-to-r2.ts
 ```
 
 Any local dump file lives under a tmp dir and is removed on exit — never commit a dump (it may contain
@@ -142,7 +143,7 @@ the dashboard shows it even after the alert scrolls away.
 or it fires on a perfectly healthy schedule. The rule:
 
 ```
-max-age-hours  >  slot-minutes / 60  +  grace-minutes / 60
+max-age-hours  >  24 / backups-per-day  +  grace-minutes / 60
 ```
 
 Config validation enforces it at backup time (before the block is published to the Worker) — a

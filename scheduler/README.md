@@ -49,7 +49,7 @@ dispatched cadences, and runs the watchdog **natively** against each client's pr
 
 ```
 */10 tick ──▶ dueCadences(scheduledTime) ──▶ POST …/workflows/<file>/dispatches   (backup / verify / archive, per client)
-                                          ├─▶ watchdog: list <prefix>/2hourly/ in the client's bucket, self-heal / page
+                                          ├─▶ watchdog: list <prefix>/intraday/ in the client's bucket, self-heal / page
                                           └─▶ write _scheduler/state.json + log to the shared bucket
 ```
 
@@ -69,10 +69,16 @@ billing lapsed, backups stopped **and so did the watchdog**. It now runs here, o
 | Cadence         | When (UTC)        | Dispatches                | Input               |
 | --------------- | ----------------- | ------------------------- | ------------------- |
 | `staleness`     | every 10 min      | *(runs natively — see [The watchdog](#the-watchdog))* | — |
-| `backup`        | every 8h (`00/08/16` UTC) | `pg-backup.yml`       | `reason: schedule`  |
+| `backup`        | per client: `backups-per-day` from `anchor-hour-utc` (default `00/08/16`) | `pg-backup.yml` | `reason: schedule` |
 | `durableVerify` | daily `18:30`     | `pg-durable-verify.yml`   | —                   |
 | `archive`       | Sundays `19:30` (opt-in)  | `pg-archive.yml`      | —                   |
 | `restoreDrill`  | manual only       | `pg-restore-drill.yml`    | —                   |
+
+`backup` is scheduled **per client**. Every hour on the hour is a candidate; the Worker reads the
+client's published `_config/*/watchdog.json` (the same listing the watchdog uses that tick) and dispatches
+when any of them — one per database — is due under its profile's `backups-per-day` and `anchor-hour-utc`.
+A client with no published config yet (or whose listing fails) runs on the default 00/08/16 UTC grid, so
+its first backup can publish one. A profile edit takes effect after the next backup publishes it.
 
 `archive` is the one **opt-in** cadence: a client runs it only if its roster entry names `"archive"` in
 `cadences`. `19:30` on a Sunday is ~3.5 h after the Sunday anchor-hour backup that gets promoted to
@@ -159,9 +165,9 @@ scripts (`scripts/lib/schedule.ts`, `alertDecision.ts`, `dailyRow.ts`, `runlogPa
 the two runtimes cannot drift on what "overdue", "broken" or a ⬜ mean. Per client bucket, per published
 config, every tick:
 
-1. Lists `<backup-prefix>/2hourly/`, takes the newest object. Nothing there → page. Smaller than
+1. Lists `<backup-prefix>/intraday/` (and, for one release, the legacy `2hourly/`), takes the newest object. Nothing there → page. Smaller than
    `dump.min-bytes` → **broken**, page, never heal.
-2. Slot-based freshness (`slotState`): the current slot is **overdue** once `grace-minutes` past its boundary
+2. Slot-based freshness (`slotState`, slots phased from `anchor-hour-utc`): the current slot is **overdue** once `grace-minutes` past its boundary
    with nothing landed; `max-age-hours` is only a backstop.
 3. Re-renders today's Slack row in place so elapsed-but-empty slots show as ⬜ (no-op if no message yet).
 4. **Fresh** → if an alert episode is open, posts 🟢 RECOVERED and closes it.
@@ -272,7 +278,7 @@ With only a few small backups that's fine — bridge it with a manual dispatch.
      "https://gitfather-scheduler.<subdomain>.workers.dev/state"
    ```
    Confirm a `workflow_dispatch` run in each client's Actions tab on a `cadence=backup` dispatch, a new
-   `…/2hourly/` object, a clean Slack tick, and a `HEARTBEAT_URL` ping. Then **unmute the dead-man's-switch**.
+   `…/intraday/` object, a clean Slack tick, and a `HEARTBEAT_URL` ping. Then **unmute the dead-man's-switch**.
 
 **Rollback:** re-add a `schedule:` block to a caller and cron resumes within a tick.
 
@@ -303,9 +309,9 @@ Before this version the Worker dispatched a `pg-staleness-check.yml` caller ever
 
 Workers Free: 100k req/day · 5 cron triggers/account · 10 ms CPU/invocation · 50 subrequests/invocation.
 This Worker uses **1** cron trigger and **144** invocations/day (~0.15%). Every R2 binding call and every
-`fetch` is a subrequest. Per client per tick the watchdog makes ~7 on the fresh path (config list + get,
-2hourly list, Slack-row get + update + put, alert-state get) and ~13 when stale (plus a token mint, a run
-listing, one or two run-log reads, the dispatch, a page); the 8-hourly backup dispatch adds ~2 cold / ~1
+`fetch` is a subrequest. Per client per tick the watchdog makes ~8 on the fresh path (config list + get,
+intraday + legacy-prefix lists, Slack-row get + update + put, alert-state get) and ~13 when stale (plus a token mint, a run
+listing, one or two run-log reads, the dispatch, a page); each backup dispatch adds ~2 cold / ~1
 warm. Budget for **about 5 clients** per Worker on the free plan; beyond that, split the roster across
 Workers or move to Workers Paid (10,000 subrequests). CPU is a few ms (one RS256 sign per cold mint plus
 some Intl formatting); R2 binding reads/writes are in-network and free. **Zero new charges** — and the

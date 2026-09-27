@@ -1,6 +1,6 @@
 # Backup-history dashboard
 
-A static, self-contained page visualises **every 8-hourly run over the 1-year window** as a heatmap.
+A static, self-contained page visualises **every backup run (at the profile's `backups-per-day` cadence) over the 1-year window** as a heatmap.
 Every cell — backup slot or archive week — says two things in the same two places:
 
 - the **body** (the square) answers *do we have data for this period?* — green = healthy & retained,

@@ -17,7 +17,7 @@
 import { basename } from "node:path";
 import type { BackupTier, LogRun, RetentionMap } from "./backupTypes.js";
 
-/** The tiers verify-durable is responsible for. `2hourly` is the write tier, not a durable copy. */
+/** The tiers verify-durable is responsible for. `intraday` is the write tier, not a durable copy. */
 export const DURABLE_TIERS: readonly BackupTier[] = ["daily", "weekly", "monthly"];
 
 const DAY_MS = 86_400_000;

@@ -3,7 +3,7 @@ import "./lib/bootEnv.js"; // MUST be first — loads $PROFILE before backupType
 // Off-site, provider-independent Postgres backup → Cloudflare R2, with GFS tiering.
 //
 // Dumps with `pg_dump -Fc` (custom format), optionally encrypts, and uploads to R2 via the S3 API
-// (rclone). Each run writes one object to the 2hourly/ tier and then *promotes* (server-side R2→R2
+// (rclone). Each run writes one object to the intraday/ tier and then *promotes* (server-side R2→R2
 // copy — no re-dump, no re-upload) that same object into daily/weekly/monthly when the run lands on
 // the configured anchor. Retention is enforced by R2 lifecycle rules + bucket locks per prefix (set
 // out-of-band; see docs/r2-setup.md), not by this script. Built for GitHub Actions but runnable locally.
@@ -34,13 +34,13 @@ import { verifyDumpFile } from "./restore-drill-pg.js";
 import { run, runToFile, commandExists, bestEffort, sha256File, capture, stderrTee } from "./lib/proc.js";
 import { classifyPgFailure, isConnectionLevel } from "./lib/pg-classify.js";
 import type { PgFailureCode } from "./lib/pg-classify.js";
-import { computeTiers, runOrigin } from "./lib/schedule.js";
+import { computeTiers, INTRADAY_TIER, normalizeTier, runOrigin } from "./lib/schedule.js";
 import { appendRun, appendVerify } from "./runlog.js";
 import { githubLogUrl } from "./lib/github.js";
 import { pingHeartbeat } from "./lib/heartbeat.js";
 import { publishWatchdogConfig } from "./lib/watchdogPublish.js";
 import { slackEnabled, slackPost, slackDailyRecord, dailyLabel, alertWebhook, failAlertText } from "./lib/slack.js";
-import type { BackupTier } from "./lib/backupTypes.js";
+import { TIER_META, type BackupTier } from "./lib/backupTypes.js";
 
 // Captured at module load (≈ process start) so both recordConfigFailure() and main() can stamp the
 // run-log with the whole-script wall time — see the appendRun({ durationMs }) call sites below.
@@ -322,13 +322,13 @@ async function main(): Promise<void> {
           verifiedTs: runTsIso,
           ok: res.ok,
           ratio: res.ratio,
-          // Keyed to the 2hourly object this dump becomes. Without a key AND a tier, the record
+          // Keyed to the intraday object this dump becomes. Without a key AND a tier, the record
           // has neither — and verify-durable's stamp-join matches any keyless, tierless record to
           // EVERY durable object sharing the stamp, which made all of them look already-verified
           // and emptied the hash leg. The hash leg is now kind-aware so this cannot recur, but a
           // record that speaks for objects it knows nothing about is a trap for the next reader.
-          key: `2hourly/${filename}`,
-          tier: "2hourly",
+          key: `${INTRADAY_TIER}/${filename}`,
+          tier: INTRADAY_TIER,
           kind: "pre-encrypt",
           by: "ci",
           counts: res.counts,
@@ -405,13 +405,17 @@ async function main(): Promise<void> {
   }
 
   // ── Which tiers does this run belong to? ───────────────────────────────────
-  // Always 2hourly; the anchor-hour run is also daily, +weekly on Sun, +monthly on the 1st (UTC).
+  // Always intraday; the anchor-hour run is also daily, +weekly on Sun, +monthly on the 1st (UTC).
   // FORCE_TIERS is a per-run override (manual/self-heal dispatch), so it stays an env read, not profile config.
-  const forceTiers = (process.env.FORCE_TIERS ?? "").split(/\s+/).filter(Boolean) as BackupTier[];
+  // The legacy "2hourly" is accepted as a spelling of "intraday"; anything else unknown is refused
+  // rather than becoming an R2 prefix nobody expires.
+  const forceTiers = (process.env.FORCE_TIERS ?? "").split(/\s+/).filter(Boolean).map(normalizeTier) as BackupTier[];
+  const unknownTiers = forceTiers.filter((t) => !(t in TIER_META));
+  if (unknownTiers.length) await fail(`FORCE_TIERS has unknown tier(s): ${unknownTiers.join(" ")} (use ${Object.keys(TIER_META).join(" ")})`);
   const tiers = computeTiers(now, anchorHour, forceTiers);
   console.log(`Tiers for this run: ${tiers.join(" ")}`);
 
-  // Upload once to the first tier (always 2hourly), then server-side copy to the rest. Single-PUT
+  // Upload once to the first tier (always intraday), then server-side copy to the rest. Single-PUT
   // (cutoff above dump size) is atomic — no multipart, no orphaned parts. R2 may log a benign "501
   // NotImplemented" for the x-amz-checksum-crc32 header the AWS SDK adds; rclone retries without it.
   const first = tiers[0];
@@ -483,9 +487,9 @@ async function main(): Promise<void> {
   }
 
   // Marker for the Slack row: 📅 + backticked codes for the durable tiers this run was promoted to
-  // (D=daily, W=weekly, M=monthly), e.g. 📅`DWM` on a 1st-of-month Sunday. Plain 2hourly → no marker.
+  // (D=daily, W=weekly, M=monthly), e.g. 📅`DWM` on a 1st-of-month Sunday. Plain intraday → no marker.
   const TIER_CODE: Record<string, string> = { daily: "D", weekly: "W", monthly: "M" };
-  const codes = tiers.filter((t) => t !== "2hourly").map((t) => TIER_CODE[t] ?? "").join("");
+  const codes = tiers.filter((t) => t !== INTRADAY_TIER).map((t) => TIER_CODE[t] ?? "").join("");
   const marker = codes ? `📅\`${codes}\`` : "";
 
   console.log(`✓ Backup complete: ${filename} (${Math.floor(size / 1024 / 1024)} MB) → tiers: ${tiers.join(" ")}`);

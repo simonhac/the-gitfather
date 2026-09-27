@@ -42,7 +42,10 @@ encryption: none               # none | age | aes-gcm  (age = client-side; needs
                                # rotated secret produces a bucket of objects nobody can open, and
                                # the first sign is a failed decrypt months later. A public key is
                                # not a secret; this is the only keyless guard there is.
-anchor-hour-utc: 16            # the 8-hourly run at this UTC hour is also promoted to daily/weekly/monthly
+anchor-hour-utc: 16            # the run at this UTC hour is also promoted to daily/weekly/monthly
+backups-per-day: 3             # a factor of 24 (1, 2, 3, 4, 6, 8, 12, 24), phased from anchor-hour-utc:
+                               #   3 → 00/08/16 UTC, 1 → 16:00 only. The Cloudflare scheduler dispatches
+                               #   on this; the watchdog, Slack row and dashboard follow it.
 
 dump:
   flags: "-Fc --no-owner --no-privileges"  # full custom-format dump, restorable without source roles
@@ -88,7 +91,7 @@ archive:                       # OPTIONAL — archive-table.ts. Move old rows of
       max-weeks-per-run: 1     # the backfill throttle; override per run with --max-weeks
 
 retention:                     # GFS windows as natural-language durations (these are the defaults).
-  grandson: 2 days             #   8-hourly (the legacy `2hourly/` key prefix) — every 8 h, kept this long
+  grandson: 2 days             #   intraday — every backup (backups-per-day), kept this long
   son: 3 weeks                 #   daily    — one per day at the anchor hour
   father: 13 weeks             #   weekly   — one per week (Sundays)
   grandfather: 2 years         #   monthly  — one per month (the 1st)
@@ -143,12 +146,11 @@ staleness:                     # the watchdog — runs in the Cloudflare Worker 
                                # The backup PUBLISHES this block (validated, defaults applied) to
                                # _config/<name>/watchdog.json in the bucket on every run; the Worker
                                # reads it there. An edit here lands with the next backup run.
-  slot-minutes: 480            # backup cadence in minutes — MUST match the Worker's backup cadence (00/08/16 UTC = 480)
-  grace-minutes: 25            # minutes past a slot boundary before it's "overdue" — trades faster recovery
+  grace-minutes: 25            # minutes past a slot boundary before it's "overdue" (< the slot, 24/backups-per-day h) — trades faster recovery
                                #   (≈ grace + check interval) against redundant heals on scheduler jitter
-  max-age-hours: 12            # backstop: page if the newest 2hourly/ object is older than this (slot logic
-                               #   is primary). Omit it and it is DERIVED from the cadence (1.5 slots —
-                               #   12 h here); a value inside slot-minutes + grace is refused, because a
+  # max-age-hours: 12          # backstop: page if the newest intraday/ object is older than this (slot logic
+                               #   is primary). Left unset it is DERIVED from the cadence (1.5 slots —
+                               #   12 h at 3 a day, 36 h at 1); a value inside one slot + grace is refused, because a
                                #   backstop that tight pages on every healthy tick.
   repage-minutes: 60           # minutes between LOUD re-pages while an outage persists. The check runs
                                #   far more often than this; entry and any change of CAUSE always page.

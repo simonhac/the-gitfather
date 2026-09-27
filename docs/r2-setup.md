@@ -9,15 +9,19 @@ account-level Cloudflare credentials.
 
 | Tier | Label | Cadence | R2 prefix | Lifecycle expiry (default) | Bucket lock |
 |---|---|---|---|---|---|
-| 8-hourly | grandson | every 8 h | `<prefix>/2hourly/` | 2 days | none |
+| intraday | grandson | `backups-per-day` (default 3: every 8 h) | `<prefix>/intraday/` | 2 days | none |
 | daily | Son | anchor hour | `<prefix>/daily/` | 3 weeks | 14 days |
 | weekly | Father | Sundays @ anchor | `<prefix>/weekly/` | 13 weeks | 14 days |
 | monthly | Grandfather | 1st @ anchor | `<prefix>/monthly/` | 2 years | 14 days |
 
-`2hourly/` is a **frozen legacy key prefix**, not a cadence: the finest tier runs 8-hourly (the
-`staleness.slot-minutes` default of `480`), but the object-key prefix keeps its original name so
-existing buckets stay readable. Key and label diverge on purpose (`scripts/lib/backupTypes.ts`) — the
-dashboard and Slack render the real cadence.
+The cadence is the profile's `backups-per-day` (a factor of 24), phased from `anchor-hour-utc`: at the
+default 3 a day with anchor 16 that is 00/08/16 UTC; at 1 a day, just the anchor hour. The dashboard
+and Slack render the real cadence.
+
+> **Migrating from `2hourly/`.** The intraday tier used to be written to `<prefix>/2hourly/`. Add the
+> `expire-intraday` rule below **before** upgrading; the watchdog, restore drill and durable-verify read
+> both prefixes for one release, so nothing pages during the switch. Once `2hourly/` has emptied (its
+> 2-day rule), remove it: `npx wrangler r2 bucket lifecycle remove <your-bucket> --id expire-2hourly`.
 
 The expiry windows are the **profile's `retention:` block** (natural-language durations — see the
 [profile reference](configuration-and-troubleshooting.md#profile-reference)); the values above are the
@@ -25,7 +29,7 @@ defaults. At most ~82 backups are retained at once. **These windows
 are also what the dashboard renders, but R2 itself does the deleting** via the lifecycle rules below —
 keep the two in sync (changing the profile does not reconfigure R2).
 
-**One dump, promoted to all qualifying tiers.** Each run dumps once and uploads to `2hourly/`. The run
+**One dump, promoted to all qualifying tiers.** Each run dumps once and uploads to `intraday/`. The run
 whose UTC hour equals `anchor-hour-utc` is also **server-side copied** (R2→R2, no re-dump) into `daily/`,
 plus `weekly/` on Sundays, plus `monthly/` on the 1st. Retention and immutability are enforced by **R2
 lifecycle rules + bucket locks per prefix**, not by code.
@@ -40,7 +44,7 @@ npx wrangler r2 bucket create <your-bucket>
 
 # Lifecycle: expire each tier on its own schedule
 # Match these --expire-days to the profile's retention: block (defaults: 2 days / 3 weeks / 13 weeks / 2 years).
-npx wrangler r2 bucket lifecycle add <your-bucket> expire-2hourly <prefix>/2hourly/ --expire-days 2
+npx wrangler r2 bucket lifecycle add <your-bucket> expire-intraday <prefix>/intraday/ --expire-days 2
 npx wrangler r2 bucket lifecycle add <your-bucket> expire-daily   <prefix>/daily/   --expire-days 21
 npx wrangler r2 bucket lifecycle add <your-bucket> expire-weekly  <prefix>/weekly/  --expire-days 91
 npx wrangler r2 bucket lifecycle add <your-bucket> expire-monthly <prefix>/monthly/ --expire-days 730
@@ -51,7 +55,7 @@ npx wrangler r2 bucket lifecycle add <your-bucket> expire-log     _log/         
 # verify and archive publish for /health/jobs) are overwritten every run and must NOT be locked or
 # expired — like _status/, they are control-plane state, not backups.
 
-# Bucket locks (WORM): 14-day immutability on the DURABLE tiers only — NOT on 2hourly/ (a lock there
+# Bucket locks (WORM): 14-day immutability on the DURABLE tiers only — NOT on intraday/ (a lock there
 # would block its 2-day expiry, since locks take precedence over lifecycle).
 npx wrangler r2 bucket lock add <your-bucket> lock-daily   <prefix>/daily/   --retention-days 14
 npx wrangler r2 bucket lock add <your-bucket> lock-weekly  <prefix>/weekly/  --retention-days 14
@@ -159,7 +163,7 @@ gh secret list --repo <owner/name> | grep R2_     # both should show today
 gh workflow run pg-backup.yml --repo <owner/name> -f reason=manual
 ```
 
-A manual backup is the cheap proof: it lands in the `2hourly` tier only, which expires in 2 days, so
+A manual backup is the cheap proof: it lands in the `intraday` tier only, which expires in 2 days, so
 a bad roll costs nothing and you learn within minutes instead of at the next anchor. The rotation
 record shows up in the following `verify-durable` run as `credential R2: rotated 0d ago`.
 

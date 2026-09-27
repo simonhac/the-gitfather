@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { pickLatestRun } from "../runlog.js";
 
 const rec = (ts: string, extra: Record<string, unknown> = {}) =>
-  JSON.stringify({ ts, ok: true, tiers: ["2hourly"], ...extra });
+  JSON.stringify({ ts, ok: true, tiers: ["intraday"], ...extra });
 
 test("pickLatestRun: empty / absent bodies answer null, never throw", () => {
   for (const body of ["", "   ", "\n\n"]) assert.equal(pickLatestRun(body), null);

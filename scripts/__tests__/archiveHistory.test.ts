@@ -69,7 +69,7 @@ const payloadWith = (
   label: "db",
   generatedAt: NOW.toISOString(),
   retention: {
-    "2hourly": { days: 2, label: "2 days" },
+    intraday: { days: 2, label: "2 days" },
     daily: { days: 21, label: "3 weeks" },
     weekly: { days: 91, label: "13 weeks" },
     monthly: { days: 730, label: "2 years" },

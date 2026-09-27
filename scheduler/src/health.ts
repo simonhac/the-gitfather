@@ -24,7 +24,7 @@ export type WatchdogOutcome =
   | "stale-no-heal" // overdue; selfHeal off → paged
   | "stale-unhealed" // overdue; the catch-up dispatch itself failed → paged
   | "broken-size" // newest object smaller than minBytes → paged, never healed
-  | "no-objects" // nothing under <prefix>/2hourly/ → paged
+  | "no-objects" // nothing under <prefix>/intraday/ (or the legacy 2hourly/) → paged
   | "bad-stamp" // newest object's name doesn't carry a parseable stamp → paged
   | "no-config" // no _config/*/watchdog.json in the bucket yet (run the backup once)
   | "error"; // unexpected exception — logged, never propagated

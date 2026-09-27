@@ -32,6 +32,7 @@ import {
   type WeekState,
 } from "./lib/archive.js";
 import { HOURS_PER_SLOT, SLOT_MINUTES } from "./lib/backupTypes.js";
+import { slotPhaseMinutes } from "./lib/schedule.js";
 import type {
   LogRun,
   LogVerification,
@@ -295,8 +296,9 @@ async function main(): Promise<void> {
 }
 
 // ── Sample data (local preview only) ─────────────────────────────────────────
-// A deterministic history that exercises the full GFS picture: an 8-hourly grandson run on
-// every slot, promoted to daily/weekly/monthly on the 16:00-UTC anchors (so the heatmap shows
+// A deterministic history that exercises the full GFS picture: an intraday run on every slot of
+// the profile's cadence (phased from its anchor hour, as the Worker schedules it), promoted to
+// daily/weekly/monthly on the anchor-hour runs (so the heatmap shows
 // the green lifespan "staircase"), an organically growing dump size, a sprinkle of isolated
 // failures, and one believable outage. Spans a bit more than the 52-week grid so daily/weekly
 // anchors visibly age to grey within the visible window.
@@ -341,7 +343,9 @@ function makeSample(now: Date): {
   const end = now.getTime();
   const start = end - SAMPLE_DAYS * 86_400_000;
   const slotMs = HOURS_PER_SLOT * 3_600_000;
-  const first = Math.ceil(start / slotMs) * slotMs;
+  const anchorHour = cfg.anchorHourUtc;
+  const phaseMs = slotPhaseMinutes(SLOT_MINUTES, anchorHour) * 60_000;
+  const first = Math.ceil((start - phaseMs) / slotMs) * slotMs + phaseMs;
 
   // Dump size grows toward the present: a mid-size production DB ~2.2 GB at the window
   // start, compounding ~0.2%/day to ~4.9 GB now, with a steady per-day wobble and a
@@ -371,8 +375,8 @@ function makeSample(now: Date): {
       continue;
     }
 
-    const tiers: BackupTier[] = ["2hourly"];
-    if (d.getUTCHours() === 16) {
+    const tiers: BackupTier[] = ["intraday"];
+    if (d.getUTCHours() === anchorHour) {
       tiers.push("daily");
       if (d.getUTCDay() === 0) tiers.push("weekly");
       if (d.getUTCDate() === 1) tiers.push("monthly");
@@ -388,10 +392,10 @@ function makeSample(now: Date): {
 
   // A couple of slots with more than one run, to exercise the multi-run rendering: when two runs
   // land in the same display slot (a manual rerun, or a failure that's retried), the cell's mark
-  // splits into two dashes if they disagreed. Placed in the last ~2 days so the 2hourly copies are
+  // splits into two dashes if they disagreed. Placed in the last ~2 days so the intraday copies are
   // still retained (green), not aged-out grey.
   const iso = (ms: number) => new Date(ms).toISOString().replace(".000", "");
-  const bucket = (hoursAgo: number) => Math.floor((end - hoursAgo * 3_600_000) / slotMs) * slotMs;
+  const bucket = (hoursAgo: number) => Math.floor((end - hoursAgo * 3_600_000 - phaseMs) / slotMs) * slotMs + phaseMs;
 
   // (a) Mixed slot: the scheduled run (already added by the loop, OK) plus a manual rerun ~40 min
   //     later that failed → a green body with a two-dash mark (red + muted).
@@ -401,7 +405,7 @@ function makeSample(now: Date): {
   // (b) Multi-success slot: the scheduled run plus a successful manual rerun ~50 min later. Both
   //     clean, so under the grammar the cell stays a plain green body — the count is in the tooltip.
   const rerun = bucket(40) + 50 * 60_000;
-  runs.push({ ts: iso(rerun), ok: true, tiers: ["2hourly"], bytes: 4_840_000_000, key: null, sha256: null, counts: null, runId: null, runUrl: ghRun(rerun), error: null, errorCode: null, durationMs: 88_000 });
+  runs.push({ ts: iso(rerun), ok: true, tiers: ["intraday"], bytes: 4_840_000_000, key: null, sha256: null, counts: null, runId: null, runUrl: ghRun(rerun), error: null, errorCode: null, durationMs: 88_000 });
 
   // One restore drill per weekly anchor (Sunday daily backup), run ~30 h later. ~97% pass.
   const weekly = runs.filter((r) => r.ok && r.tiers.includes("weekly")).map((r) => r.ts);

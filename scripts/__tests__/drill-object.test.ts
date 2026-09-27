@@ -30,7 +30,8 @@ test("parseArgs: --list and --no-record", () => {
 
 test("tierOf: reads the tier from the key, and answers null rather than guessing", () => {
   assert.equal(tierOf("monthly/boost-20260901T160102Z.dump.age"), "monthly");
-  assert.equal(tierOf("2hourly/boost-20260925T160306Z.dump.age"), "2hourly");
+  assert.equal(tierOf("intraday/boost-20260925T160306Z.dump.age"), "intraday");
+  assert.equal(tierOf("2hourly/boost-20260925T160306Z.dump.age"), "intraday", "the legacy prefix is the same tier");
   assert.equal(tierOf("boost-20260925T160306Z.dump.age"), null, "no tier prefix");
   assert.equal(tierOf("quarterly/x.dump"), null, "not one of ours");
 });
