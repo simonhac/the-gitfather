@@ -30,9 +30,14 @@ const DB = `gf_archive_test_${process.pid}`;
 
 const md5 = (s: string): string => createHash("md5").update(s, "utf8").digest("hex");
 
-/** psql with the ambient PGSSLROOTCERT cleared — a `system` value rejects sslmode=disable outright. */
+/**
+ * psql with the ambient PGSSLROOTCERT cleared — a `system` value rejects sslmode=disable outright.
+ * The SQL goes in on stdin, not as `-c`: the seed INSERT carries a 300 KB row, and Linux caps a
+ * single argv string at 128 KB (E2BIG). macOS has no such cap, so `-c` only ever broke in CI.
+ */
 function psql(url: string, sql: string): string {
-  return execFileSync("psql", [url, "-X", "-q", "-t", "-A", "-v", "ON_ERROR_STOP=1", "-c", sql], {
+  return execFileSync("psql", [url, "-X", "-q", "-t", "-A", "-v", "ON_ERROR_STOP=1"], {
+    input: sql,
     encoding: "utf8",
     env: { ...process.env, PGSSLROOTCERT: "" },
   }).trim();
