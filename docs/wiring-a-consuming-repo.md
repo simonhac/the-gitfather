@@ -31,7 +31,7 @@ to the bucket — so a repo with no Actions minutes left is still watched. The `
 name: My DB backup → R2          # keep this name — pg-dashboard's workflow_run references it
 on:
   schedule:
-    - cron: "0 0,8,16 * * *"     # 00/08/16 UTC (8-hourly); the anchor-hour-utc (16) run also promotes
+    - cron: "0 0,8,16 * * *"     # only without the Cloudflare scheduler — match the profile's backups-per-day (3 → 00/08/16 UTC); the anchor-hour-utc (16) run also promotes
   workflow_dispatch:
     inputs:
       reason:

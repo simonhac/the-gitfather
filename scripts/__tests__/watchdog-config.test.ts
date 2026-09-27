@@ -23,6 +23,7 @@ test("watchdog config: a validated profile round-trips through publish â†’ parse
   assert.equal(published.backupPrefix, "pg/example");
   assert.equal(published.timezone, "Australia/Perth");
   assert.equal(published.slotMinutes, 480);
+  assert.equal(published.anchorHourUtc, 16);
   assert.equal(published.graceMinutes, 25);
   assert.equal(published.maxAgeHours, 12); // derived backstop
   assert.equal(published.repageMinutes, 60);
@@ -65,6 +66,8 @@ test("watchdog config: the parser refuses anything the watchdog cannot run on (â
   assert.equal(mutate({ name: "" }), null);
   assert.equal(mutate({ backupPrefix: undefined }), null);
   assert.equal(mutate({ slotMinutes: 100 }), null); // must divide 1440
+  assert.equal(mutate({ slotMinutes: 90 }), null); // â€¦in whole hours
+  assert.equal(mutate({ anchorHourUtc: 24 }), null);
   assert.equal(mutate({ slotMinutes: "480" }), null);
   assert.equal(mutate({ maxAgeHours: 0 }), null);
   assert.equal(mutate({ selfHeal: "yes" }), null);
@@ -75,6 +78,16 @@ test("watchdog config: the parser refuses anything the watchdog cannot run on (â
   assert.equal(lenient.backupPrefix, "pg/example");
   assert.equal(lenient.dashboardUrl, null);
   assert.equal(lenient.alertMention, "<!here>");
+});
+
+test("watchdog config: the cadence and anchor ride along; a pre-anchor config defaults to 16", () => {
+  const daily = watchdogConfigFrom(backupSchema.parse({ ...base, backupsPerDay: 1, anchorHourUtc: 5 }), NOW, "");
+  assert.equal(daily.slotMinutes, 1440);
+  assert.equal(daily.anchorHourUtc, 5);
+  assert.equal(parseWatchdogConfig(JSON.stringify(daily))?.anchorHourUtc, 5);
+  const old: Partial<typeof daily> = { ...daily };
+  delete old.anchorHourUtc;
+  assert.equal(parseWatchdogConfig(JSON.stringify(old))?.anchorHourUtc, 16);
 });
 
 test("watchdog config: one object per backup name, under _config/", () => {

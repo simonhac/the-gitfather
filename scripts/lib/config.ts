@@ -18,7 +18,8 @@
 
 import { z } from "zod";
 import { parseDuration, type Duration } from "./duration.js";
-import { DEFAULT_RETENTION, DEFAULT_SLOT_MINUTES, type RetentionMap } from "./backupTypes.js";
+import { DEFAULT_BACKUPS_PER_DAY, DEFAULT_RETENTION, slotMinutesFrom, type RetentionMap } from "./backupTypes.js";
+import { DEFAULT_ANCHOR_HOUR_UTC } from "./schedule.js";
 import { buildRawProfile } from "./profile.js";
 
 // ── Reusable grammars ────────────────────────────────────────────────────────
@@ -136,7 +137,7 @@ const integrityGroup = z
 
 const retentionGroup = z
   .object({
-    grandson: durationField(DEFAULT_RETENTION["2hourly"]),
+    grandson: durationField(DEFAULT_RETENTION.intraday),
     son: durationField(DEFAULT_RETENTION.daily),
     father: durationField(DEFAULT_RETENTION.weekly),
     grandfather: durationField(DEFAULT_RETENTION.monthly),
@@ -224,15 +225,16 @@ export const defaultMaxAgeHours = (slotMinutes: number, graceMinutes: number): n
 
 const stalenessGroup = z
   .object({
-    // Primary trigger is slot-based (slotMinutes/graceMinutes); maxAgeHours is a backstop that still
-    // pages if the slot math is misconfigured and a truly ancient object slips through. Unset →
-    // derived from the cadence (defaultMaxAgeHours), which is the only default that cannot be wrong
-    // for the configured slot width.
+    // Primary trigger is slot-based (the slot width comes from top-level `backups-per-day`);
+    // maxAgeHours is a backstop that still pages if the slot math is misconfigured and a truly
+    // ancient object slips through. Unset → derived from the cadence (defaultMaxAgeHours, applied
+    // by profileSchema's transform, which is where the slot width is known).
     maxAgeHours: optInt(1, Number.MAX_SAFE_INTEGER),
-    // Backup cadence in minutes — MUST match the caller's cron interval, and must divide 1440
-    // (requireValidStalenessSlot). The default is shared with the display constants so the alerting
-    // cadence and the rendered cadence can never be two different numbers.
-    slotMinutes: intIn(DEFAULT_SLOT_MINUTES, 1, 1440),
+    // LEGACY: the cadence used to be set here in minutes. It now comes from top-level
+    // `backups-per-day`; a profile that still sets this is accepted only when it agrees
+    // (requireValidCadence), with a deprecation warning (configWarnings). Remove once no consumer
+    // profile sets it.
+    slotMinutes: optInt(1, 1440),
     graceMinutes: intIn(25, 0, 720), // minutes past a slot boundary before the slot counts as overdue
     // Minutes between LOUD re-pages while an outage persists. The watchdog ticks far more often
     // than this (every ~10 min), and paging on every tick is how 16 hours of downtime became ~96
@@ -244,10 +246,6 @@ const stalenessGroup = z
     dryRun: boolIn(false),
   })
   .strict()
-  .transform((v) => ({
-    ...v,
-    maxAgeHours: v.maxAgeHours ?? defaultMaxAgeHours(v.slotMinutes, v.graceMinutes),
-  }))
   .prefault({} as never);
 
 // Archive encryption deliberately offers FEWER options than the dump's `encryption:` — "aes-gcm"
@@ -377,7 +375,11 @@ export const profileSchema = z.object({
   // nobody can open, and the first sign of it would be a failed restore months later. A public key
   // is not a secret; pinning it here is the only keyless guard available.
   expectRecipient: opt(nonEmpty()),
-  anchorHourUtc: intIn(16, 0, 23),
+  anchorHourUtc: intIn(DEFAULT_ANCHOR_HOUR_UTC, 0, 23),
+  // How many backups a day: a factor of 24 (1, 2, 3, 4, 6, 8, 12, 24), so the slots are whole hours
+  // that tile a day. The slots are phased from anchor-hour-utc — at 3 a day with anchor 16 that is
+  // 00/08/16 UTC; at 1 a day it is the anchor hour alone. The Worker dispatches on this schedule.
+  backupsPerDay: intIn(DEFAULT_BACKUPS_PER_DAY, 1, 24),
   dump: dumpGroup,
   integrity: integrityGroup,
   archive: archiveGroup,
@@ -389,7 +391,22 @@ export const profileSchema = z.object({
   slack: slackGroup,
   dashboard: dashboardGroup,
   credentials: credentialsGroup,
-}).strict(); // reject unknown/typo'd or misplaced keys (e.g. Slack creds under slack:) instead of silently dropping them
+})
+  .strict() // reject unknown/typo'd or misplaced keys (e.g. Slack creds under slack:) instead of silently dropping them
+  .superRefine(requireValidCadence)
+  // The slot width is derived here, once, so everything downstream (the watchdog publisher, the
+  // staleness checks, the Slack row) reads `staleness.slotMinutes` without knowing where it came from.
+  .transform((v) => {
+    const slotMinutes = slotMinutesFrom(v.backupsPerDay);
+    return {
+      ...v,
+      staleness: {
+        ...v.staleness,
+        slotMinutes,
+        maxAgeHours: v.staleness.maxAgeHours ?? defaultMaxAgeHours(slotMinutes, v.staleness.graceMinutes),
+      },
+    };
+  });
 
 export type Profile = z.infer<typeof profileSchema>;
 
@@ -534,20 +551,6 @@ function requireManualDrillCreds(v: Profile, ctx: Ctx): void {
 export const manualDrillSchema = profileSchema.superRefine(requireManualDrillCreds);
 
 function requireValidStalenessSlot(v: Profile, ctx: Ctx): void {
-  // The slot width has to tile a day exactly. Everything that buckets a run into a slot does
-  // `floor(hour / (24 / slotsPerDay))` — the Slack daily row, the dashboard heatmap columns, the
-  // cadence prose — so a non-divisor produces slots whose boundaries do not exist, and the grid
-  // silently mis-files runs rather than failing. Refuse it here instead.
-  if (1440 % v.staleness.slotMinutes !== 0) {
-    miss(
-      ctx,
-      ["staleness", "slotMinutes"],
-      `must divide 1440 (a whole day) — ${v.staleness.slotMinutes} does not, so the Slack row and the ` +
-        `dashboard heatmap would bucket runs into slot boundaries that never occur. Use e.g. ` +
-        `60, 120, 240, 480 or 720`,
-    );
-  }
-
   // grace must sit strictly inside the slot: if grace ≥ slot, dueMs always lands in a LATER slot than the
   // one `now` is in, so the current slot can never be flagged overdue — slot-based self-heal silently never
   // fires and recovery falls back to the slow max-age-hours backstop. See lib/schedule.ts slotState().
@@ -555,7 +558,7 @@ function requireValidStalenessSlot(v: Profile, ctx: Ctx): void {
     miss(
       ctx,
       ["staleness", "graceMinutes"],
-      `must be less than staleness.slot-minutes (${v.staleness.slotMinutes}); otherwise the current slot can ` +
+      `must be less than the slot width (${v.staleness.slotMinutes} minutes at backups-per-day ${v.backupsPerDay}); otherwise the current slot can ` +
         `never be flagged overdue and slot-based self-heal silently falls back to the max-age-hours backstop`,
     );
   }
@@ -570,7 +573,7 @@ function requireValidStalenessSlot(v: Profile, ctx: Ctx): void {
     miss(
       ctx,
       ["staleness", "maxAgeHours"],
-      `must exceed staleness.slot-minutes + grace-minutes (${slotWindow}m = ` +
+      `must exceed the slot width + grace-minutes (${slotWindow}m = ` +
         `${(slotWindow / 60).toFixed(1)}h); ${v.staleness.maxAgeHours}h sits inside a single backup slot, ` +
         `so the backstop would page on every healthy tick. Leave it unset to derive it from the cadence ` +
         `(${defaultMaxAgeHours(v.staleness.slotMinutes, v.staleness.graceMinutes)}h here)`,
@@ -643,6 +646,50 @@ export function dashboardSchema(opts: { fromR2?: boolean; upload?: boolean } = {
   });
 }
 
+/** The profile's `backups-per-day` and `staleness`, as parsed (before the slot width is derived). */
+interface CadenceInput {
+  backupsPerDay: number;
+  staleness: { slotMinutes?: number };
+}
+
+/**
+ * `backups-per-day` must divide 24, so every slot is a whole number of hours and the slots tile a
+ * day. Everything that buckets a run into a slot does `floor(hour / (24 / slotsPerDay))` — the Slack
+ * daily row, the dashboard heatmap columns — and the Worker dispatches on whole hours, so any other
+ * count would produce slot boundaries that never occur. Also reconciles the LEGACY
+ * `staleness.slot-minutes`, which may still be set but must agree.
+ */
+function requireValidCadence(v: CadenceInput, ctx: Ctx): void {
+  if (24 % v.backupsPerDay !== 0) {
+    miss(
+      ctx,
+      ["backupsPerDay"],
+      `must be a factor of 24 (1, 2, 3, 4, 6, 8, 12 or 24) — ${v.backupsPerDay} does not give whole-hour ` +
+        `slots that tile a day`,
+    );
+    return;
+  }
+  const legacy = v.staleness.slotMinutes;
+  if (legacy !== undefined && legacy !== slotMinutesFrom(v.backupsPerDay)) {
+    miss(
+      ctx,
+      ["staleness", "slotMinutes"],
+      `is deprecated — set backups-per-day instead. It says ${legacy} minutes but backups-per-day ` +
+        `${v.backupsPerDay} means ${slotMinutesFrom(v.backupsPerDay)}; remove it`,
+    );
+  }
+}
+
+/**
+ * Non-fatal notes about a profile that validated. Read from the RAW object, because the parsed one
+ * has already overwritten `staleness.slotMinutes` with the derived width.
+ */
+export function configWarnings(raw: Record<string, unknown>): string[] {
+  const staleness = raw.staleness as Record<string, unknown> | undefined;
+  if (staleness?.slotMinutes === undefined) return [];
+  return ["staleness.slot-minutes is deprecated and ignored — the cadence is backups-per-day; remove it from the profile"];
+}
+
 // ── Typed outputs ────────────────────────────────────────────────────────────
 
 export type BackupConfig = Profile;
@@ -655,7 +702,7 @@ export type ArchiveConfig = Profile;
 // ── retention → dashboard RetentionMap ───────────────────────────────────────
 
 export function retentionFromConfig(r: Profile["retention"]): RetentionMap {
-  return { "2hourly": r.grandson, daily: r.son, weekly: r.father, monthly: r.grandfather };
+  return { intraday: r.grandson, daily: r.son, weekly: r.father, monthly: r.grandfather };
 }
 
 // ── Error reporting (secret-safe; YAML fields as kebab, credentials as their ENV name) ───
@@ -706,11 +753,13 @@ export function reportConfigError(err: z.ZodError): void {
  * Shared by the tasks AND doctor, so the two can never drift.
  */
 export function loadConfig<T extends z.ZodType>(schema: T): z.infer<T> {
-  const res = schema.safeParse(buildRawProfile());
+  const raw = buildRawProfile();
+  const res = schema.safeParse(raw);
   if (!res.success) {
     reportConfigError(res.error);
     process.exit(1);
   }
+  for (const w of configWarnings(raw)) process.stderr.write(`⚠ ${w}\n`);
   return res.data;
 }
 

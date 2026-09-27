@@ -162,7 +162,7 @@ const onlyCell = (payload: PublicPayload) => {
   return cells[0];
 };
 const backup = (t: string, over: Partial<PublicRun> = {}): PublicRun => ({
-  t, ok: true, tiers: ["2hourly", "daily"], bytes: 1_000, runUrl: null, ...over,
+  t, ok: true, tiers: ["intraday", "daily"], bytes: 1_000, runUrl: null, ...over,
 });
 
 test("buildBackupGrid: a clean run is a body with nothing to add", () => {

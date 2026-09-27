@@ -120,20 +120,18 @@ export function bridgeDisplayTz(): void {
 }
 
 /**
- * Set process.env.SLOT_MINUTES from the profile's `staleness.slot-minutes` BEFORE backupTypes.ts
- * derives SLOTS_PER_DAY / HOURS_PER_SLOT / the cadence prose from it at module load.
+ * Set process.env.SLOT_MINUTES from the profile's `backups-per-day` BEFORE backupTypes.ts derives
+ * SLOTS_PER_DAY / HOURS_PER_SLOT / the cadence prose from it at module load.
  *
- * Like bridgeDisplayTz, this only accepts a value it can render honestly — here, a whole-minute
- * divisor of a day. A non-divisor would give a fractional slot width, and `floor(hour / width)`
- * would then bucket runs into slots whose boundaries do not exist; the config layer refuses that
- * outright (requireValidStalenessSlot), so reaching the default here means the profile is already
- * failing validation, not that a wrong grid is being drawn.
+ * Like bridgeDisplayTz, this only accepts a value it can render honestly — a factor of 24, so each
+ * slot is a whole number of hours. Anything else would bucket runs into slots whose boundaries do not
+ * exist; the config layer refuses it outright (requireValidCadence), so reaching the default here
+ * means the profile is already failing validation, not that a wrong grid is being drawn.
  */
 export function bridgeSlotMinutes(): void {
-  const staleness = loadProfileConfig().staleness as Record<string, unknown> | undefined;
-  const m = staleness?.slotMinutes;
-  if (typeof m === "number" && Number.isInteger(m) && m > 0 && m <= 1440 && 1440 % m === 0) {
-    process.env.SLOT_MINUTES = String(m);
+  const n = loadProfileConfig().backupsPerDay;
+  if (typeof n === "number" && Number.isInteger(n) && n >= 1 && n <= 24 && 24 % n === 0) {
+    process.env.SLOT_MINUTES = String(1440 / n);
   }
 }
 

@@ -5,6 +5,58 @@
 
 import type { RunOrigin } from "./runOrigin.js";
 
+/** Backups per day when a profile doesn't say (00/08/16 UTC at the default anchor). */
+export const DEFAULT_BACKUPS_PER_DAY = 3;
+
+/** The profile's `anchor-hour-utc` default: the run at this hour is promoted to daily/weekly/monthly. */
+export const DEFAULT_ANCHOR_HOUR_UTC = 16;
+
+/** The write tier every run lands in first; the anchor-hour run is then copied to the durable tiers. */
+export const INTRADAY_TIER = "intraday";
+
+/**
+ * LEGACY: the intraday tier's old id and R2 prefix, from when the cadence was fixed at two-hourly.
+ * Objects written before the rename still sit under `<prefix>/2hourly/` until the lifecycle rule
+ * expires them (the grandson window, 2 days by default), and old run-log records carry it as a tier.
+ * Every reader that still accepts it names this constant, so removing the transition is one grep.
+ */
+export const LEGACY_INTRADAY_TIER = "2hourly";
+
+/** A run-log tier id with the legacy name mapped onto the current one. */
+export const normalizeTier = (t: string): string => (t === LEGACY_INTRADAY_TIER ? INTRADAY_TIER : t);
+
+/** Where the newest dump may be: the intraday prefix, then (transitionally) the legacy one. */
+export const INTRADAY_PREFIXES: readonly string[] = [INTRADAY_TIER, LEGACY_INTRADAY_TIER];
+
+/**
+ * The newest of several object names by their `<name>-YYYYMMDDTHHMMSSZ` stamp. Names from the same
+ * backup share a basename prefix, so lexical order is chronological — across prefixes too.
+ */
+export function newestName<T>(items: readonly T[], nameOf: (t: T) => string): T | null {
+  let best: T | null = null;
+  for (const it of items) if (best === null || nameOf(it) > nameOf(best)) best = it;
+  return best;
+}
+
+/**
+ * Minutes past midnight UTC at which the slot grid starts: slots are phased from the anchor hour, so
+ * the anchor-hour run (the one promoted to daily/weekly/monthly) always opens a slot. At 3 a day with
+ * anchor 16 this is 0 (00/08/16); at 1 a day it is the anchor hour itself.
+ */
+export function slotPhaseMinutes(slotMinutes: number, anchorHourUtc: number): number {
+  return (anchorHourUtc * 60) % slotMinutes;
+}
+
+/**
+ * Is `t` a scheduled backup instant for this cadence? True on the hour when the UTC hour is the anchor
+ * hour plus a whole number of slots. `backupsPerDay` must divide 24 (the profile schema enforces it).
+ */
+export function isBackupSlot(t: Date, backupsPerDay: number, anchorHourUtc: number): boolean {
+  if (t.getUTCMinutes() !== 0) return false;
+  const width = 24 / backupsPerDay;
+  return (((t.getUTCHours() - anchorHourUtc) % width) + width) % width === 0;
+}
+
 /**
  * Classify a run's origin for the Slack-row marker. `eventName` = GITHUB_EVENT_NAME; `reason` =
  * BACKUP_TRIGGER (threaded from the caller's workflow_dispatch `reason` input).
@@ -21,14 +73,31 @@ export function runOrigin(eventName: string | undefined, reason: string | undefi
   return "manual"; // GitHub-UI "Run workflow" (reason empty) or a local run → 🖐️
 }
 
+/** One backup's dispatch schedule, as published to the Worker (see watchdogConfig.ts). */
+export interface BackupSchedule {
+  slotMinutes: number;
+  anchorHourUtc: number;
+}
+
 /**
- * Tiers this run belongs to. Always 2hourly; the anchor-hour run is also daily, +weekly on Sunday,
+ * Should the Worker dispatch this client's backup workflow at `t`? A client's bucket can hold several
+ * published configs (one per database); the caller workflow is dispatched once when ANY of them is due.
+ * A client that has published nothing yet — a new client, or one whose config listing failed — runs on
+ * the default schedule, so its first backup can publish the real one.
+ */
+export function backupDue(t: Date, schedules: readonly BackupSchedule[]): boolean {
+  if (schedules.length === 0) return isBackupSlot(t, DEFAULT_BACKUPS_PER_DAY, DEFAULT_ANCHOR_HOUR_UTC);
+  return schedules.some((s) => isBackupSlot(t, 1440 / s.slotMinutes, s.anchorHourUtc));
+}
+
+/**
+ * Tiers this run belongs to. Always intraday; the anchor-hour run is also daily, +weekly on Sunday,
  * +monthly on the 1st — all in UTC. A non-empty `forced` (FORCE_TIERS) overrides the computation.
  * NB: bash `%u` makes Sunday=7; JS getUTCDay() makes Sunday=0 — hence the `=== 0` check.
  */
 export function computeTiers(now: Date, anchorHour: number, forced: string[] = []): string[] {
   if (forced.length) return forced;
-  const tiers = ["2hourly"];
+  const tiers = [INTRADAY_TIER];
   if (now.getUTCHours() === anchorHour) {
     tiers.push("daily");
     if (now.getUTCDay() === 0) tiers.push("weekly");
@@ -50,21 +119,23 @@ export function stampToEpochMs(stamp: string): number {
 }
 
 /**
- * Is the current cadence slot's backup overdue? `slotMs` is aligned to the Unix epoch, so a
- * 120-minute slot puts the boundaries on even UTC hours — matching a two-hourly backup cron. A slot
- * is "satisfied" once an object stamped at-or-after its boundary exists; it counts as "overdue" only
- * once the boundary has passed AND the grace window has elapsed AND nothing has landed for it. This
- * decouples self-heal recovery time (≈ grace) from the backup interval — see scheduler/src/watchdog.ts.
- * Pure + UTC, like the rest of this module (unit-tested in schedule.test.ts).
+ * Is the current cadence slot's backup overdue? Slots are `slotMinutes` wide and start at
+ * `phaseMinutes` past midnight UTC (slotPhaseMinutes — phased from the anchor hour, matching the
+ * Worker's dispatch). A slot is "satisfied" once an object stamped at-or-after its boundary exists; it
+ * counts as "overdue" only once the boundary has passed AND the grace window has elapsed AND nothing
+ * has landed for it. This decouples self-heal recovery time (≈ grace) from the backup interval — see
+ * scheduler/src/watchdog.ts. Pure + UTC, like the rest of this module (unit-tested in schedule.test.ts).
  */
 export function slotState(
   nowMs: number,
   newestEpochMs: number,
   slotMinutes: number,
   graceMinutes: number,
+  phaseMinutes = 0,
 ): { overdue: boolean; landed: boolean; slotStartMs: number; dueMs: number } {
   const slotMs = slotMinutes * 60_000;
-  const slotStartMs = Math.floor(nowMs / slotMs) * slotMs;
+  const phaseMs = phaseMinutes * 60_000;
+  const slotStartMs = Math.floor((nowMs - phaseMs) / slotMs) * slotMs + phaseMs;
   const dueMs = slotStartMs + graceMinutes * 60_000;
   const landed = newestEpochMs >= slotStartMs; // this slot already has a backup
   const overdue = !landed && nowMs >= dueMs; // boundary + grace passed, still nothing landed

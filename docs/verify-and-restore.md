@@ -33,7 +33,7 @@ done by decrypting, which is how the identity ends up as a CI secret in the firs
   tell you what an object was encrypted to. Without the pin, a rotated or mistyped secret writes
   objects nobody can open and nothing notices until someone tries to decrypt one.
 
-**2. The restore drill** (`restore-drill-pg.ts`) — restores the newest `2hourly` dump into a throwaway
+**2. The restore drill** (`restore-drill-pg.ts`) — restores the newest `intraday` dump into a throwaway
 Postgres and gates on the data, not just a clean exit:
 
 - The `drill.row-count-table` count must be **`drill.min-row-ratio` ≤ restored/live ≤ `drill.max-row-ratio`**

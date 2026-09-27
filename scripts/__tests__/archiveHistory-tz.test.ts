@@ -13,7 +13,7 @@ const { buildArchiveColumns, buildBackupGrid } = await import("../lib/backupHist
 const NOW = new Date("2026-09-10T02:00:00Z"); // Thu 10 Sep, 12:00 pm AEST
 
 const RETENTION = {
-  "2hourly": { days: 2, label: "2 days" },
+  intraday: { days: 2, label: "2 days" },
   daily: { days: 21, label: "3 weeks" },
   weekly: { days: 91, label: "13 weeks" },
   monthly: { days: 730, label: "2 years" },
@@ -30,7 +30,7 @@ const payload: PublicPayload = {
   generatedAt: NOW.toISOString(),
   retention: RETENTION,
   // The Sunday 16:00 UTC anchor that gets promoted to the weekly tier.
-  runs: [{ t: "2026-09-06T16:00:00Z", ok: true, tiers: ["2hourly", "daily", "weekly"], bytes: 1, runUrl: null }],
+  runs: [{ t: "2026-09-06T16:00:00Z", ok: true, tiers: ["intraday", "daily", "weekly"], bytes: 1, runUrl: null }],
   verifications: [],
   // The archive task, 3.5 h later.
   archive: {

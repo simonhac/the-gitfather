@@ -14,7 +14,12 @@
 
 import type { CellMark } from "./outcomes.js";
 
-export type BackupTier = "2hourly" | "daily" | "weekly" | "monthly";
+import { DEFAULT_BACKUPS_PER_DAY } from "./schedule.js";
+
+export { DEFAULT_BACKUPS_PER_DAY, LEGACY_INTRADAY_TIER, normalizeTier } from "./schedule.js";
+
+export type BackupTier = "intraday" | "daily" | "weekly" | "monthly";
+
 
 /**
  * Display timezone the dashboard + Slack row render in (the profile's DISPLAY_TZ; default UTC).
@@ -25,24 +30,24 @@ export type BackupTier = "2hourly" | "daily" | "weekly" | "monthly";
 export const DISPLAY_TZ = process.env.DISPLAY_TZ || "UTC";
 
 // ── Backup cadence — DERIVED, never hardcoded ────────────────────────────────
-// The slot width is the profile's `staleness.slot-minutes`, bridged into process.env by bootEnv
-// (Node) and baked into the browser bundle by build-dashboard's esbuild `define` — the same route
-// DISPLAY_TZ takes, for the same reason: these are read at MODULE LOAD.
+// The cadence is the profile's `backups-per-day`; its slot width (1440 / backups-per-day) is bridged
+// into process.env.SLOT_MINUTES by bootEnv (Node) and baked into the browser bundle by
+// build-dashboard's esbuild `define` — the same route DISPLAY_TZ takes, for the same reason: these
+// are read at MODULE LOAD.
 //
 // It is spelled out here because a hardcoded cadence has already shipped a dashboard that told
 // readers "a fresh one every 2 hours, 3 a day" — self-contradictory, and wrong in both halves
-// against an 8-hourly schedule. Only the "3" was derived; the "2 hours" was a literal left behind
-// when the cadence changed. Anything that renders the cadence takes it from here.
+// against an 8-hourly schedule. Anything that renders the cadence takes it from here.
 
-/**
- * Slot width when no profile is loaded. `staleness.slot-minutes` takes its zod default FROM this
- * constant, so there is exactly one number: the two used to disagree (the schema said 120 while the
- * display hardcoded 3 slots/day, i.e. 480), which is half of why the dashboard could claim a
- * two-hourly cadence and a three-a-day count in the same sentence.
- */
-export const DEFAULT_SLOT_MINUTES = 480;
+/** Slot width in minutes for a count of backups per day (validated to divide 24). */
+export function slotMinutesFrom(backupsPerDay: number): number {
+  return 1440 / backupsPerDay;
+}
 
-/** Slots per day for a given slot width. `staleness.slot-minutes` is validated to divide 1440. */
+/** Slot width when no profile is loaded. */
+export const DEFAULT_SLOT_MINUTES = slotMinutesFrom(DEFAULT_BACKUPS_PER_DAY);
+
+/** Slots per day for a given slot width. */
 export function slotsPerDayFrom(slotMinutes: number): number {
   return Math.round(1440 / slotMinutes);
 }
@@ -85,7 +90,7 @@ export function slotCadencePhrase(slotMinutes: number = SLOT_MINUTES): string {
  */
 export function retentionBullets(r: RetentionMap, slotMinutes: number = SLOT_MINUTES): string[] {
   return [
-    `the ${slotCadenceAdjective(slotMinutes)} “grandsons” are kept for ${r["2hourly"].label}, then`,
+    `the ${slotCadenceAdjective(slotMinutes)} “grandsons” are kept for ${r.intraday.label}, then`,
     `one “son” per day for ${r.daily.label},`,
     `one “father” per week for ${r.weekly.label}, and`,
     `one “grandfather” per month for ${r.monthly.label}`,
@@ -114,7 +119,7 @@ export interface TierRetention {
 export type RetentionMap = Record<BackupTier, TierRetention>;
 
 export const DEFAULT_RETENTION: RetentionMap = {
-  "2hourly": { days: 2, label: "2 days" },
+  intraday: { days: 2, label: "2 days" },
   daily: { days: 21, label: "3 weeks" },
   weekly: { days: 91, label: "13 weeks" },
   monthly: { days: 730, label: "2 years" },
@@ -122,9 +127,7 @@ export const DEFAULT_RETENTION: RetentionMap = {
 
 /** Per-tier GFS name, cadence phrase, and copy-interval (days) — drives the subtitle + max-count math. */
 export const TIER_META: Record<BackupTier, { gfs: string; every: string; cadenceDays: number }> = {
-  // Key and label diverge on purpose: `2hourly/` is the frozen R2 object-key prefix (a legacy name
-  // from when the cadence WAS two-hourly); `every` is the live cadence, derived.
-  "2hourly": { gfs: "grandson", every: intervalPhrase(SLOT_MINUTES), cadenceDays: 1 / SLOTS_PER_DAY },
+  intraday: { gfs: "grandson", every: intervalPhrase(SLOT_MINUTES), cadenceDays: 1 / SLOTS_PER_DAY },
   daily: { gfs: "son", every: "every day", cadenceDays: 1 },
   weekly: { gfs: "father", every: "every week", cadenceDays: 7 },
   monthly: { gfs: "grandfather", every: "every month", cadenceDays: 365 / 12 },
@@ -144,7 +147,7 @@ export interface LogRun {
   /** ISO-8601 UTC stamp of the dump (the run's slot). */
   ts: string;
   ok: boolean;
-  /** Tiers promoted to. Always includes "2hourly" on success; [] on failure. */
+  /** Tiers promoted to. Always includes "intraday" on success; [] on failure. */
   tiers: BackupTier[];
   bytes: number | null;
   key: string | null;
@@ -217,7 +220,7 @@ export interface LogVerification {
   ratio: number | null;
   runId: string | null;
   runUrl: string | null;
-  /** Which durable copy was tested (null = a legacy/2hourly drill record). */
+  /** Which durable copy was tested (null = a legacy/intraday drill record). */
   tier?: BackupTier | null;
   /** The exact object key tested (null on legacy records). */
   key?: string | null;

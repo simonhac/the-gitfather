@@ -19,7 +19,7 @@ import { tzAbbrev } from "./tzAbbrev.js";
 export interface RowContext {
   /** IANA display timezone (the profile's `timezone`). */
   tz: string;
-  /** Backup cadence in minutes (`staleness.slot-minutes`); must divide 1440. */
+  /** Slot width in minutes (1440 / the profile's `backups-per-day`); divides 1440. */
   slotMinutes: number;
   /** The profile `name` — names the state object and the header. */
   name: string;

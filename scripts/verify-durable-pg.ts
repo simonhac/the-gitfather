@@ -33,7 +33,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadVerifyDurableConfig, retentionFromConfig } from "./lib/config.js";
 import { capture, commandExists } from "./lib/proc.js";
-import { stampToEpochMs } from "./lib/schedule.js";
+import { INTRADAY_PREFIXES, stampToEpochMs } from "./lib/schedule.js";
 import { loadLog, stampFromKey, type LogStore } from "./lib/logStore.js";
 import { DURABLE_TIERS, expectedDurableKeys } from "./lib/durableCensus.js";
 import { verifyHeartbeatVerdict } from "./lib/verifyHeartbeat.js";
@@ -281,14 +281,19 @@ async function main(): Promise<void> {
       else await page(`hash mismatch ${o.key} (R2 ${got.slice(0, 12)}… vs recorded ${expected.slice(0, 12)}…)`);
       return;
     }
-    // No recorded baseline (run predates integrity.checksum). Fall back to the live 2hourly copy if present.
-    const twoH = capture("rclone", ["hashsum", "sha256", "--download", `r2:${r2Bucket}/${backupPrefix}/2hourly/${o.name}`, "--s3-no-check-bucket"]);
-    const baseline = twoH.ok ? (twoH.out.trim().split(/\s+/)[0]?.toLowerCase() ?? "") : "";
+    // No recorded baseline (run predates integrity.checksum). Fall back to the live intraday copy if
+    // present — under the LEGACY_INTRADAY_TIER prefix too, while objects written before the rename live.
+    let baseline = "";
+    for (const dir of INTRADAY_PREFIXES) {
+      const h = capture("rclone", ["hashsum", "sha256", "--download", `r2:${r2Bucket}/${backupPrefix}/${dir}/${o.name}`, "--s3-no-check-bucket"]);
+      baseline = h.ok ? (h.out.trim().split(/\s+/)[0]?.toLowerCase() ?? "") : "";
+      if (baseline) break;
+    }
     if (baseline) {
       const ok = got === baseline;
-      record(ok, ok ? "matched 2hourly copy (no recorded baseline)" : "differs from 2hourly copy");
-      if (ok) console.log(`✓ hash-verified ${o.key} (vs 2hourly copy)`);
-      else await page(`hash mismatch ${o.key} vs its 2hourly copy`);
+      record(ok, ok ? "matched intraday copy (no recorded baseline)" : "differs from intraday copy");
+      if (ok) console.log(`✓ hash-verified ${o.key} (vs intraday copy)`);
+      else await page(`hash mismatch ${o.key} vs its intraday copy`);
       return;
     }
     record(true, "no sha256 baseline (pre-sha256 run); object present + listable", false);

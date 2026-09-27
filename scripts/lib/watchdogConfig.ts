@@ -22,6 +22,7 @@ export interface WatchdogSource {
   name?: string;
   backupPrefix?: string;
   timezone: string;
+  anchorHourUtc: number;
   dump: { minBytes: number };
   staleness: {
     slotMinutes: number;
@@ -37,6 +38,9 @@ export interface WatchdogSource {
   archive?: { tables: readonly unknown[] };
 }
 
+/** The anchor hour assumed for a config published before `anchorHourUtc` was (the schema default). */
+const LEGACY_ANCHOR_HOUR_UTC = 16;
+
 /** Where a backup publishes its watchdog config. The Worker lists `_config/` to find every backup in a bucket. */
 export const WATCHDOG_CONFIG_PREFIX = "_config/";
 export const watchdogConfigKey = (name: string): string => `${WATCHDOG_CONFIG_PREFIX}${name}/watchdog.json`;
@@ -45,11 +49,18 @@ export interface WatchdogConfig {
   version: typeof WATCHDOG_CONFIG_VERSION;
   /** profile `name` — object-key basename, Slack header, _status/ and _log/ partition. */
   name: string;
-  /** profile `backup-prefix` — the watchdog lists `<backupPrefix>/2hourly/`. */
+  /** profile `backup-prefix` — the watchdog lists `<backupPrefix>/intraday/`. */
   backupPrefix: string;
   /** profile `timezone` — the Slack row's day boundary and HH:MM labels. */
   timezone: string;
+  /** Slot width, 1440 / `backups-per-day` — whole hours that tile a day. */
   slotMinutes: number;
+  /**
+   * profile `anchor-hour-utc` — the slot grid is phased from it, for both the Worker's backup dispatch
+   * and the watchdog's slot math. Configs published before the field default to 16, which at the
+   * then-universal 480-minute slot reproduces the fixed 00/08/16 schedule.
+   */
+  anchorHourUtc: number;
   graceMinutes: number;
   maxAgeHours: number;
   repageMinutes: number;
@@ -80,6 +91,7 @@ export function watchdogConfigFrom(cfg: WatchdogSource, now: Date, slackChannel:
     backupPrefix: cfg.backupPrefix ?? "",
     timezone: cfg.timezone,
     slotMinutes: cfg.staleness.slotMinutes,
+    anchorHourUtc: cfg.anchorHourUtc,
     graceMinutes: cfg.staleness.graceMinutes,
     maxAgeHours: cfg.staleness.maxAgeHours,
     repageMinutes: cfg.staleness.repageMinutes,
@@ -115,7 +127,9 @@ export function parseWatchdogConfig(raw: string): WatchdogConfig | null {
   if (!v || typeof v !== "object" || Array.isArray(v)) return null;
   if (v.version !== WATCHDOG_CONFIG_VERSION) return null;
   if (!isStr(v.name) || !isStr(v.backupPrefix) || !isStr(v.timezone)) return null;
-  if (!isInt(v.slotMinutes) || v.slotMinutes <= 0 || 1440 % v.slotMinutes !== 0) return null;
+  if (!isInt(v.slotMinutes) || v.slotMinutes <= 0 || v.slotMinutes % 60 !== 0 || 1440 % v.slotMinutes !== 0) return null;
+  const anchorHourUtc = v.anchorHourUtc ?? LEGACY_ANCHOR_HOUR_UTC;
+  if (!isInt(anchorHourUtc) || anchorHourUtc < 0 || anchorHourUtc > 23) return null;
   if (!isInt(v.graceMinutes) || v.graceMinutes < 0) return null;
   if (!isInt(v.maxAgeHours) || v.maxAgeHours <= 0) return null;
   if (!isInt(v.repageMinutes) || v.repageMinutes < 0) return null;
@@ -128,6 +142,7 @@ export function parseWatchdogConfig(raw: string): WatchdogConfig | null {
     backupPrefix: v.backupPrefix.replace(/\/+$/, ""),
     timezone: v.timezone,
     slotMinutes: v.slotMinutes,
+    anchorHourUtc,
     graceMinutes: v.graceMinutes,
     maxAgeHours: v.maxAgeHours,
     repageMinutes: v.repageMinutes,

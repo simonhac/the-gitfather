@@ -154,9 +154,10 @@ Everything here has a safe default or is feature-gated. Ask, but offer the defau
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `anchor-hour-utc` | `16` | the UTC hour whose run is also promoted to daily/weekly/monthly tiers |
+| `anchor-hour-utc` | `16` | the UTC hour whose run is also promoted to daily/weekly/monthly tiers; the backup slots are phased from it |
+| `backups-per-day` | `3` | how many backups a day — a factor of 24 (1, 2, 3, 4, 6, 8, 12, 24). The Worker dispatches on this schedule per client, and the watchdog, Slack row and dashboard all follow it. At the default anchor, `3` = 00/08/16 UTC and `1` = 16:00 UTC only |
 | `dump.min-bytes` | `1048576` (1 MB) | abort the upload if the dump is smaller (catches a truncated dump) |
-| `staleness.max-age-hours` | derived: `12` at the default cadence | backstop: alert if the newest object is older than this (the **primary** trigger is the slot-based overdue check — see 3e). Leave it unset unless the operator has a reason: unset derives 1.5 slots from `slot-minutes`, and a value inside `slot-minutes + grace` is **refused** by config validation |
+| `staleness.max-age-hours` | derived: `12` at the default cadence | backstop: alert if the newest object is older than this (the **primary** trigger is the slot-based overdue check — see 3e). Leave it unset unless the operator has a reason: unset derives 1.5 slots from `backups-per-day`, and a value inside one slot + grace is **refused** by config validation |
 | `drill.min-row-ratio` | `0.95` | restored/live row-count floor for the drill sentinel table |
 | `drill.max-row-ratio` | `2.0` | restored/live row-count ceiling — catches duplicated/double-restored rows |
 | `dump.flags` | `-Fc --no-owner --no-privileges` | pg_dump flags; tune per database (e.g. `--exclude-schema=…`) |
@@ -165,7 +166,7 @@ Everything here has a safe default or is feature-gated. Ask, but offer the defau
 | `drill.nonempty-tables` | (none) | space-separated tables that must each exist **and** have ≥1 row after restore |
 
 > `FORCE_TIERS` is **not** a profile key — it's an **env var for manual runs only** (a space-separated
-> subset of `2hourly daily weekly monthly` that forces promotion to those tiers). Set it in the
+> subset of `intraday daily weekly monthly` that forces promotion to those tiers). Set it in the
 > workflow/env at dispatch time; never write it into the YAML.
 
 ### 3b. Encryption (→ profile + secrets)
@@ -223,8 +224,7 @@ lands with the next backup run (or a manual `workflow_dispatch` of `pg-backup`).
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `staleness.slot-minutes` | `480` | backup cadence in minutes — **must match the Worker's backup cadence** (00/08/16 UTC = 480). The primary freshness trigger: a slot with no backup past its grace window is "overdue" |
-| `staleness.grace-minutes` | `25` | minutes past a slot boundary before it counts as overdue (**must be < slot-minutes**). Trades faster recovery against redundant heals on scheduler jitter |
+| `staleness.grace-minutes` | `25` | minutes past a slot boundary before it counts as overdue (**must be < the slot width**, `1440 / backups-per-day` minutes). The primary freshness trigger: a slot with no backup past its grace window is "overdue". Trades faster recovery against redundant heals on scheduler jitter |
 | `staleness.repage-minutes` | `60` | minutes between **loud** re-pages while an outage persists. The check runs every ~10 min, so paging on every tick turns a long outage into dozens of identical `@here` messages; entry into an outage and any change of **cause** still page immediately. `0` restores page-every-tick. Affects Slack only — every tick's outcome is still recorded in the scheduler's state, and a recovery note is posted when a fresh backup lands |
 | `staleness.self-heal` | `true` | on a missed slot, dispatch the backup caller workflow (`reason=self-heal` → 🩹) |
 | `staleness.dry-run` | `false` | staleness check evaluates but takes no action |
@@ -234,10 +234,10 @@ lands with the next backup run (or a manual `workflow_dispatch` of `pg-backup`).
 > `dump.min-bytes` is **also** the staleness floor: a fresh-but-smaller newest object is treated as broken
 > (pages directly) rather than just stale.
 
-> **The backstop must be looser than the slot logic**: `max-age-hours > slot-minutes/60 + grace-minutes/60`,
+> **The backstop must be looser than the slot logic**: `max-age-hours > 24/backups-per-day + grace-minutes/60`,
 > or the check pages on every healthy tick — mid-slot, the newest object is always older than a tight
 > backstop. Config validation refuses such a value outright. Omitting `max-age-hours` derives it
-> (1.5 slots: `12` h at the 480/25 default), which is the recommendation.
+> (1.5 slots: `12` h at the default 3 a day), which is the recommendation.
 
 ### 3f. Backup integrity & durable verification (→ profile, defaults fine)
 

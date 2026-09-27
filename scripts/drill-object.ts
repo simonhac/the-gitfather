@@ -51,9 +51,9 @@ import {
   stampToIso,
   type DrillGate,
 } from "./restore-drill-pg.js";
-import type { BackupTier } from "./lib/backupTypes.js";
+import { normalizeTier, type BackupTier } from "./lib/backupTypes.js";
 
-const TIERS: BackupTier[] = ["2hourly", "daily", "weekly", "monthly"];
+const TIERS: BackupTier[] = ["intraday", "daily", "weekly", "monthly"];
 
 export interface DrillArgs {
   key?: string;
@@ -84,7 +84,8 @@ export function parseArgs(argv: string[]): DrillArgs {
 
 /** The tier a key names, for the verification record. Unparseable → null rather than a guess. */
 export function tierOf(key: string): BackupTier | null {
-  const head = key.split("/")[0] as BackupTier;
+  // A key still under the LEGACY_INTRADAY_TIER prefix is an intraday object.
+  const head = normalizeTier(key.split("/")[0]) as BackupTier;
   return TIERS.includes(head) ? head : null;
 }
 

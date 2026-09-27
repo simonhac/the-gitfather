@@ -6,7 +6,7 @@
 //   appendVerify({ ts, verifiedTs, ok, ratio? })
 //
 // CLI (kept for back-compat / direct use):
-//   tsx runlog.ts run    --ts ISO --ok true|false [--tiers "2hourly daily"] [--bytes N] [--key K] [--error MSG] [--duration MS]
+//   tsx runlog.ts run    --ts ISO --ok true|false [--tiers "intraday daily"] [--bytes N] [--key K] [--error MSG] [--duration MS]
 //   tsx runlog.ts verify --ts ISO --verified-ts ISO --ok true|false [--ratio R]
 //
 // Records land in _log/<name>/{runs,verifications,archives,credentials}-YYYY-MM.jsonl in R2.
@@ -168,7 +168,7 @@ export interface RunRecordInput {
   /** ISO-8601 UTC stamp of the dump. */
   ts: string;
   ok: boolean;
-  /** Tiers promoted to (always includes "2hourly" on success; [] on failure). */
+  /** Tiers promoted to (always includes "intraday" on success; [] on failure). */
   tiers: BackupTier[];
   bytes?: number | null;
   key?: string | null;

@@ -234,7 +234,7 @@ const BODY_RANK: Record<BackupBodyState, number> = { verified: 3, ok: 2, expired
 
 /**
  * Bytes currently sitting in R2. Each tier a run was promoted to is a separate object
- * (the backup is server-side copied into 2hourly/daily/weekly/monthly), and each copy
+ * (the backup is server-side copied into intraday/daily/weekly/monthly), and each copy
  * expires independently by its own lifecycle rule — so a run still contributes one
  * copy's worth of bytes per tier whose retention window hasn't elapsed.
  *

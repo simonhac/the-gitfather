@@ -26,7 +26,8 @@ import {
   type Client,
   type Env,
 } from "./github.js";
-import { runWatchdogs, type WatchdogRecord } from "./watchdog.js";
+import { readConfigsSettled, runWatchdogs, type ConfigRead, type WatchdogRecord } from "./watchdog.js";
+import { backupDue, type BackupSchedule } from "../../scripts/lib/schedule.js";
 import { healthVerdict, tickDelivered, type CronTickRecord } from "./health.js";
 import { jobsHealth } from "./jobs.js";
 
@@ -43,18 +44,21 @@ interface DispatchResult {
 
 // Which cadences are due on THIS 10-min tick? All cadences are sub-harmonics of 10 minutes, so a single
 // */10 trigger covers everything (1 of the free plan's 5 cron-trigger slots). All math is UTC.
+// `backup` is only a CANDIDATE here: each client's own schedule (its profile's backups-per-day and
+// anchor-hour-utc, published to its bucket) decides whether it is actually dispatched — see
+// backupClients().
 export function dueCadences(t: Date): Cadence[] {
   const due: Cadence[] = ["staleness"]; // every tick (the 10-min watchdog — runs natively, see watchdog.ts)
   const m = t.getUTCMinutes();
   const h = t.getUTCHours();
-  if (m === 0 && h % 8 === 0) due.push("backup"); // every 8h at 00/08/16 UTC (16 = the profiles' anchor-hour → daily/weekly/monthly still promote)
+  if (m === 0) due.push("backup"); // every hour is a candidate; backupClients() filters per client
   if (h === 18 && m === 30) due.push("durableVerify"); // daily ~18:30 UTC — must be after the latest anchor hour
   // Weekly, SUNDAY 19:30 UTC. The day and hour are both load-bearing, so do not move this casually:
   //   • Sunday is when computeTiers() promotes a dump to the `weekly` tier (at the profile's
   //     anchor-hour, 16:00 UTC). Running at 19:30 puts the prune ~3.5h AFTER that promotion, so every
   //     delete is preceded by a same-day durable snapshot that lives for the weekly tier's retention.
   //     The archive is the system of record, but it is not the only copy of what was just deleted.
-  //   • 19:30 is also after durableVerify (18:30) and well clear of every backup hour (00/08/16).
+  //   • 19:30 is also after durableVerify (18:30), and on the half hour, so never a backup instant.
   // Opt-in per client via the roster's `cadences` (see OPT_IN_CADENCES in github.ts).
   if (t.getUTCDay() === 0 && h === 19 && m === 30) due.push("archive");
   // restoreDrill is superseded by durableVerify; dispatch it only via the manual /trigger endpoint if needed.
@@ -83,13 +87,58 @@ async function fanOut(env: Env, cadences: DispatchCadence[], clients: Client[]):
   return Promise.all(cadences.flatMap((cad) => clients.map((c) => dispatch(env, c, cad))));
 }
 
-/** One tick's work: dispatch the due workflows and run the watchdog, concurrently. */
-async function runTick(env: Env, cadences: Cadence[], clients: Client[], now: Date): Promise<{ results: DispatchResult[]; watchdog: WatchdogRecord[] }> {
+/** The schedules a client's published configs declare (none → backupDue's default grid). */
+function schedulesOf(read: ConfigRead | undefined): BackupSchedule[] {
+  if (!read?.ok) return [];
+  return read.configs.flatMap(({ cfg }) => (cfg ? [{ slotMinutes: cfg.slotMinutes, anchorHourUtc: cfg.anchorHourUtc }] : []));
+}
+
+/**
+ * The clients whose backup is due at `t`, by their own published schedules. A failed config listing
+ * falls back to the default grid (logged) rather than skipping: a spare backup is harmless, a missed
+ * one is what the watchdog exists to catch — and it can't, with the same listing failing.
+ */
+async function backupClients(t: Date, clients: Client[], reads: ReadonlyMap<string, Promise<ConfigRead>>): Promise<Client[]> {
+  const due = await Promise.all(
+    clients.map(async (c) => {
+      const read = await reads.get(c.id);
+      if (read && !read.ok) console.error(`backup ${c.id}: config listing failed, using the default schedule: ${String(read.error)}`);
+      return backupDue(t, schedulesOf(read));
+    }),
+  );
+  return clients.filter((_, i) => due[i]);
+}
+
+/**
+ * One tick's work: dispatch the due workflows and run the watchdog, concurrently. Each client's
+ * published configs are listed ONCE and shared by the backup schedule and the watchdog. `scheduled`
+ * false (the manual /trigger) dispatches `backup` to every targeted client regardless of schedule.
+ */
+async function runTick(
+  env: Env,
+  cadences: Cadence[],
+  clients: Client[],
+  now: Date,
+  scheduled: { at: Date } | null,
+): Promise<{ results: DispatchResult[]; watchdog: WatchdogRecord[] }> {
   const dispatched = cadences.filter((c): c is DispatchCadence => c !== "staleness");
   const watchdogDue = cadences.includes("staleness");
+  const backupFiltered = scheduled !== null && dispatched.includes("backup");
+
+  const reads = new Map<string, Promise<ConfigRead>>();
+  for (const c of clients) {
+    const needed = (watchdogDue && subscribes(c, "staleness")) || (backupFiltered && subscribes(c, "backup"));
+    if (needed) reads.set(c.id, readConfigsSettled(env[c.bucket] as R2Bucket));
+  }
+
+  const dispatch$ = (async () => {
+    const others = fanOut(env, dispatched.filter((c) => c !== "backup" || !backupFiltered), clients);
+    const backups = backupFiltered ? fanOut(env, ["backup"], await backupClients(scheduled.at, clients, reads)) : Promise.resolve([]);
+    return (await Promise.all([others, backups])).flat();
+  })();
   const [results, watchdog] = await Promise.all([
-    fanOut(env, dispatched, clients),
-    watchdogDue ? runWatchdogs(env, clients.filter((c) => subscribes(c, "staleness")), now) : Promise.resolve([]),
+    dispatch$,
+    watchdogDue ? runWatchdogs(env, clients.filter((c) => subscribes(c, "staleness")), now, reads) : Promise.resolve([]),
   ]);
   return { results, watchdog };
 }
@@ -246,7 +295,7 @@ async function handleFetch(req: Request, env: Env): Promise<Response> {
     const targets = clients.filter((c) => !onlyId || c.id === onlyId);
     if (targets.length === 0) return new Response("no matching client\n", { status: 404 });
     const now = new Date();
-    const { results, watchdog } = await runTick(env, [cadence], targets, now);
+    const { results, watchdog } = await runTick(env, [cadence], targets, now, null);
     await writeState(env, toTickRecord(now, [cadence], results, watchdog));
     return Response.json({ cadence, fired: targets.map((c) => c.id), results, watchdog });
   }
@@ -260,7 +309,7 @@ export default {
     const cadences = dueCadences(t);
     const clients = safeParseClients(env);
     if (!clients) return; // bad roster — logged; nothing to do
-    const { results, watchdog } = await runTick(env, cadences, clients, new Date());
+    const { results, watchdog } = await runTick(env, cadences, clients, new Date(), { at: t });
     await writeState(env, toTickRecord(t, cadences, results, watchdog));
     const fired = results.filter((r) => r.status !== 0).length;
     const outcomes = watchdog.map((w) => `${w.id}${w.name ? `/${w.name}` : ""}=${w.outcome}`).join(",");

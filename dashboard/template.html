@@ -103,9 +103,11 @@
   /* The page column is exactly as wide as the grid, and centred. `--grid-w` is the SVG's natural
      width, set by the renderer; +42px is the heatmap card's padding (40) and border (2), and +56px
      is this element's own padding — `box-sizing: border-box` folds both into the width. A denser
-     backup cadence makes a wider grid, so the max-width still caps it and the SVG scales to fit. */
+     backup cadence makes a wider grid, so the max-width still caps it and the SVG scales to fit.
+     A sparser one (1-2 a day) makes a grid too narrow for the header and the four stat cards, so the
+     column never drops below the 3-a-day width (~620px grid); the grid then sits left in its card. */
   #app {
-    width: min(100%, calc(var(--grid-w, 1220px) + 98px));
+    width: min(100%, calc(max(var(--grid-w, 1220px), 620px) + 98px));
     max-width: 1220px; margin: 0 auto; padding: 40px 28px 72px;
   }
   :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 4px; }

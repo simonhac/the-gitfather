@@ -14,7 +14,7 @@ import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getProfile } from "./config.js";
-import type { LogRun, LogVerification, LogArchive } from "./backupTypes.js";
+import { normalizeTier, type BackupTier, type LogRun, type LogVerification, type LogArchive } from "./backupTypes.js";
 import type { LogCredential } from "./credentialAge.js";
 
 export interface RawLog {
@@ -47,6 +47,17 @@ export function compactStamp(iso: string): string {
   return iso.replace(/[-:]/g, "");
 }
 
+/**
+ * One vocabulary for tiers: records written before the rename say LEGACY_INTRADAY_TIER ("2hourly").
+ * Keys are left as written — they name real objects, and the census joins on the basename only.
+ */
+function normalizeRun(r: LogRun): LogRun {
+  return Array.isArray(r.tiers) ? { ...r, tiers: r.tiers.map((t) => normalizeTier(t) as BackupTier) } : r;
+}
+function normalizeVerification(v: LogVerification): LogVerification {
+  return v.tier ? { ...v, tier: normalizeTier(v.tier) as BackupTier } : v;
+}
+
 /** Parse a directory of *.jsonl into its per-kind record arrays (skips malformed lines). */
 export function readLogDir(dir: string): RawLog {
   const runs: LogRun[] = [];
@@ -65,8 +76,8 @@ export function readLogDir(dir: string): RawLog {
     for (const ln of lines) {
       try {
         const o = JSON.parse(ln);
-        if (f.startsWith("runs-")) runs.push(o as LogRun);
-        else if (f.startsWith("verifications-")) verifications.push(o as LogVerification);
+        if (f.startsWith("runs-")) runs.push(normalizeRun(o as LogRun));
+        else if (f.startsWith("verifications-")) verifications.push(normalizeVerification(o as LogVerification));
         else if (f.startsWith("archives-")) archives.push(o as LogArchive);
         else if (f.startsWith("credentials-")) credentials.push(o as LogCredential);
       } catch {

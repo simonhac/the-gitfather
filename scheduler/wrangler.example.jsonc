@@ -18,7 +18,7 @@
   // Native bindings = free, in-network (no S3 token, no egress). All buckets must be in THIS account.
   //   STATE       the SHARED (public) dashboard bucket — scheduler state + logs under _scheduler/
   //   <CLIENT>_R2 each client's PRIVATE dump bucket — the watchdog reads _config/, _status/, _log/ and
-  //               <backup-prefix>/2hourly/ from it, and writes _status/ (alert episode, Slack row state).
+  //               <backup-prefix>/intraday/ from it, and writes _status/ (alert episode, Slack row state).
   "r2_buckets": [
     { "binding": "STATE", "bucket_name": "YOUR_SHARED_DASHBOARD_BUCKET" },
     { "binding": "ALPHA_R2", "bucket_name": "alpha-pg-backups" },

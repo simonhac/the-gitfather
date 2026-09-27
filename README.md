@@ -7,7 +7,7 @@
   <img src="docs/dashboard.png" alt="the-gitfather backup-history dashboard — GFS heatmap with per-tier retention, per-table archive columns showing which weeks' rows are archived and pruned, an open tooltip, storage and R2 cost" width="900">
 </p>
 
-<p align="center"><sub>The static <a href="docs/dashboard.md">backup-history dashboard</a> — every 8-hourly backup over a 1-year window, with restore-verified drills, row-retirement columns, storage and estimated R2 cost. The tooltip splits what a week <em>holds</em> from what ran <em>during</em> it.</sub></p>
+<p align="center"><sub>The static <a href="docs/dashboard.md">backup-history dashboard</a> — every backup over a 1-year window, with restore-verified drills, row-retirement columns, storage and estimated R2 cost. The tooltip splits what a week <em>holds</em> from what ran <em>during</em> it.</sub></p>
 
 A small, **profile-driven** tool any project can adopt: point it at a Postgres connection string and an
 R2 bucket and you get the **off-site, immutable, restore-verified** pillars of the 3-2-1-1-0 backup
@@ -19,7 +19,7 @@ repo, and credentials come from the environment (GitHub secrets), never from the
 
 ## What you get
 
-- **8-hourly dumps, promoted to GFS tiers** — one dump per run, server-side copied into
+- **Dumps at a per-project cadence (`backups-per-day`, default 3), promoted to GFS tiers** — one dump per run, server-side copied into
   daily/weekly/monthly; retention and 14-day WORM immutability enforced by R2 lifecycle rules and
   bucket locks, not by code. → [R2 buckets, retention, locks and tokens](docs/r2-setup.md)
 - **Backup-time integrity** — a size floor, a `pg_restore -l` structural check, and a SHA-256 of the
@@ -111,7 +111,7 @@ By hand, in order:
 5. **Preflight**: `npm ci && PROFILE=pg-backup/<name>.yaml npm run doctor -- all` — read-only, safe
    against production creds. → [`doctor`](docs/configuration-and-troubleshooting.md#config-validation--doctor)
 6. **Fire the backup once** by `workflow_dispatch` and confirm an object lands under
-   `<backup-prefix>/2hourly/`, a run appears in `_log/`, and the dashboard renders.
+   `<backup-prefix>/intraday/`, a run appears in `_log/`, and the dashboard renders.
 
 ---
 
@@ -120,7 +120,7 @@ By hand, in order:
 ```
 the-gitfather/
   scripts/
-    backup-pg-to-r2.ts        # dump → (encrypt) → upload 2hourly/ → promote to daily/weekly/monthly; records a SHA-256
+    backup-pg-to-r2.ts        # dump → (encrypt) → upload intraday/ → promote to daily/weekly/monthly; records a SHA-256
     verify-durable-pg.ts      # DAILY: hash-check each durable object + restore freshest daily + re-restore aged weekly/monthly
     restore-drill-pg.ts       # pull newest → restore into a throwaway → assert row counts (exports drillObject)
     archive-table.ts          # move aged rows out of Postgres into per-ISO-week objects; prune, gated

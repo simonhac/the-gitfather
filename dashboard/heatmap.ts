@@ -69,10 +69,9 @@ const ARCHIVE_GUTTER = 10; // breathing room between the backup grid and the arc
 // palette at module load: that is what used to freeze the grid in its load-time theme while the
 // rest of the page followed the OS.
 
-// The `2hourly` key is the frozen R2 prefix, not the cadence — label it from the profile's slot
-// width so a tooltip cannot say "2-hourly" about an 8-hourly backup.
+// The intraday tier is labelled from the profile's cadence ("8-hourly", "hourly", "daily").
 const TIER_LABEL: Record<string, string> = {
-  "2hourly": slotCadenceAdjective(), daily: "daily", weekly: "weekly", monthly: "monthly",
+  intraday: slotCadenceAdjective(), daily: "daily", weekly: "weekly", monthly: "monthly",
 };
 const STATE_LABEL: Record<BackupCellState, string> = {
   empty: "No backup", failed: "Failed", expired: "Expired (was OK)", ok: "Backup OK",

@@ -8,6 +8,7 @@ import {
   dashboardSchema,
   reportConfigError,
   joinObjectKey,
+  configWarnings,
 } from "../lib/config.js";
 
 // Minimal valid nested profiles (config from YAML + credentials from env). Tests mutate one field at a time.
@@ -112,47 +113,61 @@ test("staleness: max-age-hours positive; slot/grace defaults; min-bytes default 
 });
 
 test("staleness: max-age-hours is derived per cadence, and refused when it sits inside a slot", () => {
-  const parse = (staleness: Record<string, number>) =>
-    backupSchema.safeParse({ ...backupBase, staleness });
+  const parse = (backupsPerDay: number, staleness: Record<string, number> = {}) =>
+    backupSchema.safeParse({ ...backupBase, backupsPerDay, staleness: { graceMinutes: 25, ...staleness } });
 
   // Derived: 1.5 slots, floored at one slot + grace + 1h.
-  assert.equal(parse({ slotMinutes: 120, graceMinutes: 25 }).data?.staleness.maxAgeHours, 4);
-  assert.equal(parse({ slotMinutes: 60, graceMinutes: 25 }).data?.staleness.maxAgeHours, 3);
-  assert.equal(parse({ slotMinutes: 720, graceMinutes: 25 }).data?.staleness.maxAgeHours, 18);
+  assert.equal(parse(12).data?.staleness.maxAgeHours, 4);
+  assert.equal(parse(24).data?.staleness.maxAgeHours, 3);
+  assert.equal(parse(2).data?.staleness.maxAgeHours, 18);
+  assert.equal(parse(1).data?.staleness.maxAgeHours, 36);
 
   // An explicit value inside the slot window pages on every healthy tick — refuse it.
-  const bad = parse({ slotMinutes: 480, graceMinutes: 25, maxAgeHours: 5 });
+  const bad = parse(3, { maxAgeHours: 5 });
   assert.ok(!bad.success);
-  assert.match(bad.error!.issues.map((i) => i.message).join(" "), /must exceed staleness.slot-minutes/);
+  assert.match(bad.error!.issues.map((i) => i.message).join(" "), /must exceed the slot width/);
 
   // Just outside the window is fine.
-  assert.ok(parse({ slotMinutes: 480, graceMinutes: 25, maxAgeHours: 9 }).success);
+  assert.ok(parse(3, { maxAgeHours: 9 }).success);
 });
 
-test("staleness: slot-minutes must divide a whole day (else slot buckets mis-file runs)", () => {
-  const parse = (slotMinutes: number) =>
-    backupSchema.safeParse({ ...backupBase, staleness: { slotMinutes, graceMinutes: 5 } });
-  for (const ok of [60, 120, 240, 480, 720, 1440]) {
-    assert.ok(parse(ok).success, `${ok} divides 1440`);
+test("backups-per-day: must be a factor of 24; derives the slot width", () => {
+  const parse = (backupsPerDay: number) => backupSchema.safeParse({ ...backupBase, backupsPerDay });
+  for (const [n, slot] of [[1, 1440], [2, 720], [3, 480], [4, 360], [6, 240], [8, 180], [12, 120], [24, 60]]) {
+    const r = parse(n);
+    assert.ok(r.success, `${n} divides 24`);
+    assert.equal(r.data?.staleness.slotMinutes, slot);
   }
-  for (const bad of [100, 7, 500, 1000]) {
-    const r = parse(bad);
-    assert.ok(!r.success, `${bad} does not divide 1440`);
-    assert.match(r.error!.issues.map((i) => i.message).join(" "), /divide 1440/);
+  for (const bad of [5, 7, 10, 16, 0, 25]) {
+    assert.ok(!parse(bad).success, `${bad} is refused`);
   }
+  assert.match(parse(5).error!.issues.map((i) => i.message).join(" "), /factor of 24/);
 });
 
-test("staleness: grace-minutes must be < slot-minutes (else the slot can never go overdue)", () => {
-  // Pin the slot explicitly rather than leaning on the schema default — this rule is about the
+test("staleness.slot-minutes (legacy): accepted only when it agrees with backups-per-day, with a warning", () => {
+  const parse = (backupsPerDay: number | undefined, slotMinutes: number) =>
+    backupSchema.safeParse({ ...backupBase, ...(backupsPerDay ? { backupsPerDay } : {}), staleness: { slotMinutes } });
+  assert.ok(parse(undefined, 480).success); // an untouched consumer profile at the default cadence
+  assert.ok(parse(24, 60).success);
+  const r = parse(undefined, 120);
+  assert.ok(!r.success);
+  assert.match(r.error!.issues.map((i) => i.message).join(" "), /deprecated — set backups-per-day/);
+  assert.equal(configWarnings({ staleness: { slotMinutes: 480 } }).length, 1);
+  assert.deepEqual(configWarnings({ staleness: {} }), []);
+  assert.deepEqual(configWarnings({}), []);
+});
+
+test("staleness: grace-minutes must be < the slot width (else the slot can never go overdue)", () => {
+  // Pin the cadence explicitly rather than leaning on the schema default — this rule is about the
   // RELATIONSHIP between the two, and reading one of them from ambient config hides that.
-  const grace = (graceMinutes: number, slotMinutes = 120) =>
-    backupSchema.safeParse({ ...backupBase, staleness: { graceMinutes, slotMinutes } }).success;
+  const grace = (graceMinutes: number, backupsPerDay = 12) =>
+    backupSchema.safeParse({ ...backupBase, backupsPerDay, staleness: { graceMinutes } }).success;
   assert.ok(grace(119)); // < slot
   assert.ok(!grace(120)); // == slot
   assert.ok(!grace(200)); // > slot
-  assert.ok(grace(200, 480)); // the same grace is fine against a wider slot
-  assert.ok(!backupSchema.safeParse({ ...backupBase, staleness: { slotMinutes: 20, graceMinutes: 25 } }).success); // grace ≥ short slot
-  assert.ok(backupSchema.safeParse({ ...backupBase, staleness: { slotMinutes: 60, graceMinutes: 25 } }).success); // 25 < 60
+  assert.ok(grace(200, 3)); // the same grace is fine against a wider slot
+  assert.ok(!grace(60, 24)); // grace ≥ the shortest slot
+  assert.ok(grace(25, 24)); // 25 < 60
 });
 
 // ── table-list split ─────────────────────────────────────────────────────────

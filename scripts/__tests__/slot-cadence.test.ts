@@ -12,7 +12,7 @@ import {
 
 // The dashboard blurb used to hardcode "a fresh one every 2 hours, 3 a day" — two claims that
 // contradicted each other AND the actual cadence, because only the "3" was derived. These helpers
-// exist so the prose can never drift from staleness.slot-minutes again.
+// exist so the prose can never drift from backups-per-day again.
 
 test("slotsPerDayFrom: minutes per slot → slots per day", () => {
   assert.equal(slotsPerDayFrom(480), 3); // Boost today: 00:00 / 08:00 / 16:00 UTC
@@ -56,15 +56,17 @@ test("bridgeSlotMinutes only accepts a slot width that tiles a day", async () =>
     return process.env.SLOT_MINUTES;
   };
 
-  assert.equal(bridge("staleness:\n  slot-minutes: 480\n"), "480");
-  assert.equal(bridge("staleness:\n  slot-minutes: 60\n"), "60");
-  // Not a divisor of 1440 — left unset so the derived slot width stays coherent. The config layer
-  // is what reports it; see requireValidStalenessSlot.
-  assert.equal(bridge("staleness:\n  slot-minutes: 100\n"), undefined);
-  assert.equal(bridge("staleness:\n  slot-minutes: 0\n"), undefined);
-  // Absent staleness block, and a bare key (YAML null) — both leave the default alone.
+  assert.equal(bridge("backups-per-day: 3\n"), "480");
+  assert.equal(bridge("backups-per-day: 24\n"), "60");
+  assert.equal(bridge("backups-per-day: 1\n"), "1440");
+  // Not a factor of 24 — left unset so the derived slot width stays coherent. The config layer
+  // is what reports it; see requireValidCadence.
+  assert.equal(bridge("backups-per-day: 5\n"), undefined);
+  assert.equal(bridge("backups-per-day: 0\n"), undefined);
+  // Absent, a bare key (YAML null), and the legacy staleness key — all leave the default alone.
   assert.equal(bridge("name: x\n"), undefined);
-  assert.equal(bridge("staleness:\n"), undefined);
+  assert.equal(bridge("backups-per-day:\n"), undefined);
+  assert.equal(bridge("staleness:\n  slot-minutes: 480\n"), undefined);
 
   delete process.env.PROFILE;
   delete process.env.SLOT_MINUTES;
