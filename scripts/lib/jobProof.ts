@@ -37,7 +37,7 @@ const HOUR_MS = 3_600_000;
  *
  *   durableVerify  daily at 18:30 UTC      → 30h: a single missed day fires the next night. The
  *                  margin absorbs a run that finishes late (restores vary, and Actions queues).
- *   archive        weekly, Sunday 19:30    → 8d: a missed Sunday fires the following Monday.
+ *   archive        weekly, Monday 00:30    → 8d: a missed Monday fires the following Tuesday.
  */
 export const JOB_PROOF_MAX_AGE_MS: Record<ProofJob, number> = {
   durableVerify: 30 * HOUR_MS,

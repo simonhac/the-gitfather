@@ -91,7 +91,7 @@ billing lapsed, backups stopped **and so did the watchdog**. It now runs here, o
 | `staleness`     | every 10 min      | *(runs natively — see [The watchdog](#the-watchdog))* | — |
 | `backup`        | per client: `backups-per-day` from `anchor-hour-utc` (default `00/08/16`) | `pg-backup.yml` | `reason: schedule` |
 | `durableVerify` | daily `18:30`     | `pg-durable-verify.yml`   | —                   |
-| `archive`       | Sundays `19:30` (opt-in)  | `pg-archive.yml`      | —                   |
+| `archive`       | Mondays `00:30` (opt-in)  | `pg-archive.yml`      | —                   |
 | `restoreDrill`  | manual only       | `pg-restore-drill.yml`    | —                   |
 
 `backup` is scheduled **per client**. Every hour on the hour is a candidate; the Worker reads the
@@ -101,12 +101,13 @@ A client with no published config yet (or whose listing fails) runs on the defau
 its first backup can publish one. A profile edit takes effect after the next backup publishes it.
 
 `archive` is the one **opt-in** cadence: a client runs it only if its roster entry names `"archive"` in
-`cadences`. `19:30` on a Sunday is ~3.5 h after the Sunday anchor-hour backup that gets promoted to
-`weekly/`, and after that day's `durableVerify` — so a fresh, hash-checked, WORM-locked weekly dump
+`cadences`. `00:30` on a Monday is just after the UTC week boundary at which archive weeks become
+eligible (a run before it waits a whole extra week), and after Sunday's anchor-hour backup that gets
+promoted to `weekly/` and that day's `durableVerify` — so a fresh, hash-checked, WORM-locked weekly dump
 exists before the archiver prunes a single row.
 
 `durableVerify` must run **after** every client's `anchor-hour-utc` (so the day's `daily/` object exists
-to verify). `18:30` suits anchor hours earlier in the day — adjust `dueCadences()` in `src/index.ts` if
+to verify). `18:30` suits anchor hours earlier in the day — adjust `dueCadences()` in `src/cadences.ts` if
 yours is later. `restoreDrill` is superseded by `durableVerify`; fire it on demand via `/trigger`.
 
 `backup` is dispatched with `reason: schedule` so it renders as a clean scheduled run (no 🖐️ marker) —

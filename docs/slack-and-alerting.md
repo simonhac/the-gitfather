@@ -235,7 +235,7 @@ nothing.
 | proof | written by | when | stale after |
 | --- | --- | --- | --- |
 | `durableVerify` | `verify-durable-pg.ts` | the verify verdict below allows it | 30 h — one missed daily run |
-| `archive` | `archive-table.ts` | a clean real run that met its [floor](archiving.md#the-floor-a-run-that-owed-work-must-do-it) | 8 days — one missed Sunday |
+| `archive` | `archive-table.ts` | a clean real run that met its [floor](archiving.md#the-floor-a-run-that-owed-work-must-do-it) | 8 days — one missed Monday |
 
 A client owes a proof for each cadence the roster subscribes it to. The `archive` proof is also
 skipped for a database whose published config says it archives nothing. A proof that has **never

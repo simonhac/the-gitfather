@@ -86,18 +86,14 @@ test("buildArchiveColumns: null when the profile archives nothing", () => {
   assert.equal(buildArchiveColumns(payloadWith([], []), NOW), null);
 });
 
-test("buildArchiveColumns: the Sunday 19:30 archive shares a row with the 16:00 weekly anchor", () => {
-  // This is the whole premise of putting the columns beside the grid: the archive runs 3.5 h after
-  // the anchor that becomes the weekly backup, so both must land in the same week row.
-  const cols = buildArchiveColumns(payloadWith([run({ t: "2026-09-06T19:30:00Z" })]), NOW)!;
-  const anchorRow = 1; // 6 Sep 2026 is a Sunday, in the week starting Mon 31 Aug; now is Thu 10 Sep
-  assert.equal(cols.rows[anchorRow].get("api_logs")?.runs.length, 1);
-  assert.equal(cols.rows[0].size, 0, "the current week has no archive run yet");
-
-  // ...and the backup that anchors it resolves to the same row through the same helper.
-  const backup = payloadWith([]);
-  backup.runs = [{ t: "2026-09-06T16:00:00Z", ok: true, tiers: ["weekly"], bytes: 1, runUrl: null }];
-  assert.equal(buildArchiveColumns(payloadWith([run({ t: "2026-09-06T16:00:00Z" })]), NOW)!.rows[anchorRow].size, 1);
+test("buildArchiveColumns: the Monday 00:30 archive lands on the week it ran, one row above the Sunday anchor", () => {
+  // The archive runs just after the UTC week boundary, so its row is the new week — the Sunday
+  // 16:00 weekly backup it follows is in the row below.
+  const cols = buildArchiveColumns(payloadWith([run({ t: "2026-09-07T00:30:00Z" })]), NOW)!;
+  // 7 Sep 2026 is the Monday starting the current week (now is Thu 10 Sep); 6 Sep is the Sunday before.
+  assert.equal(cols.rows[0].get("api_logs")?.runs.length, 1);
+  assert.equal(cols.rows[1].size, 0, "nothing in the week of the Sunday anchor");
+  assert.equal(buildArchiveColumns(payloadWith([run({ t: "2026-09-06T16:00:00Z" })]), NOW)!.rows[1].size, 1);
 });
 
 test("buildArchiveColumns: a run outside the window is dropped, not clamped to a row", () => {

@@ -48,6 +48,7 @@ import { upsertDailyRow } from "./dailyRowStore.js";
 import { displayContext } from "./outcomeRender.js";
 import { authTest, isTransientSlackError, postWebhook } from "./slackApi.js";
 import { slackPortFor, type SlackPort } from "./slackPort.js";
+import { dueCadences } from "./cadences.js";
 import type { ObjectStore } from "./objectStore.js";
 
 export type { Env } from "./github.js";
@@ -59,29 +60,6 @@ interface DispatchResult {
   cadence: DispatchCadence;
   status: number; // HTTP status from GitHub; 204 = success, 0 = client not subscribed, -1 = mint/network error
   error?: string;
-}
-
-// Which cadences are due on THIS 10-min tick? All cadences are sub-harmonics of 10 minutes, so a single
-// */10 trigger covers everything (1 of the free plan's 5 cron-trigger slots). All math is UTC.
-// `backup` is only a CANDIDATE here: each client's own schedule (its profile's backups-per-day and
-// anchor-hour-utc, published to its bucket) decides whether it is actually dispatched — see
-// backupClients().
-export function dueCadences(t: Date): Cadence[] {
-  const due: Cadence[] = ["staleness"]; // every tick (the 10-min watchdog — runs natively, see watchdog.ts)
-  const m = t.getUTCMinutes();
-  const h = t.getUTCHours();
-  if (m === 0) due.push("backup"); // every hour is a candidate; backupClients() filters per client
-  if (h === 18 && m === 30) due.push("durableVerify"); // daily ~18:30 UTC — must be after the latest anchor hour
-  // Weekly, SUNDAY 19:30 UTC. The day and hour are both load-bearing, so do not move this casually:
-  //   • Sunday is when computeTiers() promotes a dump to the `weekly` tier (at the profile's
-  //     anchor-hour, 16:00 UTC). Running at 19:30 puts the prune ~3.5h AFTER that promotion, so every
-  //     delete is preceded by a same-day durable snapshot that lives for the weekly tier's retention.
-  //     The archive is the system of record, but it is not the only copy of what was just deleted.
-  //   • 19:30 is also after durableVerify (18:30), and on the half hour, so never a backup instant.
-  // Opt-in per client via the roster's `cadences` (see OPT_IN_CADENCES in github.ts).
-  if (t.getUTCDay() === 0 && h === 19 && m === 30) due.push("archive");
-  // restoreDrill is superseded by durableVerify; dispatch it only via the manual /trigger endpoint if needed.
-  return due;
 }
 
 // Only the backup caller declares a workflow_dispatch input. reason="schedule" makes runOrigin() render it

@@ -394,8 +394,8 @@ export function summarize(grid: BackupGrid): BackupStats {
 // ── Archive columns ──────────────────────────────────────────────────────────
 // A sibling block to the right of the grid: one narrow column per archived table, sharing the row
 // pitch. The row is the week the run HAPPENED in, not the ISO week whose data it moved — the
-// run-log carries counts, not week labels, and it is the run week that puts an archive cell on the
-// same row as the weekly backup it follows a few hours later.
+// run-log carries counts, not week labels. The scheduled run fires Monday 00:30 UTC, so it sits at
+// the top of its week, one row above the Sunday weekly backup it follows.
 
 /**
  * An archive record's cell state.
@@ -440,8 +440,7 @@ export function archiveCode(sr: { state: ArchiveCellState }): OutcomeCode {
  *
  * They are rarely the same week. The run that archives W30's rows happens weeks later — five rows
  * above W30's body on this grid — which is why the tooltip splits the two halves with a rule.
- * Putting the runs on the week they ran is still right: it is what keeps an archive record on the
- * same row as the weekly backup it follows a few hours later.
+ * Putting the runs on the week they ran is still right: it is the only week a run record can name.
  */
 export function buildArchiveColumns(payload: PublicPayload, now: Date, weeks = 52): ArchiveColumns | null {
   const archive = payload.archive;
