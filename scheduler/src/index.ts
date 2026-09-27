@@ -537,7 +537,7 @@ export default {
 
     // Ping ONLY from the cron path, never from /trigger: a manual trigger must not be able to keep
     // the heartbeat green, because debugging a dead scheduler is exactly when someone would hit
-    // /trigger repeatedly and mask the very thing they are investigating. (liveone's collector
+    // /trigger repeatedly and mask the very thing they are investigating. (a consumer's collector
     // heartbeat carries the same `isCron` condition, for the same reason.)
     //
     // Awaited, not fire-and-forget: a Worker's `scheduled` handler may be torn down as soon as it

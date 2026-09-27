@@ -101,6 +101,38 @@ compare against a live table, so a routine drill never hands production credenti
 > wraps a MULTI-LINE value in literal double quotes, and age then rejects it with
 > `unknown identity type: "# created: …`.
 
+**Running it — a monthly runbook.** Under `verify-durable.keyless` this drill is the *only* proof that
+the escrowed identity still opens what is in the bucket, so give it a cadence and keep a log.
+`verify-durable.drill-max-age-days` (set it a little above the cadence — e.g. 45 for monthly) makes
+durable-verify post a quiet warning once the newest `by: manual` restore is older than that, and
+"has NEVER been run" until the first one is recorded.
+
+1. **What to drill.** Prefer the newest **encrypted** durable copy — ideally the newest `monthly/`
+   one. After `encryption: none → age`, the monthly tier stays plaintext until the first
+   anchor-hour run on the 1st of the next month, so until then drill the newest encrypted
+   `weekly/` object instead. A plaintext `.dump` restores without the identity (the drill prints
+   "Fetched OK — a plaintext object"), so it proves the old generation still restores, not that the
+   key works; drill one of those separately if you need that evidence too.
+2. **Where it restores.** Any throwaway Postgres whose major is ≥ the dump's — a local server over its
+   Unix socket is fine, e.g. `DRILL_DATABASE_URL='postgresql://<you>@localhost/postgres?host=/tmp&sslmode=disable'`.
+   The drill drops and recreates a `gitfather_drill` database there and **leaves it** after the run;
+   it holds a copy of production, so drop it when you are done
+   (`psql -h /tmp -d postgres -c 'DROP DATABASE gitfather_drill'`).
+3. **Credentials.** The R2 variables for the bucket (read, plus write under `_log/` to record the
+   result) and `AGE_IDENTITY` for an `.age` object — each read straight from your secret manager into
+   the command, never written to disk:
+   ```bash
+   PROFILE=path/to/profile.yaml \
+   R2_ACCOUNT_ID="$(op read op://<vault>/<item>/R2_ACCOUNT_ID)" R2_BUCKET="$(op read op://<vault>/<item>/R2_BUCKET)" \
+   R2_ACCESS_KEY_ID="$(op read op://<vault>/<item>/R2_ACCESS_KEY_ID)" R2_SECRET_ACCESS_KEY="$(op read op://<vault>/<item>/R2_SECRET_ACCESS_KEY)" \
+   AGE_IDENTITY="$(op read op://<vault>/<item>/AGE_IDENTITY)" \
+   DRILL_DATABASE_URL='postgresql://<you>@localhost/postgres?host=/tmp&sslmode=disable' \
+     npm run drill-object -- --key weekly/<name>-<stamp>.dump.age
+   ```
+4. **Record it.** The run-log record is automatic; also note the object key, the date, the row counts
+   the drill prints and its time in the project's own (private) drill log, so the history survives the
+   run-log's retention and a human can see the cadence being kept.
+
 Net, with restores enabled: **weekly/monthly are validated three times or more** (hash on write +
 restore at ~2 weeks + a re-hash roughly every sweep thereafter), **daily twice** (hash on write, plus
 the primary restore when it is the freshest). Because that primary restore covers the freshest dump

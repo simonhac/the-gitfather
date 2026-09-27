@@ -47,6 +47,7 @@ import {
   drillCoreFromProfile,
   isDumpObject,
   materialiseDump,
+  planDecrypt,
   verifyDumpFile,
   stampToIso,
   type DrillGate,
@@ -146,7 +147,11 @@ async function main(): Promise<void> {
 
   const got = await materialiseDump({ key, cfg: core, tmp });
   if (!got.ok || !got.dumpPath) die(`could not materialise the object: ${got.reason}`);
-  console.log("Decrypted OK — the escrowed identity opens this object.");
+  // Only an .age object proves anything about the escrowed identity; a pre-encryption plaintext dump
+  // is fetched as-is, and saying "decrypted" about it would claim a proof the drill never made.
+  console.log(
+    planDecrypt(key).kind === "age" ? "Decrypted OK — the escrowed identity opens this object." : "Fetched OK — a plaintext object (no decryption involved).",
+  );
 
   const res = await verifyDumpFile({ dumpPath: got.dumpPath!, gate: args.gate, cfg: core, tmp });
   const tookMs = Date.now() - startedAt;

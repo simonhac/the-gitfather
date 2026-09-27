@@ -31,21 +31,21 @@ test("parseRoster: repositoryId, when set, is a positive integer", () => {
 
 test("parseRoster: the slack block", () => {
   const ok = (slack: unknown) => parse([{ ...base, slack }])[0].slack;
-  assert.deepEqual(ok({ channel: "C0B9JP3BLE4" }), { channel: "C0B9JP3BLE4" });
-  assert.ok(ok({ channel: "C0B9JP3BLE4", username: "alpha backup", iconEmoji: ":floppy_disk:" }));
-  assert.ok(ok({ channel: "G0B9JP3BLE4", iconUrl: "https://example.com/i.png" }));
+  assert.deepEqual(ok({ channel: "C0ALPHACHAN1" }), { channel: "C0ALPHACHAN1" });
+  assert.ok(ok({ channel: "C0ALPHACHAN1", username: "alpha backup", iconEmoji: ":floppy_disk:" }));
+  assert.ok(ok({ channel: "G0ALPHACHAN1", iconUrl: "https://example.com/i.png" }));
 
   const bad: [unknown, RegExp][] = [
-    ["C0B9JP3BLE4", /must be an object/],
+    ["C0ALPHACHAN1", /must be an object/],
     [{}, /slack.channel/],
     [{ channel: "#backups" }, /slack.channel/],
-    [{ channel: "C0B9JP3BLE4", icon: ":x:" }, /unknown slack key/],
-    [{ channel: "C0B9JP3BLE4", username: "" }, /username/],
-    [{ channel: "C0B9JP3BLE4", username: "<!channel>" }, /username/],
-    [{ channel: "C0B9JP3BLE4", username: "x".repeat(81) }, /username/],
-    [{ channel: "C0B9JP3BLE4", iconEmoji: "floppy" }, /iconEmoji/],
-    [{ channel: "C0B9JP3BLE4", iconUrl: "http://example.com/i.png" }, /iconUrl/],
-    [{ channel: "C0B9JP3BLE4", iconEmoji: ":a:", iconUrl: "https://example.com/i.png" }, /not both/],
+    [{ channel: "C0ALPHACHAN1", icon: ":x:" }, /unknown slack key/],
+    [{ channel: "C0ALPHACHAN1", username: "" }, /username/],
+    [{ channel: "C0ALPHACHAN1", username: "<!channel>" }, /username/],
+    [{ channel: "C0ALPHACHAN1", username: "x".repeat(81) }, /username/],
+    [{ channel: "C0ALPHACHAN1", iconEmoji: "floppy" }, /iconEmoji/],
+    [{ channel: "C0ALPHACHAN1", iconUrl: "http://example.com/i.png" }, /iconUrl/],
+    [{ channel: "C0ALPHACHAN1", iconEmoji: ":a:", iconUrl: "https://example.com/i.png" }, /not both/],
   ];
   for (const [slack, re] of bad) assert.throws(() => parse([{ ...base, slack }]), re, JSON.stringify(slack));
 });
@@ -53,11 +53,11 @@ test("parseRoster: the slack block", () => {
 test("slackIdentity: defaults to '<id> backup' and the app's own icon", () => {
   const c = base as Client;
   assert.deepEqual(slackIdentity(c), { username: "alpha backup" });
-  assert.deepEqual(slackIdentity({ ...c, slack: { channel: "C0B9JP3BLE4", username: "Alpha DB", iconEmoji: ":elephant:" } }), {
+  assert.deepEqual(slackIdentity({ ...c, slack: { channel: "C0ALPHACHAN1", username: "Alpha DB", iconEmoji: ":elephant:" } }), {
     username: "Alpha DB",
     icon_emoji: ":elephant:",
   });
-  assert.deepEqual(slackIdentity({ ...c, slack: { channel: "C0B9JP3BLE4", iconUrl: "https://x.example/i.png" } }), {
+  assert.deepEqual(slackIdentity({ ...c, slack: { channel: "C0ALPHACHAN1", iconUrl: "https://x.example/i.png" } }), {
     username: "alpha backup",
     icon_url: "https://x.example/i.png",
   });
