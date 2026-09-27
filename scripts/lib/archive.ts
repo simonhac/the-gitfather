@@ -175,7 +175,7 @@ export function eligibleWeeks(opts: {
 //         <prefix>/<table>/_index/<table>-<year>.jsonl
 // Keys are unique and never reused, so a writer holding a no-delete token can only ADD.
 
-/** Split on "/", drop blanks, rejoin — tolerates a prefix written "/archive/boost/". */
+/** Split on "/", drop blanks, rejoin — tolerates a prefix written "/archive/<name>/". */
 function joinKey(...segments: string[]): string {
   return segments.flatMap((s) => s.split("/")).filter(Boolean).join("/");
 }
@@ -535,7 +535,7 @@ export function planArchive(state: WeekState | undefined, live: Fingerprint): Ar
  * CANDIDATE list instead, so the oldest non-pruned week (already archived, fingerprint
  * unchanged, `skip`) consumed the whole budget on every run and the walk never reached a week
  * that had never been archived. The archive frontier could not advance past the prune frontier,
- * and each run reported success having archived nothing. Boost sat at `2026-W32` for weeks.
+ * and each run reported success having archived nothing. One client sat at `2026-W32` for weeks.
  */
 export function workBudget(maxWeeks: number): {
   exhausted(): boolean;
@@ -622,7 +622,7 @@ export interface PrunePlan {
  *
  * planPrune() only compares the LIVE table against the manifest — it says nothing about whether the
  * archive is still intact. The object IS hash-verified when written, but a week is pruned
- * `prune-after-weeks − archive-after-weeks` later (9 weeks apart in Boost's profile), so in the
+ * `prune-after-weeks − archive-after-weeks` later (9 weeks apart in a typical profile), so in the
  * steady state prune always acts on an object last verified many runs earlier. Without this, an
  * object that rotted, was truncated, or was tampered with after archiving is deleted from the
  * database anyway — the one unrecoverable mistake this tool can make.

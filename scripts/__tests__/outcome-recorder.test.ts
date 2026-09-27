@@ -65,7 +65,7 @@ test("off Actions (no GITHUB_RUN_ID) it records nothing", () => {
   for (const env of [{}, { GITHUB_RUN_ID: "" }, { GITHUB_RUN_ID: "not-a-run" }] as Record<string, string>[]) {
     withEnv(env, () => {
       const rec = recorder();
-      rec.setName("boost");
+      rec.setName("beta");
       rec.alert("page", "backup_failed", "x");
       assert.equal(rec.build(1), null);
       assert.equal(rec.flush(1), false);
@@ -76,7 +76,7 @@ test("off Actions (no GITHUB_RUN_ID) it records nothing", () => {
 test("a clean exit records ok, with the run's identity, origin and summary — and the Worker can parse it", () => {
   withEnv(ACTIONS, () => {
     const rec = recorder();
-    rec.setName("boost");
+    rec.setName("beta");
     rec.setOrigin("manual");
     rec.summary({ kind: "backup", tiers: ["intraday", "daily"], bytes: 4096 });
     const o = rec.build(0);
@@ -84,7 +84,7 @@ test("a clean exit records ok, with the run's identity, origin and summary — a
       version: 1,
       source: "job",
       job: "backup",
-      name: "boost",
+      name: "beta",
       runId: "18000000001",
       runAttempt: 2,
       jobId: "52000000001",
@@ -104,7 +104,7 @@ test("a clean exit records ok, with the run's identity, origin and summary — a
 test("a warn keeps the run ok; a page makes it not ok even at exit 0", () => {
   withEnv(ACTIONS, () => {
     const rec = recorder("durableVerify");
-    rec.setName("boost");
+    rec.setName("beta");
     rec.alert("warn", "credential_rotation", "R2 is 400 days old");
     const o = rec.build(0);
     assert.equal(o?.ok, true);
@@ -112,7 +112,7 @@ test("a warn keeps the run ok; a page makes it not ok even at exit 0", () => {
   });
   withEnv(ACTIONS, () => {
     const rec = recorder("durableVerify");
-    rec.setName("boost");
+    rec.setName("beta");
     rec.alert("page", "hash_mismatch", "hash mismatch daily/x");
     const o = rec.build(0);
     assert.equal(o?.ok, false);
@@ -124,7 +124,7 @@ test("a warn keeps the run ok; a page makes it not ok even at exit 0", () => {
 test("an alert raised straight into the sink (as reportConfigError does) is recorded, and suffices as the reason", () => {
   withEnv(ACTIONS, () => {
     const rec = recorder();
-    rec.setName("boost");
+    rec.setName("beta");
     outcomeAlert("page", "config_invalid", "config validation failed: R2_BUCKET");
     const o = rec.build(1);
     assert.equal(o?.ok, false);
@@ -135,7 +135,7 @@ test("an alert raised straight into the sink (as reportConfigError does) is reco
 test("a non-zero exit that recorded no page still pages exit_<code> — a crash never reads as a success", () => {
   withEnv(ACTIONS, () => {
     const rec = recorder();
-    rec.setName("boost");
+    rec.setName("beta");
     const o = rec.build(2);
     assert.equal(o?.ok, false);
     assert.equal(o?.alerts.length, 1);
@@ -146,7 +146,7 @@ test("a non-zero exit that recorded no page still pages exit_<code> — a crash 
   withEnv(ACTIONS, () => {
     // A warn is not a reason for a failure.
     const rec = recorder();
-    rec.setName("boost");
+    rec.setName("beta");
     rec.alert("warn", "manual_drill_overdue", "drill overdue");
     assert.deepEqual(rec.build(1)?.alerts.map((a) => `${a.severity}:${a.code}`), ["warn:manual_drill_overdue", "page:exit_1"]);
   });
@@ -156,7 +156,7 @@ test("130 / 143 (the scripts' SIGINT / SIGTERM handlers) read as a cancel or a t
   for (const code of [130, 143]) {
     withEnv(ACTIONS, () => {
       const rec = recorder();
-      rec.setName("boost");
+      rec.setName("beta");
       const [a] = rec.build(code)!.alerts;
       assert.equal(a.code, `exit_${code}`);
       assert.match(a.text, new RegExp(`cancelled or timed out \\(exit ${code}\\)`));
@@ -168,7 +168,7 @@ test("a junk job id reads as null and a junk attempt as 1, rather than losing th
   for (const [jobId, attempt] of [["", "x"], ["abc", "0"], ["12 34", "-1"]]) {
     withEnv({ GITHUB_RUN_ID: "5", GITHUB_RUN_ATTEMPT: attempt, GITFATHER_JOB_ID: jobId }, () => {
       const rec = recorder();
-      rec.setName("boost");
+      rec.setName("beta");
       const o = rec.build(0);
       assert.equal(o?.jobId, null, jobId);
       assert.equal(o?.runAttempt, 1, attempt);
@@ -180,7 +180,7 @@ test("a junk job id reads as null and a junk attempt as 1, rather than losing th
 test("alerts are clamped to what the Worker accepts (e.g. pg-classify's hyphenated codes)", () => {
   withEnv(ACTIONS, () => {
     const rec = recorder();
-    rec.setName("boost");
+    rec.setName("beta");
     rec.alert("page", "auth-rejected", "e".repeat(MAX_ALERT_TEXT + 1000));
     const [a] = rec.build(1)!.alerts;
     assert.equal(a.code, "auth_rejected");
@@ -191,7 +191,7 @@ test("alerts are clamped to what the Worker accepts (e.g. pg-classify's hyphenat
 test(`more than ${MAX_ALERTS} alerts: the tail collapses into one 'truncated' alert that keeps its severity`, () => {
   withEnv(ACTIONS, () => {
     const rec = recorder("archive");
-    rec.setName("boost");
+    rec.setName("beta");
     for (let i = 0; i < 25; i++) rec.alert("warn", "archive_anomaly", `anomaly ${i}`);
     rec.alert("page", "archive_refusal", "the one that matters is last");
     const o = rec.build(1)!;
@@ -206,7 +206,7 @@ test(`more than ${MAX_ALERTS} alerts: the tail collapses into one 'truncated' al
   });
   withEnv(ACTIONS, () => {
     const rec = recorder("archive");
-    rec.setName("boost");
+    rec.setName("beta");
     for (let i = 0; i < 25; i++) rec.alert("warn", "archive_anomaly", `anomaly ${i}`);
     const last = rec.build(0)!.alerts.at(-1)!;
     assert.equal(last.severity, "warn");
@@ -217,7 +217,7 @@ test(`more than ${MAX_ALERTS} alerts: the tail collapses into one 'truncated' al
 test("build() can run more than once without losing or duplicating alerts", () => {
   withEnv(ACTIONS, () => {
     const rec = recorder();
-    rec.setName("boost");
+    rec.setName("beta");
     rec.alert("warn", "a", "first");
     assert.equal(rec.build(0)?.alerts.length, 1);
     rec.alert("warn", "b", "second");
@@ -260,12 +260,12 @@ test("flush writes nothing when it cannot name or place the record, or is suppre
     });
     withEnv(ACTIONS, () => {
       const rec = recorder();
-      rec.setName("boost");
+      rec.setName("beta");
       assert.equal(rec.flush(0), false, "no R2_BUCKET");
     });
     withEnv({ ...ACTIONS, ...local }, () => {
       const rec = recorder("archive");
-      rec.setName("boost");
+      rec.setName("beta");
       rec.suppress("--dry-run=store leaves the store untouched");
       assert.equal(rec.flush(0), false);
     });

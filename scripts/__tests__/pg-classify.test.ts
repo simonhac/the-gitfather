@@ -2,14 +2,14 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { classifyPgFailure, redactPgStderr } from "../lib/pg-classify.js";
 
-// The verbatim stderr from boost-suite/boost run 30961870918 (2026-08-05T00:01:02Z) — the
+// The verbatim stderr from a consumer's backup run (2026-08-05T00:01:02Z) — the
 // failure this module was written for. Sixteen hours of @here pages said only "pg_dump failed".
-const BOOST_AUTH_STDERR = `pg_dump: error: connection to server at "aws-1-eu-west-1.pooler.supabase.com" (54.229.189.117), port 5432 failed: FATAL:  password authentication failed for user "postgres"
+const AUTH_REJECTED_STDERR = `pg_dump: error: connection to server at "aws-1-eu-west-1.pooler.supabase.com" (54.229.189.117), port 5432 failed: FATAL:  password authentication failed for user "postgres"
 password retrieved from file "/tmp/pg-backup-ZZM2O0/.pgpass-3519-0"
 `;
 
 test("classify: the real rotated-password failure is auth-rejected, non-transient, and names the secret", () => {
-  const f = classifyPgFailure(BOOST_AUTH_STDERR);
+  const f = classifyPgFailure(AUTH_REJECTED_STDERR);
   assert.equal(f.code, "auth-rejected");
   assert.equal(f.transient, false);
   assert.match(f.message, /PG_BACKUP_DATABASE_URL/);
@@ -18,7 +18,7 @@ test("classify: the real rotated-password failure is auth-rejected, non-transien
 });
 
 test("classify: a matched failure never echoes the pgpass path or a stderr tail", () => {
-  const f = classifyPgFailure(BOOST_AUTH_STDERR);
+  const f = classifyPgFailure(AUTH_REJECTED_STDERR);
   assert.doesNotMatch(f.message, /\.pgpass/);
   assert.doesNotMatch(f.message, /pg-backup-ZZM2O0/);
 });
@@ -103,7 +103,7 @@ test("classify: an unmatched failure keeps the generic label AND carries a stder
 test("classify: the unmatched tail is redacted — no pgpass path, no URL credential", () => {
   const f = classifyPgFailure(
     `pg_dump: error: undocumented explosion while connecting to ` +
-      `postgres://postgres.rsfxqxoaxmtqrjnxpofm:sup3r-s3cret@aws-1-eu-west-1.pooler.supabase.com:5432/postgres\n` +
+      `postgres://postgres.abcdefghijklmnopqrst:sup3r-s3cret@aws-1-eu-west-1.pooler.supabase.com:5432/postgres\n` +
       `password retrieved from file "/tmp/pg-backup-ZZM2O0/.pgpass-3519-0"\n`,
   );
   assert.equal(f.code, "unknown");
@@ -127,7 +127,7 @@ test("classify: the tail is bounded, so a screaming child can't flood Slack", ()
 
 test("classify: rules are stateless — the same input classifies identically every time", () => {
   // A `g`-flagged rule regex would carry lastIndex between calls and misfire on the 2nd.
-  for (let i = 0; i < 3; i++) assert.equal(classifyPgFailure(BOOST_AUTH_STDERR).code, "auth-rejected");
+  for (let i = 0; i < 3; i++) assert.equal(classifyPgFailure(AUTH_REJECTED_STDERR).code, "auth-rejected");
 });
 
 // ── Redaction, tested directly ───────────────────────────────────────────────

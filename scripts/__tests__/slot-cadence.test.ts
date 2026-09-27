@@ -15,7 +15,7 @@ import {
 // exist so the prose can never drift from backups-per-day again.
 
 test("slotsPerDayFrom: minutes per slot → slots per day", () => {
-  assert.equal(slotsPerDayFrom(480), 3); // Boost today: 00:00 / 08:00 / 16:00 UTC
+  assert.equal(slotsPerDayFrom(480), 3); // a 3-a-day client: 00:00 / 08:00 / 16:00 UTC
   assert.equal(slotsPerDayFrom(120), 12); // the engine's own default, and the old hardcoded prose
   assert.equal(slotsPerDayFrom(1440), 1);
   assert.equal(slotsPerDayFrom(60), 24);

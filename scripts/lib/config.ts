@@ -311,8 +311,8 @@ const dashboardGroup = z
 /**
  * Join object-key segments into a clean R2 key: split each on "/", drop blanks, rejoin with "/".
  * Guarantees no "//" and no leading/trailing slash, and tolerates a path-prefix written as
- * "backups", "/backups", or "backups/". e.g. ("", "boost", "index.html") → "boost/index.html";
- * ("/backups/", "boost", "index.html") → "backups/boost/index.html".
+ * "backups", "/backups", or "backups/". e.g. ("", "acme", "index.html") → "acme/index.html";
+ * ("/backups/", "acme", "index.html") → "backups/acme/index.html".
  */
 export function joinObjectKey(...segments: string[]): string {
   return segments.flatMap((s) => s.split("/")).filter(Boolean).join("/");

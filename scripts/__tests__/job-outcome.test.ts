@@ -23,7 +23,7 @@ const record = (over: Partial<JobOutcome> = {}): JobOutcome => ({
   version: 1,
   source: "job",
   job: "backup",
-  name: "boost",
+  name: "beta",
   runId: "18000000001",
   runAttempt: 1,
   jobId: "52000000001",
@@ -50,7 +50,7 @@ test("outcomeStamp: compact UTC, second precision; '' for an unparseable instant
 });
 
 test("outcomeKey ↔ parseOutcomeKey round-trip, including names that contain '_'", () => {
-  for (const name of ["boost", "my_db", "a_b_c", "live-one.v2", "x"]) {
+  for (const name of ["beta", "my_db", "a_b_c", "live-one.v2", "x"]) {
     for (const job of ["backup", "durableVerify", "restoreDrill", "archive"] as const) {
       const key = outcomeKey({ startedAt: "2026-09-27T03:15:07Z", runId: "123", runAttempt: 2, job, name });
       assert.equal(key, `${OUTCOME_PREFIX}20260927T031507Z_123_2_${job}_${name}.json`);
@@ -61,7 +61,7 @@ test("outcomeKey ↔ parseOutcomeKey round-trip, including names that contain '_
 });
 
 test("outcomeKey refuses an identity that cannot form a safe key", () => {
-  const ok = { startedAt: "2026-09-27T03:15:07Z", runId: "123", runAttempt: 1, job: "backup" as const, name: "boost" };
+  const ok = { startedAt: "2026-09-27T03:15:07Z", runId: "123", runAttempt: 1, job: "backup" as const, name: "beta" };
   assert.doesNotThrow(() => outcomeKey(ok));
   for (const bad of [
     { startedAt: "nope" },
@@ -81,16 +81,16 @@ test("outcomeKey refuses an identity that cannot form a safe key", () => {
 });
 
 test("parseOutcomeKey: anything else under the prefix → null", () => {
-  const good = `${OUTCOME_PREFIX}20260927T031507Z_123_1_backup_boost.json`;
+  const good = `${OUTCOME_PREFIX}20260927T031507Z_123_1_backup_beta.json`;
   assert.ok(parseOutcomeKey(good));
   for (const bad of [
-    "_status/boost/2026-09-27.json", // a daily-row state object, not an outcome
+    "_status/beta/2026-09-27.json", // a daily-row state object, not an outcome
     good.replace(".json", ".txt"),
     `${OUTCOME_PREFIX}20260927T031507Z_123_1_backup.json`, // no name
-    `${OUTCOME_PREFIX}2026-09-27_123_1_backup_boost.json`, // bad stamp
-    `${OUTCOME_PREFIX}20260927T031507Z_12x_1_backup_boost.json`,
-    `${OUTCOME_PREFIX}20260927T031507Z_123_0_backup_boost.json`, // attempts start at 1
-    `${OUTCOME_PREFIX}20260927T031507Z_123_1_dump_boost.json`,
+    `${OUTCOME_PREFIX}2026-09-27_123_1_backup_beta.json`, // bad stamp
+    `${OUTCOME_PREFIX}20260927T031507Z_12x_1_backup_beta.json`,
+    `${OUTCOME_PREFIX}20260927T031507Z_123_0_backup_beta.json`, // attempts start at 1
+    `${OUTCOME_PREFIX}20260927T031507Z_123_1_dump_beta.json`,
     `${OUTCOME_PREFIX}20260927T031507Z_123_1_backup_bad name.json`,
   ]) {
     assert.equal(parseOutcomeKey(bad), null, bad);
@@ -98,7 +98,7 @@ test("parseOutcomeKey: anything else under the prefix → null", () => {
 });
 
 test("keys sort in time order, and outcomeStartAfter lists records started at or after its second", () => {
-  const at = (iso: string, runId = "9") => outcomeKey({ startedAt: iso, runId, runAttempt: 1, job: "backup", name: "boost" });
+  const at = (iso: string, runId = "9") => outcomeKey({ startedAt: iso, runId, runAttempt: 1, job: "backup", name: "beta" });
   const keys = [at("2026-09-27T03:15:08Z"), at("2026-09-26T23:59:59Z"), at("2026-09-27T03:15:07Z"), at("2026-10-01T00:00:00Z")];
   const sorted = [...keys].sort();
   assert.deepEqual(sorted, [keys[1], keys[2], keys[0], keys[3]]);
@@ -121,7 +121,7 @@ test("parseJobOutcome: a well-formed record round-trips exactly", () => {
   // Every summary kind, and the nullable fields.
   const kinds: JobOutcome[] = [
     record({ job: "durableVerify", origin: null, summary: { kind: "durableVerify", objects: 46, hashes: 2, restores: 1 } }),
-    record({ job: "restoreDrill", origin: null, summary: { kind: "restoreDrill", table: "public.things", count: 1200, ratio: 0.998, key: "intraday/boost-x.dump" } }),
+    record({ job: "restoreDrill", origin: null, summary: { kind: "restoreDrill", table: "public.things", count: 1200, ratio: 0.998, key: "intraday/beta-x.dump" } }),
     record({ job: "restoreDrill", origin: null, summary: { kind: "restoreDrill", table: "public.things", count: null, ratio: null, key: "k" } }),
     record({ job: "archive", origin: null, summary: { kind: "archive", dryRun: "none", tables: [{ table: "public.api_logs", weeksArchived: 1, rowsArchived: 9, weeksPruned: 0, rowsPruned: 0 }] } }),
     record({ summary: null, jobId: null, origin: null, ok: false, exitCode: 143 }),

@@ -22,7 +22,7 @@ test("classify: tolerates modern managed-schema / vanilla-target noise", () => {
 });
 
 test("classify: a MULTI-LINE Command-was echo (with error/enum words in its body) is context", () => {
-  // The regression that failed liveone/boost: the SQL body of a failed CREATE echoes raw, and a
+  // The regression that failed two clients: the SQL body of a failed CREATE echoes raw, and a
   // column named `error text` / an enum value `'ERROR'` must not read as an error line.
   const stderr = [
     `pg_restore: error: could not execute query: ERROR:  relation "audit_log" already exists`,

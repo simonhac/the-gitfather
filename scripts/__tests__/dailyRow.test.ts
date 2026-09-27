@@ -22,9 +22,9 @@ import type { RunOrigin } from "../lib/runOrigin.js";
 // Worker is its only writer. Pinned with explicit zones and cadences, because the Worker has no
 // DISPLAY_TZ / SLOT_MINUTES constants to lean on.
 
-const perth: RowContext = { tz: "Australia/Perth", slotMinutes: 480, name: "boost", dashboardUrl: "" };
+const perth: RowContext = { tz: "Australia/Perth", slotMinutes: 480, name: "beta", dashboardUrl: "" };
 /** The engine's defaults: UTC, 3 a day. */
-const utc: RowContext = { tz: "UTC", slotMinutes: 480, name: "boost", dashboardUrl: "" };
+const utc: RowContext = { tz: "UTC", slotMinutes: 480, name: "beta", dashboardUrl: "" };
 
 // Golden fixtures — see fixtures/render-cases.json (once the parity cases against the old bash
 // renderer). States are PAST-dated so every slot is "due" (date < today), making the output
@@ -51,13 +51,13 @@ test("tzPartsIn / dateKeyIn / dailyLabelIn: calendar parts in the given zone, no
   assert.equal(dateKeyIn(d, "Australia/Perth"), "2026-09-10");
   assert.equal(dailyLabelIn(d, "Australia/Perth"), "07:30");
   assert.equal(dailyLabelIn(new Date(Date.UTC(2026, 8, 9, 16, 5, 0)), "Australia/Perth"), "00:05"); // midnight wraps to 00, not 24
-  assert.equal(dailyStateKey("boost", "2026-09-10"), "_status/boost/2026-09-10.json");
+  assert.equal(dailyStateKey("beta", "2026-09-10"), "_status/beta/2026-09-10.json");
 });
 
 test("dailyHeaderIn: weekday/day/month/year in the zone, with the zone's abbreviation; dashboard link optional", () => {
   const d = new Date(Date.UTC(2026, 8, 9, 23, 30, 0));
-  assert.equal(dailyHeaderIn(d, perth), "*boost DB backup — Thu 10 Sep 2026 (AWST)*");
-  assert.equal(dailyHeaderIn(d, { ...perth, dashboardUrl: "https://dash.example.com/" }), "*<https://dash.example.com/|boost DB backup> — Thu 10 Sep 2026 (AWST)*");
+  assert.equal(dailyHeaderIn(d, perth), "*beta DB backup — Thu 10 Sep 2026 (AWST)*");
+  assert.equal(dailyHeaderIn(d, { ...perth, dashboardUrl: "https://dash.example.com/" }), "*<https://dash.example.com/|beta DB backup> — Thu 10 Sep 2026 (AWST)*");
 });
 
 test("renderDailyTextIn: ⬜ for wholly-elapsed empty slots at the given cadence, in the given zone", () => {
@@ -67,10 +67,10 @@ test("renderDailyTextIn: ⬜ for wholly-elapsed empty slots at the given cadence
     channel: "C1",
     ts: "1.2",
     date: "2026-09-10",
-    header: "*boost DB backup — Thu 10 Sep 2026 (AWST)*",
+    header: "*beta DB backup — Thu 10 Sep 2026 (AWST)*",
     entries: [{ label: "08:03", ok: true, marker: "", origin: "self-heal" }],
   };
-  assert.equal(renderDailyTextIn(state, now, perth), "*boost DB backup — Thu 10 Sep 2026 (AWST)*\n⬜ 00:00  ·  🩹 ✅ 08:03");
+  assert.equal(renderDailyTextIn(state, now, perth), "*beta DB backup — Thu 10 Sep 2026 (AWST)*\n⬜ 00:00  ·  🩹 ✅ 08:03");
   // A finer cadence yields more placeholders for the same instant.
   const hourly = renderDailyTextIn(state, now, { ...perth, slotMinutes: 120 });
   assert.equal(hourly.split("⬜").length - 1, 7); // 00,02,04,06 + 10,12,14 elapsed and empty; 08 filled; 16 mid-slot
@@ -81,10 +81,10 @@ test("renderDailyTextIn: ⬜ for wholly-elapsed empty slots at the given cadence
 });
 
 test("failAlertTextIn: mention-free, dashboard-linked title, plain reason when there is no job log", () => {
-  assert.equal(failAlertTextIn("STALE", "slot overdue", "", perth), "🔴 *boost DB backup* STALE — slot overdue");
+  assert.equal(failAlertTextIn("STALE", "slot overdue", "", perth), "🔴 *beta DB backup* STALE — slot overdue");
   assert.equal(
     failAlertTextIn("STALE", "slot overdue", "https://gh/log", { ...perth, dashboardUrl: "https://d/" }),
-    "🔴 *<https://d/|boost DB backup>* STALE — <https://gh/log|slot overdue>",
+    "🔴 *<https://d/|beta DB backup>* STALE — <https://gh/log|slot overdue>",
   );
 });
 
@@ -155,20 +155,20 @@ test("dailyHeaderIn: the dashboard link comes from the context, so adding a url 
   const now = new Date(Date.UTC(2026, 5, 22, 5, 30, 0));
   // First created before dashboard.url existed → plain header.
   const plain = dailyHeaderIn(now, utc);
-  assert.equal(plain, "*boost DB backup — Mon 22 Jun 2026 (UTC)*");
+  assert.equal(plain, "*beta DB backup — Mon 22 Jun 2026 (UTC)*");
   // url now configured → the same day's header recomputes WITH the link.
   assert.equal(
     dailyHeaderIn(now, { ...utc, dashboardUrl: "https://dash.example.com/" }),
-    "*<https://dash.example.com/|boost DB backup> — Mon 22 Jun 2026 (UTC)*",
+    "*<https://dash.example.com/|beta DB backup> — Mon 22 Jun 2026 (UTC)*",
   );
 });
 
 test("dailyHeaderIn: full date + timezone tail in a non-UTC zone, following its DST", () => {
-  const sydney: RowContext = { tz: "Australia/Sydney", slotMinutes: 480, name: "liveone", dashboardUrl: "" };
+  const sydney: RowContext = { tz: "Australia/Sydney", slotMinutes: 480, name: "alpha", dashboardUrl: "" };
   // 04:00 UTC on 18 Aug 2026 = 14:00 Tue 18 Aug in Sydney, in AEST (not AEDT).
-  assert.equal(dailyHeaderIn(new Date("2026-08-18T04:00:00Z"), sydney), "*liveone DB backup — Tue 18 Aug 2026 (AEST)*");
+  assert.equal(dailyHeaderIn(new Date("2026-08-18T04:00:00Z"), sydney), "*alpha DB backup — Tue 18 Aug 2026 (AEST)*");
   // Southern DST: same zone, January → AEDT, and the date rolls to the 19th (15:00 local).
-  assert.equal(dailyHeaderIn(new Date("2026-01-19T04:00:00Z"), sydney), "*liveone DB backup — Mon 19 Jan 2026 (AEDT)*");
+  assert.equal(dailyHeaderIn(new Date("2026-01-19T04:00:00Z"), sydney), "*alpha DB backup — Mon 19 Jan 2026 (AEDT)*");
 });
 
 test("link wraps text in a Slack mrkdwn link only when a url is given", () => {
@@ -182,9 +182,9 @@ test("failAlertTextIn: the title links to the dashboard and the reason to the jo
       ...utc,
       dashboardUrl: "https://dash.example.com/",
     }),
-    "🔴 *<https://dash.example.com/|boost DB backup>* FAILED at 07:46 — " +
+    "🔴 *<https://dash.example.com/|beta DB backup>* FAILED at 07:46 — " +
       "<https://github.com/o/r/actions/runs/1/job/2|pg_dump failed>",
   );
   // `what` is the caller-supplied middle clause (sibling alerts).
-  assert.equal(failAlertTextIn("durable-verify FAILED", "hash mismatch", "", utc), "🔴 *boost DB backup* durable-verify FAILED — hash mismatch");
+  assert.equal(failAlertTextIn("durable-verify FAILED", "hash mismatch", "", utc), "🔴 *beta DB backup* durable-verify FAILED — hash mismatch");
 });

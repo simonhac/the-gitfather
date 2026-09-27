@@ -7,8 +7,8 @@ const DAY = 86_400_000;
 const at = (daysAgo: number, prefix = "R2"): LogCredential => ({
   ts: new Date(NOW - daysAgo * DAY).toISOString(),
   prefix,
-  bucket: "boost-pg-backups",
-  repo: "boost-suite/boost",
+  bucket: "beta-pg-backups",
+  repo: "beta-org/beta",
   keyIdTail: "9f2c",
 });
 
