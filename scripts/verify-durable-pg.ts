@@ -23,6 +23,9 @@ import "./lib/bootEnv.js"; // MUST be first — loads $PROFILE before backupType
 //     identity must fail loudly, not quietly become a hash-only check that still reports success.
 //     drill-max-age-days warns when that human drill goes stale.
 //
+// Every failure pages, and the two advisory checks (manual drill age, credential age) warn, through
+// this run's OUTCOME record (lib/outcomeRecorder.ts) — the scheduler Worker posts them to Slack.
+//
 // Usage:  PROFILE=profiles/example.yaml npx tsx scripts/verify-durable-pg.ts
 // Env mirrors the drill (R2 creds, DRILL_DATABASE_URL, PG_LIVE_DATABASE_URL, AGE_IDENTITY for .age
 // — none of the last three under keyless), plus the verify-durable.* keys above.
@@ -42,8 +45,7 @@ import { publishJobProof } from "./lib/jobProofPublish.js";
 import { credentialVerdicts, needsAttention } from "./lib/credentialAge.js";
 import { drillObject, drillCoreFromProfile, isDumpObject, stampToIso, type DrillGate } from "./restore-drill-pg.js";
 import { appendVerify } from "./runlog.js";
-import { slackOneoff, alertWebhook, failAlertText } from "./lib/slack.js";
-import { githubLogUrl } from "./lib/github.js";
+import { startOutcome } from "./lib/outcomeRecorder.js";
 import {
   hasRestoredCounts,
   oldestHashAgeDays,
@@ -76,11 +78,14 @@ function priorCountsFrom(log: LogStore): Record<string, number> | null {
 }
 
 async function main(): Promise<void> {
+  // FIRST, before config is loaded, so a config failure is recorded too (see lib/outcomeRecorder.ts).
+  const rec = startOutcome("durableVerify");
   const cfg = loadVerifyDurableConfig();
   const core = drillCoreFromProfile(cfg);
   const backupPrefix = core.backupPrefix;
   const r2Bucket = core.r2Bucket;
   const fileBasename = cfg.name!;
+  rec.setName(fileBasename);
   const r2Account = cfg.credentials.r2.accountId!;
   const r2Key = cfg.credentials.r2.accessKeyId!;
   const r2Secret = cfg.credentials.r2.secretAccessKey!;
@@ -100,20 +105,21 @@ async function main(): Promise<void> {
   process.on("SIGINT", () => process.exit(130));
   process.on("SIGTERM", () => process.exit(143));
 
+  // Every page lands in the outcome record with a machine-readable `code`; the run carries on so one
+  // bad object cannot hide the next, and exits non-zero at the end if anything paged.
   let failures = 0;
-  const page = async (msg: string): Promise<void> => {
+  const page = (code: string, msg: string): void => {
     process.stderr.write(`ERROR: ${msg}\n`);
     failures++;
-    await slackOneoff(failAlertText("durable-verify FAILED", msg, await githubLogUrl()), true).catch(() => {});
-    await alertWebhook(`🔴 PG durable-verify FAILED (${fileBasename}): ${msg}`).catch(() => {});
+    rec.alert("page", code, msg);
   };
-  const fatal = async (msg: string): Promise<never> => {
-    await page(msg);
+  const fatal = (code: string, msg: string): never => {
+    page(code, msg);
     cleanup();
     process.exit(1);
   };
 
-  if (!commandExists("rclone")) await fatal("rclone not found");
+  if (!commandExists("rclone")) fatal("tool_missing", "rclone not found");
 
   process.env.RCLONE_CONFIG_R2_TYPE = "s3";
   process.env.RCLONE_CONFIG_R2_PROVIDER = "Cloudflare";
@@ -145,7 +151,7 @@ async function main(): Promise<void> {
     log = loadLog();
   } catch (e) {
     process.stderr.write(`could not load the run-log: ${(e as Error).message}\n`);
-    await page("could not load the run-log from R2");
+    page("runlog_unreadable", "could not load the run-log from R2");
     cleanup();
     process.exit(1);
   }
@@ -165,7 +171,7 @@ async function main(): Promise<void> {
     const lsr = capture("rclone", ["lsf", "--files-only", `r2:${r2Bucket}/${backupPrefix}/${tier}/`, "--s3-no-check-bucket"]);
     if (!lsr.ok) {
       listingOk = false;
-      await page(`could not list ${backupPrefix}/${tier}/ — enumeration incomplete, census floor unreliable`);
+      page("listing_failed", `could not list ${backupPrefix}/${tier}/ — enumeration incomplete, census floor unreliable`);
     }
     for (const name of lsr.out.split("\n").map((s) => s.trim()).filter(Boolean).filter(isDumpObject)) {
       const stamp = stampFromKey(name);
@@ -190,7 +196,8 @@ async function main(): Promise<void> {
   );
   if (missing.length) {
     const shown = missing.slice(0, 5).join(", ");
-    await page(
+    page(
+      "census_short",
       `durable census short by ${missing.length} of ${expected.length}: ` +
         `${shown}${missing.length > 5 ? `, +${missing.length - 5} more` : ""} — ` +
         `present in the run-log, absent from the ${backupPrefix} listing`,
@@ -245,7 +252,7 @@ async function main(): Promise<void> {
       restoresThisRun++;
       console.log(`✓ restore-verified ${o.key}`);
     }
-    else await page(`restore of ${o.key} failed — ${res.reason}`);
+    else page("restore_failed", `restore of ${o.key} failed — ${res.reason}`);
   };
 
   const recordHash = async (o: DurableObj): Promise<void> => {
@@ -270,7 +277,7 @@ async function main(): Promise<void> {
 
     if (!got) {
       record(false, "could not read R2 sha256");
-      await page(`hash-check of ${o.key} — could not read R2 sha256`);
+      page("hash_unreadable", `hash-check of ${o.key} — could not read R2 sha256`);
       return;
     }
     const expected = log.runByStamp.get(o.stamp)?.sha256?.toLowerCase() ?? null;
@@ -278,7 +285,7 @@ async function main(): Promise<void> {
       const ok = got === expected;
       record(ok, ok ? null : `sha256 mismatch (R2 ${got.slice(0, 12)}… vs recorded ${expected.slice(0, 12)}…)`);
       if (ok) console.log(`✓ hash-verified ${o.key}`);
-      else await page(`hash mismatch ${o.key} (R2 ${got.slice(0, 12)}… vs recorded ${expected.slice(0, 12)}…)`);
+      else page("hash_mismatch", `hash mismatch ${o.key} (R2 ${got.slice(0, 12)}… vs recorded ${expected.slice(0, 12)}…)`);
       return;
     }
     // No recorded baseline (run predates integrity.checksum). Fall back to the live intraday copy if
@@ -293,7 +300,7 @@ async function main(): Promise<void> {
       const ok = got === baseline;
       record(ok, ok ? "matched intraday copy (no recorded baseline)" : "differs from intraday copy");
       if (ok) console.log(`✓ hash-verified ${o.key} (vs intraday copy)`);
-      else await page(`hash mismatch ${o.key} vs its intraday copy`);
+      else page("hash_mismatch", `hash mismatch ${o.key} vs its intraday copy`);
       return;
     }
     record(true, "no sha256 baseline (pre-sha256 run); object present + listable", false);
@@ -360,7 +367,8 @@ async function main(): Promise<void> {
     );
     if (oldestDays !== null && oldestDays > cfg.verifyDurable.rehashMaxAgeDays) {
       const shown = oldestDays === Infinity ? "never hashed" : `${Math.floor(oldestDays)}d`;
-      await page(
+      page(
+        "rehash_behind",
         `re-hash rotation is behind: the least-recently-hashed durable object was last checked ${shown}, ` +
           `over the ${cfg.verifyDurable.rehashMaxAgeDays}d limit — raise verify-durable.rehash-per-run ` +
           `(currently ${cfg.verifyDurable.rehashPerRun}/run against ${all.length} objects)`,
@@ -390,7 +398,7 @@ async function main(): Promise<void> {
         `nothing else proves the escrowed age identity still opens a stored object. ` +
         `Run: npm run drill-object -- --key <tier>/<object>`;
       process.stderr.write(`${msg}\n`);
-      await slackOneoff(`⚠️ *${fileBasename} backups* — ${msg}`, false).catch(() => {});
+      rec.alert("warn", "manual_drill_overdue", msg);
     } else {
       console.log(`Manual decrypt drill: ${ageDays}d ago (limit ${cfg.verifyDurable.drillMaxAgeDays}d)`);
     }
@@ -407,9 +415,10 @@ async function main(): Promise<void> {
   if (stale.length) {
     const summary = stale.map((v) => v.message).join("; ");
     process.stderr.write(`credential rotation: ${summary}\n`);
-    await slackOneoff(`⚠️ *${fileBasename} credential rotation* — ${summary}`, false).catch(() => {});
+    rec.alert("warn", "credential_rotation", summary);
   }
 
+  rec.summary({ kind: "durableVerify", objects: all.length, hashes: hashesThisRun, restores: restoresThisRun });
   cleanup();
   if (failures > 0) {
     process.stderr.write(`durable-verify: ${failures} failure(s)\n`);

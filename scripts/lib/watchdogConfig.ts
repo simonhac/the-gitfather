@@ -12,6 +12,8 @@
 // the Worker.
 // ─────────────────────────────────────────────────────────────────────────────
 
+import { safeMention } from "./slackText.js";
+
 export const WATCHDOG_CONFIG_VERSION = 1;
 
 /**
@@ -70,8 +72,11 @@ export interface WatchdogConfig {
   dryRun: boolean;
   /** The caller workflow file self-heal dispatches (`staleness.heal-workflow`). */
   healWorkflow: string;
-  /** Slack channel id, or null when Slack is off for this backup. The bot token is a Worker secret. */
-  slackChannel: string | null;
+  /**
+   * profile `slack.alert-mention` — prepended to the Worker's pages. Always a safe mention (see
+   * slackText.ts): anything else in a published copy reads as the default. The Slack channel and the
+   * bot's identity are NOT here — they live in the scheduler's roster, next to the token.
+   */
   alertMention: string;
   dashboardUrl: string | null;
   /**
@@ -83,8 +88,8 @@ export interface WatchdogConfig {
   publishedAt: string;
 }
 
-/** Build the publishable object from a validated profile. `slackChannel` honours env SLACK_CHANNEL first. */
-export function watchdogConfigFrom(cfg: WatchdogSource, now: Date, slackChannel: string): WatchdogConfig {
+/** Build the publishable object from a validated profile. */
+export function watchdogConfigFrom(cfg: WatchdogSource, now: Date): WatchdogConfig {
   return {
     version: WATCHDOG_CONFIG_VERSION,
     name: cfg.name ?? "",
@@ -99,8 +104,7 @@ export function watchdogConfigFrom(cfg: WatchdogSource, now: Date, slackChannel:
     selfHeal: cfg.staleness.selfHeal,
     dryRun: cfg.staleness.dryRun,
     healWorkflow: cfg.staleness.healWorkflow,
-    slackChannel: slackChannel || null,
-    alertMention: cfg.slack.alertMention || "<!here>",
+    alertMention: safeMention(cfg.slack.alertMention),
     dashboardUrl: cfg.dashboard.url ?? null,
     archives: (cfg.archive?.tables.length ?? 0) > 0,
     publishedAt: now.toISOString(),
@@ -150,8 +154,7 @@ export function parseWatchdogConfig(raw: string): WatchdogConfig | null {
     selfHeal: v.selfHeal,
     dryRun: v.dryRun,
     healWorkflow: v.healWorkflow,
-    slackChannel: strOrNull(v.slackChannel),
-    alertMention: isStr(v.alertMention) ? v.alertMention : "<!here>",
+    alertMention: safeMention(isStr(v.alertMention) ? v.alertMention : null),
     dashboardUrl: strOrNull(v.dashboardUrl),
     ...(typeof v.archives === "boolean" ? { archives: v.archives } : {}),
     publishedAt: typeof v.publishedAt === "string" ? v.publishedAt : "",

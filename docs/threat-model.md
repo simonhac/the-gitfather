@@ -31,16 +31,47 @@ dump this tool already produces is the natural feed for it.
 
 - **Leaked CI R2 key** (primary threat): scoped read+write, no delete → cannot delete/overwrite objects,
   cannot empty the bucket while locks exist, cannot touch lock/lifecycle config. The last 14 days of
-  durable backups are immutable.
+  durable backups are immutable. The key can also write outcome records under `_status/_outcome/`,
+  which the Worker turns into Slack posts. That lets the holder make the Worker say escaped,
+  code-spanned text, inside fixed templates, in **that client's own roster channel, under that
+  client's roster name**. The channel, name and icon come from the roster, never from the bucket.
+  The Worker posts only for a run that GitHub vouches for (a real run of the engine workflow, under
+  48 h old) or one that arrived with a valid OIDC token.
+
+  The key can also rewrite the published `_config/`, which gives it two more levers, both bounded:
+  - **Mentions.** The only mention is `alert-mention`, and the Worker holds it to a grammar. At
+    worst that is `<!channel>` or a named user or group.
+  - **The title link.** It can point at any https URL.
+
+  The key cannot reach Slack itself, because no client repo holds a Slack token any more.
 - **Leaked `PG_BACKUP_DATABASE_URL`**: the master DB credential and the highest-value secret here.
   Mitigations (a read-only role, ephemeral creds, server-side push) and at-rest encryption are the
   obvious next steps.
 - **Full Cloudflare-account takeover**: can remove bucket locks (R2 has no COMPLIANCE "even-root-can't-
   delete" mode). Accepted for a DR / leaked-token model.
-- **Compromised scheduler Worker**: holds the GitHub App key (`actions:write` on the installed repos —
-  it can start workflows, never read source or secrets), the Slack bot token, and R2 bindings to every
-  client bucket (bindings are not verb-scoped, so it can delete *unlocked* objects: `intraday/`,
-  `_status/`, `_config/`, `_log/`). The 14-day locks on the durable tiers hold. Deliberately, the Worker
-  is **not** given `contents:read` — config flows GitHub → Cloudflare via the backup job, never the reverse.
+- **Compromised scheduler Worker**: it holds three things.
+  - The GitHub App key: `actions:write` on the installed repos. It can start workflows and read run
+    metadata, but never read source or secrets.
+  - The **only** Slack bot token: the the-gitfather app, `chat:write` + `chat:write.customize`. It can
+    post under any name into any channel the app has been invited to.
+  - R2 bindings to every client bucket. Bindings are not verb-scoped, so it can delete *unlocked*
+    objects: `intraday/`, `_status/`, `_config/`, `_log/`.
+
+  The 14-day locks on the durable tiers hold. Deliberately, the Worker is **not** given
+  `contents:read`: config flows GitHub → Cloudflare via the backup job, never the reverse. Keeping
+  the app in only the channels it posts to bounds what a stolen Slack token can reach.
+- **`id-token: write` in the callers**: the grant that lets a run authenticate to `/notify`. It lets
+  **every step** of the called engine workflow mint an OIDC token carrying that consumer repo's
+  identity, for any audience. The Worker accepts only audience `the-gitfather` and an engine
+  `job_workflow_ref`. But any *other* cloud trust policy that trusts this repo's GitHub OIDC tokens
+  would accept one minted inside an engine run. Pin such a policy to `job_workflow_ref`, rather than
+  to the repository alone. You can do that directly, or through a customised `sub` that includes it.
+  The default `sub` is the caller's repo and ref, so it is identical inside the engine workflow.
+- **The Worker is the single point for Slack**: if it is down, Slack is silent, with no failures and
+  no daily rows. Three things page in that case, none of which depends on the Worker being up:
+  - an external uptime monitor on its `/health`, which also goes red when the Slack tick stops or
+    the token fails `auth.test`;
+  - its own heartbeat;
+  - the backup's `HEARTBEAT_URL`.
 - **At rest**: with `encryption: none`, dumps sit unencrypted in a **private** bucket (R2 still encrypts at
   rest). Set `encryption: age` for client-side encryption if a full dump contains sensitive data.

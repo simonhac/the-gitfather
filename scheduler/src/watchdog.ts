@@ -1,7 +1,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // The staleness watchdog, run natively in the Worker every 10-minute tick — asserts a fresh backup
 // has LANDED (an object, not a green run), self-heals a missed slot by dispatching the client's
-// backup workflow, and keeps the Slack status row honest. Formerly the-gitfather's
+// backup workflow, and pages when it can't. Formerly the-gitfather's
 // scripts/check-staleness.ts, dispatched to GitHub Actions each tick; it now runs here so that
 // (a) it costs no Actions minutes and (b) an Actions outage — including the private org's billing
 // lapsing — is DETECTED by this watchdog instead of silencing it.
@@ -9,8 +9,12 @@
 // Per client bucket, one check per published `_config/<name>/watchdog.json` (written by the backup
 // job from its validated profile — see scripts/lib/watchdogConfig.ts; config flows GitHub →
 // Cloudflare, never the reverse). The decision logic is shared source with the Actions-side scripts
-// (schedule.ts, alertDecision.ts, dailyRow.ts, runlogParse.ts, slackApi.ts), so the two runtimes
-// cannot drift on what "overdue", "broken" or a ⬜ mean.
+// (schedule.ts, alertDecision.ts, runlogParse.ts), so the two runtimes cannot drift on what
+// "overdue" or "broken" mean. Its pages go to the client's roster channel through a SlackPort; the
+// daily row's ⬜ placeholders are the Slack tick's job now (index.ts slackTick).
+//
+// Everything interpolated into a page came from the client's bucket (object names, the published
+// config, the run-log's error text), so pages are escaped before they are posted (slackText.ts).
 //
 // Freshness is slot-based: if the CURRENT cadence slot (slotMinutes wide, phased from the profile's
 // anchor hour — the same grid the Worker dispatches on) still has no backup once
@@ -24,18 +28,13 @@ import { advanceAlertState, alertStateKey, decideAlert, parseAlertState, type Al
 import { formatElapsed } from "../../scripts/lib/duration.js";
 import { backupLooksBroken, INTRADAY_PREFIXES, newestName, slotPhaseMinutes, slotState, stampToEpochMs } from "../../scripts/lib/schedule.js";
 import { pickLatestRun, runlogKey, runlogMonthsToTry } from "../../scripts/lib/runlogParse.js";
-import { postMessage, postWebhook, updateMessage } from "../../scripts/lib/slackApi.js";
-import {
-  dailyHeaderIn,
-  dailyStateKey,
-  dateKeyIn,
-  failAlertTextIn,
-  parseDailyState,
-  renderDailyTextIn,
-  type RowContext,
-} from "../../scripts/lib/dailyRow.js";
+import { failAlertTextIn, type RowContext } from "../../scripts/lib/dailyRow.js";
+import { escapeSlack, safeMention } from "../../scripts/lib/slackText.js";
 import { parseWatchdogConfig, WATCHDOG_CONFIG_PREFIX, type WatchdogConfig } from "../../scripts/lib/watchdogConfig.js";
 import { dispatchWorkflow, listWorkflowRuns, type Client, type Env } from "./github.js";
+import { displayContext } from "./outcomeRender.js";
+import { postWebhook } from "./slackApi.js";
+import { slackPortFor, type SlackPort } from "./slackPort.js";
 
 // Outcome codes live in health.ts so that module can stay free of Worker types (it is imported by
 // the Node-typed test side). Imported for use here, and re-exported so every existing
@@ -89,18 +88,24 @@ interface Check {
   bucket: R2Bucket;
   cfg: WatchdogConfig;
   now: Date;
-  slackToken: string;
+  /** The client's Slack (roster channel + identity), or null when Slack is off for it. */
+  slack: SlackPort | null;
   webhookUrl: string;
+  /** Display-safe (outcomeRender.ts displayContext). */
   ctx: RowContext;
   log: (line: string) => void;
 }
 
-const slackOn = (c: Check): boolean => Boolean(c.slackToken && c.cfg.slackChannel);
+async function post(c: Check, text: string): Promise<void> {
+  if (!c.slack) return;
+  const r = await c.slack.post(text);
+  if (!r.ok) c.log(`slack: chat.postMessage failed: ${r.error}`);
+}
 
 /** Quiet post (no mention) — self-heal progress. Best-effort. */
 async function note(c: Check, text: string): Promise<void> {
   c.log(text);
-  if (slackOn(c)) await postMessage(c.slackToken, c.cfg.slackChannel!, text, { onError: (e) => c.log(`slack: chat.postMessage failed: ${e}`) });
+  await post(c, escapeSlack(text, 1500));
 }
 
 /**
@@ -121,41 +126,12 @@ async function fail(c: Check, msg: string, cause: string | null = null): Promise
   }
   const decision = decideAlert(prev, nowMs, cause, c.cfg.repageMinutes);
   if (decision.page) {
-    if (slackOn(c)) {
-      await postMessage(c.slackToken, c.cfg.slackChannel!, `${c.cfg.alertMention} ${failAlertTextIn("STALE", msg, "", c.ctx)}`, {
-        onError: (e) => c.log(`slack: chat.postMessage failed: ${e}`),
-      });
-    }
-    await postWebhook(c.webhookUrl, `🔴 PG backup STALE (${c.cfg.name}): ${msg}`);
+    await post(c, `${safeMention(c.cfg.alertMention)} ${failAlertTextIn("STALE", escapeSlack(msg, 1500), "", c.ctx)}`);
+    await postWebhook(c.webhookUrl, `🔴 PG backup STALE (${c.ctx.name}): ${escapeSlack(msg, 1500)}`);
   } else {
     c.log(`(alert throttled: already paged for this outage; next page in ~${decision.nextPageInMinutes}m — repageMinutes=${c.cfg.repageMinutes})`);
   }
   await putJson(c.bucket, key, advanceAlertState(prev, nowMs, cause, decision)).catch((e) => c.log(`alert-state write failed: ${String(e)}`));
-}
-
-/**
- * Re-render today's Slack row in place (no new tick) so elapsed-but-empty slots surface as ⬜.
- * No-op when today has no message yet, when Slack is off, or when the state can't be read — a split
- * row misleads and a missing refresh is benign. Best-effort.
- */
-async function refreshDailyRow(c: Check): Promise<void> {
-  if (!slackOn(c)) return;
-  const key = dailyStateKey(c.cfg.name, dateKeyIn(c.now, c.ctx.tz));
-  let raw: string | null;
-  try {
-    raw = await getText(c.bucket, key);
-  } catch (e) {
-    c.log(`daily-row read failed (skipping refresh): ${String(e)}`);
-    return;
-  }
-  if (!raw) return; // no message today yet — the backup creates it
-  const state = parseDailyState(raw);
-  if (!state || !state.ts) return;
-  state.header = dailyHeaderIn(c.now, c.ctx); // recomputed each persist so a config change relinks in place
-  const ok = await updateMessage(c.slackToken, c.cfg.slackChannel!, state.ts, renderDailyTextIn(state, c.now, c.ctx), {
-    onError: (e) => c.log(`slack: chat.update failed: ${e}`),
-  });
-  if (ok) await putJson(c.bucket, key, state).catch((e) => c.log(`daily-row write failed: ${String(e)}`));
 }
 
 /** The classified cause + human reason of the latest run, from the private run-log. Best-effort. */
@@ -171,7 +147,8 @@ async function latestRunCause(c: Check): Promise<{ cause: string | null; because
     const latest = pickLatestRun(body);
     if (!latest) continue;
     if (latest.ok === false) {
-      return { cause: latest.errorCode ?? null, because: latest.error ? ` — ${latest.error}` : "" };
+      // Backticked, not escaped: fail() escapes the whole message once, on its way to Slack.
+      return { cause: latest.errorCode ?? null, because: latest.error ? ` — \`${latest.error.replace(/`/g, "'").slice(0, 300)}\`` : "" };
     }
     return { cause: null, because: "" };
   }
@@ -279,9 +256,6 @@ async function checkOne(c: Check): Promise<WatchdogOutcome> {
   const ageM = Math.floor((nowMs - epochMs) / 60_000);
   const ageText = formatElapsed(nowMs - epochMs);
 
-  // Refresh today's Slack row every tick (independent of freshness): re-renders ⬜ placeholders.
-  await refreshDailyRow(c);
-
   const phase = slotPhaseMinutes(cfg.slotMinutes, cfg.anchorHourUtc);
   const { overdue, slotStartMs } = slotState(nowMs, epochMs, cfg.slotMinutes, cfg.graceMinutes, phase);
   const slotIso = new Date(slotStartMs).toISOString();
@@ -337,9 +311,9 @@ export async function runWatchdog(env: Env, client: Client, now: Date, read?: Pr
         bucket,
         cfg,
         now,
-        slackToken: clientSecret(env, "SLACK_BOT_TOKEN", client.id),
+        slack: slackPortFor(env.SLACK_BOT_TOKEN, client),
         webhookUrl: clientSecret(env, "ALERT_WEBHOOK_URL", client.id),
-        ctx: { tz: cfg.timezone, slotMinutes: cfg.slotMinutes, name: cfg.name, dashboardUrl: cfg.dashboardUrl ?? "" },
+        ctx: displayContext({ tz: cfg.timezone, slotMinutes: cfg.slotMinutes, name: cfg.name, dashboardUrl: cfg.dashboardUrl }),
         log: (line) => log(`[${cfg.name}] ${line}`),
       };
       try {

@@ -10,8 +10,9 @@ import "./lib/bootEnv.js"; // MUST be first — loads $PROFILE before backupType
 // (2) runs only that task's read-only client probes (lib/preflight.ts) and prints a
 // ✓/⚠/✗ checklist. Exit 0 iff every REQUIRED check passes, else 1.
 //
-// STRICTLY READ-ONLY: no dump, no upload, no `gh workflow run`, no Slack post. Safe to
-// run against production credentials. This is the broader preflight that complements
+// STRICTLY READ-ONLY: no dump, no upload, no `gh workflow run`. Safe to
+// run against production credentials. (No Slack probe: jobs hold no Slack token — the scheduler
+// Worker owns it, and its /health reports on it.) This is the broader preflight that complements
 // build-dashboard's `--sample`. (The staleness watchdog runs in the Cloudflare Worker — see scheduler/.)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -31,18 +32,11 @@ import {
   checkPgClientVersion,
   checkR2,
   checkPostgres,
-  checkSlack,
   configureRcloneRemote,
 } from "./lib/preflight.js";
 
 const TASKS = ["backup", "archive", "drill", "verify-durable", "dashboard"] as const;
 type Task = (typeof TASKS)[number];
-
-/** Slack probe iff a bot token + channel are configured. */
-async function maybeSlack(cfg: Profile): Promise<ProbeResult[]> {
-  const { slackToken: token, slackChannel: channel } = cfg.credentials;
-  return token && channel ? [await checkSlack(token, channel)] : [];
-}
 
 async function probeBackup(): Promise<ProbeResult[]> {
   const cfg = loadBackupConfig();
@@ -54,7 +48,6 @@ async function probeBackup(): Promise<ProbeResult[]> {
   configureRcloneRemote("r2", r2.accountId!, r2.accessKeyId!, r2.secretAccessKey!);
   out.push(checkR2("r2", r2.bucket!, "R2 dump bucket"));
   out.push(checkPostgres(cfg.credentials.databaseUrl!, "backup source"));
-  out.push(...(await maybeSlack(cfg)));
   return out;
 }
 
@@ -67,7 +60,6 @@ async function probeRestore(cfg: Profile): Promise<ProbeResult[]> {
   out.push(checkR2("r2", r2.bucket!, "R2 dump bucket"));
   out.push(checkPostgres(cfg.credentials.drillDatabaseUrl!, "drill target"));
   out.push(checkPostgres(cfg.credentials.liveDatabaseUrl!, "live row-count source"));
-  out.push(...(await maybeSlack(cfg)));
   return out;
 }
 
@@ -86,7 +78,6 @@ async function probeArchive(): Promise<ProbeResult[]> {
   configureRcloneRemote("r2", r2.accountId!, r2.accessKeyId!, r2.secretAccessKey!);
   out.push(checkR2("r2", r2.bucket!, "R2 archive bucket"));
   out.push(checkPostgres(cfg.credentials.archiveDatabaseUrl!, "archive source"));
-  out.push(...(await maybeSlack(cfg)));
   return out;
 }
 
@@ -119,7 +110,7 @@ async function probeVerifyDurable(): Promise<ProbeResult[]> {
   const cfg = loadVerifyDurableConfig();
   // A keyless run never restores, so probing a drill target, a live database, pg_restore or age
   // would fail a CORRECTLY configured profile — and a preflight that cries wolf on a good config is
-  // one people learn to ignore. Probe only what this shape actually uses: R2, and Slack.
+  // one people learn to ignore. Probe only what this shape actually uses: R2.
   if (cfg.verifyDurable.keyless) {
     const r2 = cfg.credentials.r2;
     configureRcloneRemote("r2", r2.accountId!, r2.accessKeyId!, r2.secretAccessKey!);
@@ -131,7 +122,6 @@ async function probeVerifyDurable(): Promise<ProbeResult[]> {
         ok: true,
         detail: "keyless — hash checks only; no AGE_IDENTITY, no database, no restores",
       },
-      ...(await maybeSlack(cfg)),
       ...probeCredentialAge(cfg),
     ];
   }

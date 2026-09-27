@@ -8,8 +8,9 @@ import "./lib/bootEnv.js"; // MUST be first — loads $PROFILE before backupType
 // the configured anchor. Retention is enforced by R2 lifecycle rules + bucket locks per prefix (set
 // out-of-band; see docs/r2-setup.md), not by this script. Built for GitHub Actions but runnable locally.
 //
-// Slack: one message per day that updates in place — a ✅/❌ + HH:MM tick per slot run (see
-// lib/slack.ts). A failed run appends ❌ and posts a loud, mentioning threaded alert.
+// Slack: nothing from here. The run leaves an OUTCOME record in R2 as it exits (lib/outcomeRecorder.ts)
+// and the scheduler Worker turns it into the day's row — a ✅/❌ + HH:MM tick per slot run — plus, on
+// failure, a loud, mentioning threaded alert. The job holds no Slack token.
 //
 // Usage:
 //   PROFILE=profiles/example.yaml npx tsx scripts/backup-pg-to-r2.ts
@@ -19,7 +20,7 @@ import "./lib/bootEnv.js"; // MUST be first — loads $PROFILE before backupType
 //                            ^ if your provider has a connection pooler, prefer its SESSION pooler.
 //   R2_ACCOUNT_ID            endpoint = https://$R2_ACCOUNT_ID.r2.cloudflarestorage.com
 //   R2_BUCKET / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY
-// Optional env: SLACK_BOT_TOKEN / SLACK_CHANNEL / HEARTBEAT_URL / AGE_RECIPIENT / FORCE_TIERS.
+// Optional env: HEARTBEAT_URL / AGE_RECIPIENT / FORCE_TIERS.
 // All other config comes from $PROFILE (the YAML profile).
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -27,7 +28,7 @@ import { statSync, mkdtempSync, rmSync, writeFileSync, realpathSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { backupSchema, reportConfigError, peekProfile } from "./lib/config.js";
+import { backupSchema, reportConfigError } from "./lib/config.js";
 import { buildRawProfile } from "./lib/profile.js";
 import { pgConn } from "./lib/pgconn.js";
 import { verifyDumpFile } from "./restore-drill-pg.js";
@@ -36,10 +37,9 @@ import { classifyPgFailure, isConnectionLevel } from "./lib/pg-classify.js";
 import type { PgFailureCode } from "./lib/pg-classify.js";
 import { computeTiers, INTRADAY_TIER, normalizeTier, runOrigin } from "./lib/schedule.js";
 import { appendRun, appendVerify } from "./runlog.js";
-import { githubLogUrl } from "./lib/github.js";
 import { pingHeartbeat } from "./lib/heartbeat.js";
 import { publishWatchdogConfig } from "./lib/watchdogPublish.js";
-import { slackEnabled, slackPost, slackDailyRecord, dailyLabel, alertWebhook, failAlertText } from "./lib/slack.js";
+import { startOutcome } from "./lib/outcomeRecorder.js";
 import { TIER_META, type BackupTier } from "./lib/backupTypes.js";
 
 // Captured at module load (≈ process start) so both recordConfigFailure() and main() can stamp the
@@ -73,20 +73,27 @@ function utcStamp(d: Date): string {
 }
 
 /**
- * Best-effort ❌ when config validation fails BEFORE the normal flow could record anything — so the row
- * shows ❌, not ⬜ (indistinguishable from a dropped scheduler tick). `cfg` is unavailable, so it reads
- * raw process.env and no-ops unless it has everything needed to reach R2 + Slack (true for the #165 case,
- * where only the DB URL was empty). NEVER echoes a config value — the message is generic (secret-safe).
+ * Best-effort run-log ❌ when config validation fails BEFORE the normal flow could record anything — so
+ * the dashboard and the watchdog see a failed run, not a missing one (indistinguishable from a dropped
+ * scheduler tick). The Slack row's ❌ comes from the outcome record instead (reportConfigError pages
+ * `config_invalid` into it). `cfg` is unavailable, so it reads raw process.env and no-ops unless it has
+ * everything needed to reach R2 (true for the #165 case, where only the DB URL was empty). NEVER echoes
+ * a config value — the message is generic (secret-safe).
  */
 async function recordConfigFailure(): Promise<void> {
-  // The profile `name` comes from the YAML (read tolerantly); R2 creds are env. peekProfile() never exits,
-  // so this works even though task-level config validation just failed.
-  const basename = peekProfile()?.name;
+  // The profile `name` comes from the YAML, read RAW — the profile may itself be what failed validation
+  // (a typo'd key, an out-of-range number), and appendRun keys on the raw name the same way. R2 creds are env.
+  let basename: unknown;
+  try {
+    basename = buildRawProfile().name;
+  } catch {
+    return; // an unreadable $PROFILE: no name to file the run under
+  }
   const acct = process.env.R2_ACCOUNT_ID,
     bkt = process.env.R2_BUCKET;
   const key = process.env.R2_ACCESS_KEY_ID,
     sec = process.env.R2_SECRET_ACCESS_KEY;
-  if (!slackEnabled() || !basename || !acct || !bkt || !key || !sec) return; // can't record → leave as ⬜
+  if (typeof basename !== "string" || !basename || !acct || !bkt || !key || !sec) return; // can't reach the run-log
   process.env.RCLONE_CONFIG_R2_TYPE = "s3";
   process.env.RCLONE_CONFIG_R2_PROVIDER = "Cloudflare";
   process.env.RCLONE_CONFIG_R2_ACCESS_KEY_ID = key;
@@ -97,28 +104,23 @@ async function recordConfigFailure(): Promise<void> {
   const runTsIso =
     `${stamp.slice(0, 4)}-${stamp.slice(4, 6)}-${stamp.slice(6, 8)}` +
     `T${stamp.slice(9, 11)}:${stamp.slice(11, 13)}:${stamp.slice(13, 15)}Z`;
-  const label = dailyLabel(now);
-  const origin = runOrigin(process.env.GITHUB_EVENT_NAME, process.env.BACKUP_TRIGGER);
   const msg = "config validation failed"; // GENERIC — never include the offending value (secret-safe)
-  const dayts = (await bestEffort("slack config-fail tick", () => slackDailyRecord(false, label, "", origin, now))) ?? "";
-  const mention = peekProfile()?.slack.alertMention || "<!here>";
-  const logUrl = await githubLogUrl();
-  await bestEffort("slack config-fail alert", () =>
-    slackPost(`${mention} ${failAlertText(`FAILED at ${label}`, msg, logUrl)}`, {
-      thread: dayts,
-      broadcast: true,
-    }),
-  );
-  await bestEffort("alert webhook", () => alertWebhook(`🔴 ${basename} backup FAILED at ${label} — ${msg}`));
   await bestEffort("runlog config-fail", () =>
     appendRun({ ts: runTsIso, ok: false, tiers: [], error: msg, durationMs: Date.now() - SCRIPT_START_MS }),
   );
 }
 
 async function main(): Promise<void> {
-  // Validate + type all config up front (zod). On any missing/malformed var, record a best-effort ❌
-  // on today's Slack row (so a config crash is distinguishable from a dropped tick — it is NOT ⬜),
-  // print the same aggregated report (names only), then exit 1 — before any dump/upload. See lib/config.ts.
+  // FIRST, before config is even read: from here on, every way out of this process — a config
+  // failure included — leaves an outcome record for the scheduler to announce.
+  const rec = startOutcome("backup");
+  // Row marker: 🖐️ for hand-kicked runs, 🩹 for a staleness self-heal catch-up, none for cron. Env-only,
+  // so it is known even when the profile is not. See runOrigin.
+  rec.setOrigin(runOrigin(process.env.GITHUB_EVENT_NAME, process.env.BACKUP_TRIGGER));
+
+  // Validate + type all config up front (zod). On any missing/malformed var, append a best-effort ❌ to
+  // the run-log, print the aggregated report (names only — it also pages `config_invalid` into the
+  // outcome record, so today's row shows ❌, not ⬜), then exit 1 — before any dump/upload. See lib/config.ts.
   const parsed = backupSchema.safeParse(buildRawProfile());
   if (!parsed.success) {
     await recordConfigFailure();
@@ -137,6 +139,7 @@ async function main(): Promise<void> {
   const encryption = cfg.encryption;
   const minBytes = cfg.dump.minBytes;
   const anchorHour = cfg.anchorHourUtc;
+  rec.setName(fileBasename);
 
   const now = new Date();
   const stamp = utcStamp(now);
@@ -144,13 +147,9 @@ async function main(): Promise<void> {
     `${stamp.slice(0, 4)}-${stamp.slice(4, 6)}-${stamp.slice(6, 8)}` +
     `T${stamp.slice(9, 11)}:${stamp.slice(11, 13)}:${stamp.slice(13, 15)}Z`;
   const endpoint = `https://${r2Account}.r2.cloudflarestorage.com`;
-  const label = dailyLabel(now); // HH:MM tick label in DISPLAY_TZ
 
-  // Row marker: 🖐️ for hand-kicked runs, 🩹 for a staleness self-heal catch-up, none for cron. See runOrigin.
-  const origin = runOrigin(process.env.GITHUB_EVENT_NAME, process.env.BACKUP_TRIGGER);
-
-  // rclone S3 remote configured purely from env (no rclone.conf on disk). Set early so fail() and
-  // the Slack daily-row state can reach R2 even if a failure happens before the upload.
+  // rclone S3 remote configured purely from env (no rclone.conf on disk). Set early so fail()'s run-log
+  // write and the outcome record can reach R2 even if a failure happens before the upload.
   process.env.RCLONE_CONFIG_R2_TYPE = "s3";
   process.env.RCLONE_CONFIG_R2_PROVIDER = "Cloudflare";
   process.env.RCLONE_CONFIG_R2_ACCESS_KEY_ID = r2Key;
@@ -162,7 +161,7 @@ async function main(): Promise<void> {
   // never the reverse, and a profile edit lands with the next run. Best-effort: never blocks the dump.
   await bestEffort("publish watchdog config", () => publishWatchdogConfig(cfg, now));
 
-  // Object extension per encryption mode. Unknown mode is a plain config error (no Slack).
+  // Object extension per encryption mode. Unknown mode is a plain config error (the recorder pages it as exit_1).
   let ext: string;
   switch (encryption) {
     case "none":
@@ -196,25 +195,17 @@ async function main(): Promise<void> {
   process.on("SIGINT", () => process.exit(130));
   process.on("SIGTERM", () => process.exit(143));
 
-  // On failure: record ❌ on today's row, then post a loud mentioning alert threaded under it. All
-  // best-effort — Slack problems must never mask the real error.
+  // On failure: a page in this run's outcome record — the scheduler turns it into the row's ❌ and a
+  // loud, mentioning alert threaded under it — then the run-log record, then exit (the recorder writes
+  // the outcome on the way out, after the run-log append).
   // `errorCode` is the machine-readable twin of `msg` (see lib/pg-classify.ts). It rides into the
   // PRIVATE run-log so the staleness watchdog can quote the cause in its page without re-deriving
-  // it from prose; build-dashboard.ts maps Log*→Public* explicitly, so it never reaches the public
-  // dashboard. null for the failures that aren't a database failure at all (missing binary, config).
+  // it from prose, and into the outcome as the alert's code; build-dashboard.ts maps Log*→Public*
+  // explicitly, so it never reaches the public dashboard. null for the failures that aren't a
+  // database failure at all (missing binary, config) — those page as `backup_failed`.
   const fail = async (msg: string, errorCode: PgFailureCode | null = null): Promise<never> => {
     process.stderr.write(`ERROR: ${msg}\n`);
-    if (slackEnabled()) {
-      const dayts = (await bestEffort("slack fail tick", () => slackDailyRecord(false, label, "", origin, now))) ?? "";
-      const logUrl = await githubLogUrl();
-      await bestEffort("slack fail alert", () =>
-        slackPost(`${cfg.slack.alertMention || "<!here>"} ${failAlertText(`FAILED at ${label}`, msg, logUrl)}`, {
-          thread: dayts,
-          broadcast: true,
-        }),
-      );
-    }
-    await bestEffort("alert webhook", () => alertWebhook(`🔴 ${fileBasename} backup FAILED at ${label} — ${msg}`));
+    rec.alert("page", errorCode ?? "backup_failed", msg);
     await bestEffort("runlog fail", () =>
       appendRun({ ts: runTsIso, ok: false, tiers: [], error: msg, errorCode, durationMs: Date.now() - SCRIPT_START_MS }),
     );
@@ -486,14 +477,10 @@ async function main(): Promise<void> {
     }
   }
 
-  // Marker for the Slack row: 📅 + backticked codes for the durable tiers this run was promoted to
-  // (D=daily, W=weekly, M=monthly), e.g. 📅`DWM` on a 1st-of-month Sunday. Plain intraday → no marker.
-  const TIER_CODE: Record<string, string> = { daily: "D", weekly: "W", monthly: "M" };
-  const codes = tiers.filter((t) => t !== INTRADAY_TIER).map((t) => TIER_CODE[t] ?? "").join("");
-  const marker = codes ? `📅\`${codes}\`` : "";
-
   console.log(`✓ Backup complete: ${filename} (${Math.floor(size / 1024 / 1024)} MB) → tiers: ${tiers.join(" ")}`);
-  await bestEffort("slack ok tick", () => slackDailyRecord(true, label, marker, origin, now));
+  // The row's ✅ tick. The scheduler derives the tick's HH:MM from the record's startedAt and the 📅
+  // durable-tier marker from `tiers`, so neither is computed here.
+  rec.summary({ kind: "backup", tiers, bytes: size });
   await bestEffort("runlog ok", () =>
     appendRun({
       ts: runTsIso,

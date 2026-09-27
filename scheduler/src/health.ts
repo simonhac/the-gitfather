@@ -107,9 +107,51 @@ export interface CronTickRecord {
   delivered: boolean;
 }
 
+/**
+ * What the Slack tick (index.ts slackTick, every 10 minutes at :05) records about itself, at
+ * `_scheduler/slack.json`. The Worker is the only thing that posts to Slack, so a Slack that has
+ * quietly stopped working — a revoked token, a missing second cron — silences every alert, and has
+ * to show up here rather than be discovered when an alert fails to arrive.
+ */
+export interface SlackTickRecord {
+  tick: string;
+  /** The last auth.test (hourly): when, and whether the token still works. */
+  authCheckedAt: string | null;
+  authOk: boolean | null;
+  authError?: string;
+}
+
+export interface SlackHealth {
+  ok: boolean;
+  /** off = no token configured (not a failure: Slack is simply not in use). */
+  state: "off" | "ok" | "failing";
+  reason?: string;
+}
+
+/** Judge the Slack side from the Slack tick's own record. */
+export function slackHealth(rec: SlackTickRecord | null, tokenSet: boolean, now: Date, maxAgeMs: number = HEALTH_MAX_TICK_AGE_MS): SlackHealth {
+  if (!tokenSet) return { ok: true, state: "off" };
+  const failing = (reason: string): SlackHealth => ({ ok: false, state: "failing", reason });
+  // Also what a missing second cron trigger (`5,15,25,35,45,55 * * * *`) looks like: nothing ever
+  // refreshes the rows or announces a run whose notify was lost.
+  if (!rec) return failing("no Slack tick recorded");
+  const age = tickAgeMs(rec.tick, now);
+  if (!Number.isFinite(age) || age < 0 || age > maxAgeMs) return failing("Slack tick is stale");
+  if (rec.authOk === false) return failing(`Slack auth failing: ${rec.authError ?? "unknown"}`);
+  return { ok: true, state: "ok" };
+}
+
 export interface HealthVerdict {
   status: number;
-  body: { ok: boolean; lastTick: string | null; ageSeconds: number | null; roster: number; delivered: boolean | null; reason?: string };
+  body: {
+    ok: boolean;
+    lastTick: string | null;
+    ageSeconds: number | null;
+    roster: number;
+    delivered: boolean | null;
+    slack?: SlackHealth["state"];
+    reason?: string;
+  };
 }
 
 /**
@@ -127,11 +169,18 @@ export function healthVerdict(
   last: CronTickRecord | null,
   rosterSize: number,
   now: Date,
-  maxAgeMs: number = HEALTH_MAX_TICK_AGE_MS,
+  opts: { maxAgeMs?: number; slack?: SlackHealth | null } = {},
 ): HealthVerdict {
+  const maxAgeMs = opts.maxAgeMs ?? HEALTH_MAX_TICK_AGE_MS;
   const age = tickAgeMs(last?.tick, now);
   const ageSeconds = Number.isFinite(age) ? Math.round(age / 1000) : null;
-  const base = { lastTick: last?.tick ?? null, ageSeconds, roster: rosterSize, delivered: last?.delivered ?? null };
+  const base = {
+    lastTick: last?.tick ?? null,
+    ageSeconds,
+    roster: rosterSize,
+    delivered: last?.delivered ?? null,
+    ...(opts.slack ? { slack: opts.slack.state } : {}),
+  };
   const bad = (reason: string): HealthVerdict => ({ status: 503, body: { ok: false, ...base, reason } });
 
   if (!last || !Number.isFinite(age)) return bad("no cron tick recorded");
@@ -144,6 +193,8 @@ export function healthVerdict(
   // safeParseClients() returning nothing collapses to zero here; a scheduler scheduling nothing is
   // a misconfiguration, not health.
   if (rosterSize === 0) return bad("empty or invalid roster");
+  // Checked last: the scheduler IS ticking; what's broken is the only channel its alerts travel on.
+  if (opts.slack && !opts.slack.ok) return bad(opts.slack.reason ?? "Slack is failing");
 
   return { status: 200, body: { ok: true, ...base } };
 }

@@ -5,8 +5,8 @@ import "./lib/bootEnv.js"; // MUST be first — loads $PROFILE before backupType
 //
 // Pulls the newest object under $backup-prefix from R2, decrypts if needed, pg_restores it into a
 // throwaway target, and asserts the restored sentinel-table row count is within tolerance of the
-// live count (catches both a truncated dump and a stale/stuck backup). Best-effort Slack alert +
-// non-zero exit on failure.
+// live count (catches both a truncated dump and a stale/stuck backup). A failure pages through the
+// run's OUTCOME record (lib/outcomeRecorder.ts — the scheduler Worker posts it) and exits non-zero.
 //
 // The restore + assertion core is exported as drillObject() so the daily durable-verify job
 // (verify-durable-pg.ts) can restore a SPECIFIC durable key, not just the newest intraday object.
@@ -24,7 +24,7 @@ import "./lib/bootEnv.js"; // MUST be first — loads $PROFILE before backupType
 //   R2_ACCOUNT_ID / R2_BUCKET / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY   read access to the bucket
 //   DRILL_DATABASE_URL        throwaway Postgres to restore into (e.g. the CI postgres:17 service)
 //   PG_LIVE_DATABASE_URL      live DB — read-only, for the expected row count
-// Optional env: SLACK_BOT_TOKEN / SLACK_CHANNEL ; AGE_IDENTITY (only if backups are .age). Other config from $PROFILE.
+// Optional env: AGE_IDENTITY (only if backups are .age). Other config from $PROFILE.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { mkdtempSync, rmSync, statSync, writeFileSync, copyFileSync, realpathSync } from "node:fs";
@@ -37,8 +37,7 @@ import { pgConn, withDatabase } from "./lib/pgconn.js";
 import { classifyPgRestoreStderr } from "./lib/pgRestore.js";
 import { loadLog, stampFromKey } from "./lib/logStore.js";
 import { appendVerify } from "./runlog.js";
-import { slackOneoff, alertWebhook, failAlertText } from "./lib/slack.js";
-import { githubLogUrl } from "./lib/github.js";
+import { startOutcome } from "./lib/outcomeRecorder.js";
 import { hasRestoredCounts, type BackupTier } from "./lib/backupTypes.js";
 import { INTRADAY_PREFIXES, INTRADAY_TIER, newestName } from "./lib/schedule.js";
 
@@ -485,6 +484,10 @@ function priorDrillCounts(): Record<string, number> | null {
 }
 
 async function main(): Promise<void> {
+  // FIRST, before config is loaded, so a config failure is recorded too (see lib/outcomeRecorder.ts).
+  // Here and never at module scope: backup-pg-to-r2.ts and verify-durable-pg.ts import this module,
+  // and must not find a restoreDrill recorder attached to their own exit.
+  const rec = startOutcome("restoreDrill");
   // Validate + type all config up front (zod); fails fast with one aggregated report. See lib/config.ts.
   const cfg = loadDrillConfig();
   const core = drillCoreFromProfile(cfg);
@@ -494,6 +497,7 @@ async function main(): Promise<void> {
   const r2Key = cfg.credentials.r2.accessKeyId!;
   const r2Secret = cfg.credentials.r2.secretAccessKey!;
   const fileBasename = cfg.name!;
+  rec.setName(fileBasename);
 
   const endpoint = `https://${r2Account}.r2.cloudflarestorage.com`;
 
@@ -512,17 +516,16 @@ async function main(): Promise<void> {
   process.on("SIGINT", () => process.exit(130));
   process.on("SIGTERM", () => process.exit(143));
 
-  const fail = async (msg: string): Promise<never> => {
+  const fail = (code: string, msg: string): never => {
     process.stderr.write(`ERROR: ${msg}\n`);
-    await slackOneoff(failAlertText("restore-drill FAILED", msg, await githubLogUrl()), true).catch(() => {});
-    await alertWebhook(`🔴 PG restore-drill FAILED (${fileBasename}): ${msg}`).catch(() => {});
+    rec.alert("page", code, msg);
     cleanup();
     process.exit(1);
   };
 
-  if (!commandExists("rclone")) await fail("rclone not found");
-  if (!commandExists("pg_restore")) await fail("pg_restore not found");
-  if (!commandExists("psql")) await fail("psql not found");
+  if (!commandExists("rclone")) fail("tool_missing", "rclone not found");
+  if (!commandExists("pg_restore")) fail("tool_missing", "pg_restore not found");
+  if (!commandExists("psql")) fail("tool_missing", "psql not found");
 
   process.env.RCLONE_CONFIG_R2_TYPE = "s3";
   process.env.RCLONE_CONFIG_R2_PROVIDER = "Cloudflare";
@@ -547,7 +550,7 @@ async function main(): Promise<void> {
     }
   }
   const picked = newestName(candidates, (c) => c.name);
-  if (!picked) await fail(`no dump objects under ${backupPrefix}/${INTRADAY_TIER}/`);
+  if (!picked) fail("no_dump", `no dump objects under ${backupPrefix}/${INTRADAY_TIER}/`);
   const newest = picked!.name;
   const key = `${picked!.dir}/${newest}`;
   console.log(`Latest: ${backupPrefix}/${key}`);
@@ -575,13 +578,12 @@ async function main(): Promise<void> {
     });
   }
 
-  if (!result.ok) await fail(`${result.reason ?? "restore drill failed"} (${key})`);
+  if (!result.ok) fail("drill_failed", `${result.reason ?? "restore drill failed"} (${key})`);
 
   const sentCount = result.counts[core.rowCountTable];
   console.log(`✓ Restore drill PASSED: public.${core.rowCountTable} ${sentCount} (ratio ${result.ratio ?? "?"}) — ${key}`);
-  await slackOneoff(
-    `✅ PG restore-drill OK (${fileBasename}) — ${core.rowCountTable} ${sentCount} (ratio ${result.ratio ?? "?"}) — ${key}`,
-  ).catch(() => {});
+  // The scheduler posts the ✅ notice from this.
+  rec.summary({ kind: "restoreDrill", table: core.rowCountTable, count: sentCount ?? null, ratio: result.ratio ?? null, key });
 
   cleanup();
 }

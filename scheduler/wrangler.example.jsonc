@@ -12,13 +12,17 @@
   "compatibility_date": "2025-06-01",
   "observability": { "enabled": true }, // retains invocation logs in the Cloudflare dashboard (free)
 
-  // ONE cron trigger — 1 of the free plan's 5. The handler decides which cadences are due per tick.
-  "triggers": { "crons": ["*/10 * * * *"] },
+  // TWO cron triggers — 2 of the free plan's 5 (per account). The handler tells them apart by minute:
+  //   */10     the main tick — dispatch + staleness watchdog; the handler decides which cadences are due
+  //   5,15,…,55  the Slack tick — daily-row ⬜ refresh + announcing any outcome whose /notify never arrived
+  // Without the second, /health reports "no Slack tick recorded".
+  "triggers": { "crons": ["*/10 * * * *", "5,15,25,35,45,55 * * * *"] },
 
   // Native bindings = free, in-network (no S3 token, no egress). All buckets must be in THIS account.
   //   STATE       the SHARED (public) dashboard bucket — scheduler state + logs under _scheduler/
   //   <CLIENT>_R2 each client's PRIVATE dump bucket — the watchdog reads _config/, _status/, _log/ and
-  //               <backup-prefix>/intraday/ from it, and writes _status/ (alert episode, Slack row state).
+  //               <backup-prefix>/intraday/ from it; Slack delivery reads the jobs' outcome records under
+  //               _status/_outcome/ and writes _status/ (alert episode, daily-row state, delivery marks).
   "r2_buckets": [
     { "binding": "STATE", "bucket_name": "YOUR_SHARED_DASHBOARD_BUCKET" },
     { "binding": "ALPHA_R2", "bucket_name": "alpha-pg-backups" },
@@ -28,16 +32,34 @@
   // The client roster. Bootstrap identifiers ONLY — every watchdog setting comes from the profile in the
   // client's own repo, which the backup job publishes to `_config/<name>/watchdog.json` in its bucket.
   //   id              opaque label; the only client identifier that reaches the (public) logs
-  //   owner / repo    the consuming repo the caller workflows live in
+  //   owner / repo    the consuming repo the caller workflows live in (and whose OIDC tokens /notify accepts)
+  //   repositoryId    optional: GitHub's numeric id for owner/repo — /notify then also checks the token's
+  //                   repository_id, so a deleted-and-recreated repo can't inherit the client
+  //                   (`gh api repos/OWNER/REPO --jq .id`)
   //   installationId  the GitHub App's installation id on that owner (README → "GitHub App setup")
   //   bucket          the r2_buckets binding of that client's private dump bucket
   //   cadences        optional allowlist; omit for every non-opt-in cadence ("archive" is opt-in)
   //   workflows       optional per-cadence caller filename overrides
+  //   slack           optional — where and as whom the Worker posts about this client (omit → no Slack):
+  //                     channel     channel id (C…); invite the the-gitfather app to it
+  //                     username    display name on every post (default "<id> backup")
+  //                     iconEmoji   e.g. ":floppy_disk:"   — or —   iconUrl  an https image URL
   "vars": {
     "ROSTER": [
-      { "id": "alpha", "owner": "your-org", "repo": "alpha-app", "installationId": 11111111, "bucket": "ALPHA_R2" },
-      { "id": "beta", "owner": "other-org", "repo": "beta-app", "installationId": 22222222, "bucket": "BETA_R2", "cadences": ["backup", "staleness", "durableVerify", "archive"] }
-    ]
+      {
+        "id": "alpha", "owner": "your-org", "repo": "alpha-app", "repositoryId": 123456789, "installationId": 11111111, "bucket": "ALPHA_R2",
+        "slack": { "channel": "C0123456789", "username": "alpha backup", "iconEmoji": ":floppy_disk:" }
+      },
+      {
+        "id": "beta", "owner": "other-org", "repo": "beta-app", "installationId": 22222222, "bucket": "BETA_R2",
+        "cadences": ["backup", "staleness", "durableVerify", "archive"],
+        "slack": { "channel": "C0123456789" }
+      }
+    ],
+    // The OIDC audience POST /notify accepts — the reusable workflows request "the-gitfather". Unset →
+    // /notify refuses everything, and outcomes are announced only by the Slack tick (≤10 min late).
+    "NOTIFY_AUDIENCE": "the-gitfather"
+    // "ENGINE_REPO": "your-fork/the-gitfather"   // only for a fork: whose reusable workflows may notify
   }
 
   // Secrets (NEVER committed — set with `wrangler secret put`):
@@ -45,6 +67,7 @@
   //   GH_APP_PRIVATE_KEY     the App private key as a PKCS#8 PEM ("BEGIN PRIVATE KEY") — convert GitHub's PKCS#1
   //                          once with `openssl pkcs8 -topk8 -nocrypt`. See README "GitHub App setup".
   //   TRIGGER_SECRET         random string gating the manual /trigger and /state endpoints
-  //   SLACK_BOT_TOKEN        the watchdog's bot token (chat:write); optional per-client SLACK_BOT_TOKEN_<ID>
+  //   SLACK_BOT_TOKEN        the the-gitfather Slack app's bot token (chat:write + chat:write.customize) — the ONLY
+  //                          Slack token; client repos hold none. Each client's channel/identity is its roster `slack`.
   //   ALERT_WEBHOOK_URL_<ID> optional per-client failure webhook (Slack-compatible {"text":…} POST)
 }

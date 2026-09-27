@@ -112,9 +112,20 @@ with restorability proved at backup time by `integrity.verify-before-encrypt` an
 the manual drill. Strictly fewer *kinds* of check in this job, but more coverage overall — the
 pre-encrypt restore tests **every** dump rather than only the promoted ones.
 
-Every drill — pass **or fail** — is recorded to the verifications log, so a failed restore shows up: on
-the dashboard as an **amber "Drill failed"** cell (distinct from a red *failed backup*), and as a loud
-Slack/`ALERT_WEBHOOK_URL` page. The hash-vs-restore distinction drives the tooltip wording.
+Every drill — pass **or fail** — is recorded to the verifications log, so a failed restore shows up
+in two places. On the dashboard it is an **amber "Drill failed"** cell, distinct from a red *failed
+backup*; the hash-vs-restore distinction drives the tooltip wording. In Slack it is a loud page.
+
+The verify and drill jobs don't post to Slack themselves. Each run records its pages and warnings in
+its outcome record, and the scheduler Worker posts them
+([Slack and alerting](slack-and-alerting.md#what-posts-where)):
+- **A failed durable verify** posts one mentioning message, with a bullet per problem.
+- **Its advisory warnings** (a manual drill overdue, a credential due for rotation) post as one quiet
+  ⚠️ message.
+- **A restore drill** posts a ✅ notice with its row ratio, or a page.
+
+Pages also go to the client's failure webhook (`ALERT_WEBHOOK_URL_<ID>` on the Worker), if it has
+one.
 
 
 > **`verify-after-upload` and age.** `integrity.verify-after-upload` re-downloads and `pg_restore -l`s

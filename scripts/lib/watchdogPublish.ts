@@ -9,7 +9,7 @@ import { writeFileSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { capture } from "./proc.js";
-import { resolvedSlackChannel, type Profile } from "./config.js";
+import type { Profile } from "./config.js";
 import { watchdogConfigFrom, watchdogConfigKey } from "./watchdogConfig.js";
 
 /** Write `_config/<name>/watchdog.json` to the profile's R2 bucket (RCLONE_CONFIG_R2_* must already be set). */
@@ -17,7 +17,7 @@ export function publishWatchdogConfig(cfg: Profile, now: Date = new Date()): boo
   const bucket = cfg.credentials.r2.bucket;
   const name = cfg.name;
   if (!bucket || !name) return false;
-  const body = JSON.stringify(watchdogConfigFrom(cfg, now, resolvedSlackChannel(cfg)), null, 2);
+  const body = JSON.stringify(watchdogConfigFrom(cfg, now), null, 2);
   const file = join(tmpdir(), `watchdog-config-${process.pid}.json`);
   writeFileSync(file, body);
   try {

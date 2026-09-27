@@ -1,5 +1,6 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// GitHub App auth + the two Actions API calls the Worker makes: dispatch a workflow, list its runs.
+// GitHub App auth + the Actions API calls the Worker makes: dispatch a workflow, list its runs, and read
+// a run / its jobs (to vouch for an outcome record, and to find a failed step when a run left none).
 //
 // Instead of a long-lived PAT, we authenticate as a GitHub App: sign a short-lived RS256 JWT with the App
 // private key, exchange it for a 1h *installation* token scoped to one repo + actions:write, and use that
@@ -11,84 +12,48 @@
 // wrangler.jsonc. Logs written to the shared (public) dashboard bucket carry only opaque ids.
 // ─────────────────────────────────────────────────────────────────────────────
 
+import { b64urlEncode as b64url, b64urlJson } from "./b64url.js";
+import { parseRoster, type Client } from "./roster.js";
+import type { GithubJob, GithubPort, GithubRun } from "./deliver.js";
+
 export interface Env {
   GH_APP_ID: string; // secret: GitHub App id — the `iss` of the JWT we sign to mint installation tokens
   GH_APP_PRIVATE_KEY: string; // secret: the App private key as a PKCS#8 PEM ("BEGIN PRIVATE KEY"). GitHub
   // issues PKCS#1 ("BEGIN RSA PRIVATE KEY"); convert ONCE with `openssl pkcs8 -topk8 -nocrypt` — WebCrypto's
   // importKey takes pkcs8 only, and a PKCS#1 key fails to import. See README "GitHub App setup".
   TRIGGER_SECRET: string; // secret: shared secret gating the manual /trigger and /state endpoints
-  SLACK_BOT_TOKEN?: string; // secret: the watchdog's bot token (chat:write); per-client override SLACK_BOT_TOKEN_<ID>
+  // secret: the-gitfather Slack app's bot token (chat:write + chat:write.customize). The ONLY Slack token
+  // anywhere — client repos hold none. Unset → Slack is off. Where each client's posts go, and under what
+  // name/icon, is its roster `slack` block.
+  SLACK_BOT_TOKEN?: string;
+  // var: the OIDC audience /notify accepts (the reusable workflows request "the-gitfather"). Unset →
+  // /notify refuses everything (503), and outcomes are announced by the Slack tick alone.
+  NOTIFY_AUDIENCE?: string;
+  ENGINE_REPO?: string; // var: owner/repo whose reusable workflows may notify (default simonhac/the-gitfather)
   SCHEDULER_HEARTBEAT_URL?: string; // secret: BetterStack heartbeat, pinged when a TICK DELIVERED (see health.ts).
   // UNSET MEANS OFF, so `wrangler dev` and a preview deployment can never keep production's monitor green.
-  ROSTER: Client[] | string; // var (wrangler.jsonc): the client roster — see Client. A JSON string is accepted too.
+  ROSTER: Client[] | string; // var (wrangler.jsonc): the client roster — see roster.ts. A JSON string is accepted too.
   STATE: R2Bucket; // binding: shared dashboard bucket (free, in-network) — scheduler state + logs
   // Plus, per client: its private dump bucket under the binding named in Client.bucket, and optional
   // ALERT_WEBHOOK_URL_<ID> secrets. Typed loosely here; parseClients() checks the bindings exist.
   [binding: string]: unknown;
 }
 
-export type Cadence = "backup" | "staleness" | "durableVerify" | "restoreDrill" | "archive";
-
-export interface Client {
-  id: string; // opaque label — the ONLY client identifier that may appear in logs
-  owner: string;
-  repo: string;
-  installationId: number; // the GitHub App's installation id on this owner's account (not secret)
-  bucket: string; // the R2 binding name of this client's PRIVATE dump bucket (declared in wrangler.jsonc)
-  cadences?: Cadence[]; // optional allowlist of cadences this client runs (default: all NON-opt-in ones)
-  workflows?: Partial<Record<Cadence, string>>; // optional per-client filename overrides (default: DEFAULT_WORKFLOWS)
-}
-
-export const ALL_CADENCES: readonly Cadence[] = ["backup", "staleness", "durableVerify", "restoreDrill", "archive"];
-
-// the-gitfather's conventional caller-workflow filenames. They're identical across consuming repos by
-// convention, so they live here as defaults rather than being repeated for every client in the roster.
-// `staleness` has no caller any more — it runs natively (watchdog.ts) — but stays a cadence so a client
-// can opt out of it via `cadences`, and so `/trigger?cadence=staleness` fires it on demand.
-export const DEFAULT_WORKFLOWS: Record<Exclude<Cadence, "staleness">, string> = {
-  backup: "pg-backup.yml",
-  durableVerify: "pg-durable-verify.yml",
-  restoreDrill: "pg-restore-drill.yml",
-  archive: "pg-archive.yml",
-};
-
-export const workflowFor = (c: Client, cadence: Exclude<Cadence, "staleness">): string =>
-  c.workflows?.[cadence] ?? DEFAULT_WORKFLOWS[cadence];
-
-// Cadences a client gets ONLY by naming them. `cadences` defaults to "everything", so a cadence added
-// after clients are already in the roster MUST be opt-in — otherwise it starts dispatching to repos
-// that have no such caller workflow and 404s on every tick. `archive` also deletes rows, which is not
-// something any client should acquire by upgrade.
-const OPT_IN_CADENCES: readonly Cadence[] = ["archive"];
-
-export const subscribes = (c: Client, cadence: Cadence): boolean =>
-  c.cadences ? c.cadences.includes(cadence) : !OPT_IN_CADENCES.includes(cadence);
-
-export function isCadence(s: string | null): s is Cadence {
-  return s !== null && (ALL_CADENCES as readonly string[]).includes(s);
-}
+export {
+  ALL_CADENCES,
+  DEFAULT_WORKFLOWS,
+  isCadence,
+  subscribes,
+  workflowFor,
+  type Cadence,
+  type Client,
+} from "./roster.js";
 
 const isR2Bucket = (v: unknown): v is R2Bucket => !!v && typeof (v as R2Bucket).list === "function";
 
-/** Parse + validate the roster. Throws with a clear message — a bad roster must not surface as a cryptic 404 later. */
+/** Parse + validate the roster (roster.ts), checking each client's R2 binding exists. Throws with a clear message. */
 export function parseClients(env: Env): Client[] {
-  const raw: unknown = typeof env.ROSTER === "string" ? JSON.parse(env.ROSTER) : env.ROSTER;
-  if (!Array.isArray(raw)) throw new Error("ROSTER must be a JSON array (a `vars` entry in wrangler.jsonc)");
-  const clients = raw as Client[];
-  const seen = new Set<string>();
-  for (const c of clients) {
-    const label = `ROSTER entry "${c.id ?? "?"}"`;
-    if (typeof c.id !== "string" || !c.id) throw new Error(`${label} needs a non-empty id`);
-    if (seen.has(c.id)) throw new Error(`${label} is duplicated`);
-    seen.add(c.id);
-    if (typeof c.owner !== "string" || !c.owner || typeof c.repo !== "string" || !c.repo) throw new Error(`${label} needs owner + repo`);
-    if (typeof c.installationId !== "number" || !Number.isInteger(c.installationId) || c.installationId <= 0) {
-      throw new Error(`${label} needs a positive integer installationId (got ${JSON.stringify(c.installationId)})`);
-    }
-    if (typeof c.bucket !== "string" || !c.bucket) throw new Error(`${label} needs bucket (an R2 binding name)`);
-    if (!isR2Bucket(env[c.bucket])) throw new Error(`${label}: no R2 binding named ${c.bucket} — add it to r2_buckets in wrangler.jsonc`);
-  }
-  return clients;
+  return parseRoster(env.ROSTER, (binding) => isR2Bucket(env[binding]));
 }
 
 export function safeParseClients(env: Env): Client[] | null {
@@ -108,16 +73,6 @@ export const GH_HEADERS = {
   "X-GitHub-Api-Version": "2022-11-28",
   "User-Agent": "gitfather-scheduler", // GitHub rejects requests with no User-Agent
 };
-
-// base64url (no padding) of raw bytes — used for every JWT segment. Buffers here are tiny (<256B).
-function b64url(buf: ArrayBuffer | Uint8Array): string {
-  const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
-  let s = "";
-  for (const b of bytes) s += String.fromCharCode(b);
-  return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
-
-const b64urlJson = (o: unknown): string => b64url(new TextEncoder().encode(JSON.stringify(o)));
 
 // Strip PEM armor + whitespace, base64-decode the body to the DER bytes importKey('pkcs8', …) expects.
 function pemToArrayBuffer(pem: string): ArrayBuffer {
@@ -225,4 +180,46 @@ export async function listWorkflowRuns(env: Env, c: Client, file: string): Promi
   if (!res.ok) throw new Error(`run listing failed ${res.status}`);
   const body = (await res.json()) as { workflow_runs?: WorkflowRunSummary[] };
   return (body.workflow_runs ?? []).map((r) => ({ status: r.status, conclusion: r.conclusion ?? null }));
+}
+
+// ── Reading runs and jobs (Slack delivery — see deliver.ts) ──────────────────────────────────────────
+
+interface ApiJob {
+  id?: number;
+  started_at?: string | null;
+  steps?: { name?: string; conclusion?: string | null }[];
+}
+
+const toJob = (j: ApiJob): GithubJob => ({
+  id: j.id ?? 0,
+  startedAt: j.started_at ?? null,
+  steps: (j.steps ?? []).map((s) => ({ name: s.name ?? "?", conclusion: s.conclusion ?? null })),
+});
+
+/** GET an Actions API path for this client: parsed JSON, null on 404, throws otherwise. */
+async function ghGet<T>(env: Env, c: Client, path: string): Promise<T | null> {
+  const token = await getInstallationToken(env, c);
+  const res = await fetch(`${GH_API}/repos/${c.owner}/${c.repo}${path}`, { headers: { ...GH_HEADERS, Authorization: `Bearer ${token}` } });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`GET ${path} failed ${res.status}`);
+  return (await res.json()) as T;
+}
+
+/** The client's repo as deliver.ts sees it. */
+export function githubPortFor(env: Env, c: Client): GithubPort {
+  return {
+    async getRun(runId: string): Promise<GithubRun | null> {
+      const r = await ghGet<{ created_at?: string; referenced_workflows?: { path?: string }[] }>(env, c, `/actions/runs/${runId}`);
+      if (!r) return null;
+      return { createdAt: r.created_at ?? "", referencedWorkflows: (r.referenced_workflows ?? []).map((w) => w.path ?? "") };
+    },
+    async getJob(jobId: string): Promise<GithubJob | null> {
+      const j = await ghGet<ApiJob>(env, c, `/actions/jobs/${jobId}`);
+      return j ? toJob(j) : null;
+    },
+    async listRunJobs(runId: string, attempt: number): Promise<GithubJob[]> {
+      const r = await ghGet<{ jobs?: ApiJob[] }>(env, c, `/actions/runs/${runId}/attempts/${attempt}/jobs?per_page=100`);
+      return (r?.jobs ?? []).map(toJob);
+    },
+  };
 }

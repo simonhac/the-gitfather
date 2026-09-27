@@ -185,6 +185,24 @@ backup that gets promoted to `weekly/`, and after that day's durable verify — 
 WORM-locked weekly dump exists *before* any rows are pruned. Every delete is therefore preceded by a
 durable snapshot of the same data.
 
+### In Slack
+
+The archiver doesn't post to Slack itself. Each CI run records an outcome in the bucket, and the
+[scheduler Worker](slack-and-alerting.md#how-a-run-reaches-slack) announces it in the client's
+channel:
+
+| run | message |
+|---|---|
+| failed (`archive_failed`) | 🔴 `archive FAILED`, with the mention |
+| refusals or anomalies only, including the floor's *archive stalled* | 🟠 *archive needs attention*, a bullet each, with the mention |
+| clean, and archived or pruned something | a quiet 🗄️ summary: weeks and rows archived and pruned, per table |
+| clean, nothing to do | nothing |
+
+`--dry-run=source` records an outcome but posts no summary. `--dry-run=store` and
+`--target=local:<dir>` record nothing at all, because they promise not to touch the store. The
+`backfill_sizes` maintenance run records nothing either, and is announced only if one of its steps
+fails.
+
 ### On the dashboard
 
 Archived tables get their own columns beside the backup heatmap, one per table, plus `Rows archived` /

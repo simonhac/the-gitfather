@@ -57,6 +57,11 @@ jobs:
           install-age: "true"
       - run: npm ci
       - run: npm run typecheck
+      # The scheduler Worker typechecks against workers-types, not Node's — a separate project the
+      # root typecheck never sees whole (it only reaches the Worker modules the tests import).
+      - name: Typecheck the scheduler Worker
+        working-directory: scheduler
+        run: npm ci && npm run typecheck
       - run: npm run lint
       # A skipped test still reports green, so the run is asserted to have skipped NOTHING. Without
       # that, removing the service or typo'ing its URL would put CI straight back to proving less

@@ -21,8 +21,16 @@ on:
         description: "Private R2 dump bucket name (caller passes vars.R2_BUCKET)."
         type: string
         required: true
+      notify_url:
+        description: >-
+          The scheduler's /notify URL (caller passes vars.GITFATHER_NOTIFY_URL). The job's last step
+          POSTs it so the run is announced in Slack within seconds; empty → the scheduler's reconcile
+          tick posts the run within ~10 min instead.
+        type: string
+        required: false
+        default: ""
       slack_channel:
-        description: "Slack channel id for the status row (caller passes vars.SLACK_CHANNEL); empty disables Slack."
+        description: "DEPRECATED — ignored; remove from your caller. Kept only so callers that still pass it don't fail validation."
         type: string
         required: false
         default: ""
@@ -56,7 +64,7 @@ on:
         default: postgres:17
     # Secrets are passed EXPLICITLY by the caller (not `secrets: inherit`): inherit only works when the
     # called workflow is in the same org/enterprise, and this repo is owned by a different account than
-    # its consumers. Non-secret config (bucket, channel) is threaded via inputs above for the same
+    # its consumers. Non-secret config (bucket, notify URL) is threaded via inputs above for the same
     # owner-independence reason (the `vars` context is not guaranteed across owners).
     secrets:
       PG_BACKUP_DATABASE_URL:
@@ -68,12 +76,14 @@ on:
       R2_SECRET_ACCESS_KEY:
         required: true
       SLACK_BOT_TOKEN:
+        description: "DEPRECATED — ignored; remove from your caller. Kept only so callers that still pass it don't fail validation."
         required: false
       HEARTBEAT_URL:
         required: false
       AGE_RECIPIENT:
         required: false
-      ALERT_WEBHOOK_URL:   # optional generic failure webhook (Slack-compatible); redundant to the bot
+      ALERT_WEBHOOK_URL:
+        description: "DEPRECATED — ignored; remove from your caller. Kept only so callers that still pass it don't fail validation."
         required: false
 
 jobs:
@@ -164,11 +174,38 @@ jobs:
           R2_BUCKET: ${{ inputs.r2_bucket }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-          SLACK_CHANNEL: ${{ inputs.slack_channel }}
           BACKUP_TRIGGER: ${{ inputs.trigger }}
           HEARTBEAT_URL: ${{ secrets.HEARTBEAT_URL }}
           AGE_RECIPIENT: ${{ secrets.AGE_RECIPIENT }}
-          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
-          GITHUB_TOKEN: ${{ github.token }}   # read-only: lets a failure alert link to THIS job's log page (jobs API)
+          GITFATHER_JOB_ID: ${{ job.check_run_id }}   # names THIS job in the outcome record (the Slack log link)
         run: npx tsx scripts/backup-pg-to-r2.ts
+
+      # Tell the-gitfather's scheduler this run finished, so it can announce it in Slack. Runs even when
+      # an earlier step failed (a setup failure writes no outcome record — the scheduler then reads the
+      # failed step from the Actions API). Authenticated by a short-lived GitHub OIDC token: nothing is
+      # stored. Never fails the job: if the caller didn't grant `id-token: write` or set the URL, the
+      # scheduler's reconcile tick posts the run within ~10 minutes instead.
+      - name: Notify the-gitfather scheduler
+        if: always()
+        timeout-minutes: 2
+        env:
+          NOTIFY_URL: ${{ inputs.notify_url }}
+        run: |
+          set -uo pipefail
+          if [ -z "${NOTIFY_URL}" ]; then
+            echo "::notice::notify_url not set — the scheduler posts this run on its next reconcile tick"; exit 0
+          fi
+          if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+            echo "::warning::caller did not grant id-token: write — the scheduler posts this run on its next reconcile tick"; exit 0
+          fi
+          jwt=$(curl -fsS --max-time 10 -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+                "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=the-gitfather" | jq -r '.value // empty') || jwt=""
+          if [ -z "${jwt}" ]; then
+            echo "::warning::could not mint an OIDC token — the scheduler posts this run on its next reconcile tick"; exit 0
+          fi
+          echo "::add-mask::${jwt}"
+          code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 --retry 3 --retry-all-errors \
+                 -X POST -H "Authorization: Bearer ${jwt}" "${NOTIFY_URL}") || code="curl-failed"
+          echo "scheduler /notify → ${code}"
+          case "${code}" in 2??) ;; *) echo "::warning::notify returned ${code} — the scheduler posts this run on its next reconcile tick" ;; esac
+          exit 0
