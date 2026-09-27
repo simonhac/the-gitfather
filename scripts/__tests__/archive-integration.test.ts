@@ -22,6 +22,7 @@ import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { xorDigest, isoWeekOf, prevWeek, type IsoWeek } from "../lib/archive.js";
 import { parseJobProof } from "../lib/jobProof.js";
+import { commandExists } from "../lib/proc.js";
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const ADMIN_URL = process.env.ARCHIVE_TEST_DATABASE_URL ?? "postgresql://localhost:5432/postgres?sslmode=disable";
@@ -29,9 +30,14 @@ const DB = `gf_archive_test_${process.pid}`;
 
 const md5 = (s: string): string => createHash("md5").update(s, "utf8").digest("hex");
 
-/** psql with the ambient PGSSLROOTCERT cleared — a `system` value rejects sslmode=disable outright. */
+/**
+ * psql with the ambient PGSSLROOTCERT cleared — a `system` value rejects sslmode=disable outright.
+ * The SQL goes in on stdin, not as `-c`: the seed INSERT carries a 300 KB row, and Linux caps a
+ * single argv string at 128 KB (E2BIG). macOS has no such cap, so `-c` only ever broke in CI.
+ */
 function psql(url: string, sql: string): string {
-  return execFileSync("psql", [url, "-X", "-q", "-t", "-A", "-v", "ON_ERROR_STOP=1", "-c", sql], {
+  return execFileSync("psql", [url, "-X", "-q", "-t", "-A", "-v", "ON_ERROR_STOP=1"], {
+    input: sql,
     encoding: "utf8",
     env: { ...process.env, PGSSLROOTCERT: "" },
   }).trim();
@@ -277,7 +283,10 @@ test("archive → verify → prune, end to end against real Postgres", { skip },
 // age-encrypted to that recipient and really decrypts with the offline identity — which is what
 // this proves, using a throwaway keypair generated in the test.
 
-const ageSkip = skip || (existsSync("/usr/local/bin/age") || existsSync("/opt/homebrew/bin/age") ? false : "age CLI not installed");
+// Detected on PATH, not at two hardcoded Homebrew prefixes. `apt-get install age` — which is how
+// setup-tools installs it in CI — lands at /usr/bin/age, so the old check skipped this test on
+// every Linux runner even when age was correctly installed, and a skip reads as green.
+const ageSkip = skip || (commandExists("age") ? false : "age CLI not installed (not on PATH)");
 
 test("archive with encryption: age is unreadable without the identity, and exact with it", { skip: ageSkip }, async (t) => {
   const work = mkdtempSync(join(tmpdir(), "gf-archive-age-"));

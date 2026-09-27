@@ -23,17 +23,19 @@ import "./lib/bootEnv.js"; // MUST be first — loads $PROFILE before backupType
 // All other config comes from $PROFILE (the YAML profile).
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { statSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { statSync, mkdtempSync, rmSync, writeFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { backupSchema, reportConfigError, peekProfile } from "./lib/config.js";
 import { buildRawProfile } from "./lib/profile.js";
 import { pgConn } from "./lib/pgconn.js";
-import { run, runToFile, pipeToFile, commandExists, bestEffort, sha256File, capture, stderrTee } from "./lib/proc.js";
+import { verifyDumpFile } from "./restore-drill-pg.js";
+import { run, runToFile, commandExists, bestEffort, sha256File, capture, stderrTee } from "./lib/proc.js";
 import { classifyPgFailure, isConnectionLevel } from "./lib/pg-classify.js";
 import type { PgFailureCode } from "./lib/pg-classify.js";
 import { computeTiers, runOrigin } from "./lib/schedule.js";
-import { appendRun } from "./runlog.js";
+import { appendRun, appendVerify } from "./runlog.js";
 import { githubLogUrl } from "./lib/github.js";
 import { pingHeartbeat } from "./lib/heartbeat.js";
 import { publishWatchdogConfig } from "./lib/watchdogPublish.js";
@@ -46,6 +48,20 @@ const SCRIPT_START_MS = Date.now();
 
 function pad2(n: number): string {
   return String(n).padStart(2, "0");
+}
+
+/**
+ * TABLE / TABLE DATA entries in a `pg_restore -l` listing — the "is there actually anything in
+ * here" half of the structural check. Zero means a schema-only or empty dump that is nonetheless a
+ * perfectly parseable archive above the size floor, which is precisely the case neither
+ * `dump.min-bytes` nor `pg_restore -l`'s exit code catches.
+ *
+ * Exported so it is testable without a database: this check now runs for EVERY encryption mode
+ * (it reads the plaintext, before encryption), so it guards every backup rather than only the
+ * unencrypted ones it was originally written for.
+ */
+export function countTocTableEntries(toc: string): number {
+  return toc.split("\n").filter((l) => /\bTABLE( DATA)?\b/.test(l)).length;
 }
 
 /** UTC `date +%Y%m%dT%H%M%SZ`. */
@@ -242,60 +258,142 @@ async function main(): Promise<void> {
     }
   }
 
-  console.log(`Dumping Postgres → ${out} (ENCRYPTION=${encryption}) ...`);
-  if (encryption === "none") {
+  if (encryption === "aes-gcm") {
+    await fail("ENCRYPTION=aes-gcm not implemented yet (encryption is a planned follow-up)");
+  }
+
+  /**
+   * Everything we can prove about the dump while it is still plaintext in our hands — which is
+   * everything worth proving, and none of it needs a decrypt key.
+   *
+   * Records a `pre-encrypt` verification, NOT a `restore` one. It cannot be a `restore`: the object
+   * it proves is the dump, which has not been encrypted or uploaded yet, so it says nothing about
+   * whether the ciphertext in the bucket opens. Recording it as `restore` would light every cell on
+   * the dashboard while nothing had been restore-verified at all.
+   */
+  const verifyPlaintext = async (plainPath: string): Promise<void> => {
+    // `pg_restore -l` lists the TOC (cheap — header and table of contents, not the data); a corrupt
+    // or truncated archive can't be listed, and a real data dump has ≥1 TABLE/TABLE DATA entry.
+    // This catches a >dump.min-bytes-but-corrupt dump BEFORE it is reported as a successful backup.
+    if (cfg.integrity.checkStructure) {
+      if (!commandExists("pg_restore")) {
+        process.stderr.write("warning: integrity.check-structure is on but pg_restore not found — skipping TOC validation\n");
+      } else {
+        const toc = capture("pg_restore", ["-l", plainPath]);
+        if (!toc.ok) await fail("dump is not a parseable pg_dump archive (pg_restore -l failed)");
+        const tableEntries = countTocTableEntries(toc.out);
+        if (tableEntries === 0) await fail("dump TOC has no TABLE entries — suspect an empty or schema-only dump");
+        console.log(`Structural check: ${tableEntries} TABLE/TABLE DATA TOC entries — archive is parseable`);
+      }
+    }
+
+    if (!cfg.integrity.verifyBeforeEncrypt) return;
+
+    // Timed separately from the run as a whole: "restore every dump rather than only the promoted
+    // ones" is a cost decision, and revisiting it needs a number rather than an impression.
+    const startedAt = Date.now();
+    console.log("Pre-encrypt restore drill: restoring this dump into the throwaway target …");
+    const res = await verifyDumpFile({
+      dumpPath: plainPath,
+      gate: "live-ratio",
+      cfg: {
+        // The database we just dumped IS the live reference — no separate PG_LIVE_DATABASE_URL to
+        // wire, and no window for the two to drift apart.
+        liveDatabaseUrl: dbUrl,
+        drillDatabaseUrl: cfg.credentials.drillDatabaseUrl!,
+        rowCountTable: cfg.drill.rowCountTable!,
+        presentTables: cfg.drill.presentTables,
+        nonemptyTables: cfg.drill.nonemptyTables,
+        minRowRatio: cfg.drill.minRowRatio,
+        maxRowRatio: cfg.drill.maxRowRatio,
+        maxRowDrop: cfg.drill.maxRowDrop,
+      },
+      tmp,
+      // The count taken from the live table moments ago, so the ratio compares like with like.
+      refCount: dumpCounts?.[cfg.drill.rowCountTable!] ?? null,
+    });
+    const tookMs = Date.now() - startedAt;
+    console.log(`Pre-encrypt restore drill: ${res.ok ? "PASSED" : "FAILED"} in ${Math.round(tookMs / 1000)}s`);
+
+    await bestEffort("append pre-encrypt verification", () =>
+      Promise.resolve(
+        appendVerify({
+          ts: new Date().toISOString().replace(/\.\d+Z$/, "Z"),
+          verifiedTs: runTsIso,
+          ok: res.ok,
+          ratio: res.ratio,
+          // Keyed to the 2hourly object this dump becomes. Without a key AND a tier, the record
+          // has neither — and verify-durable's stamp-join matches any keyless, tierless record to
+          // EVERY durable object sharing the stamp, which made all of them look already-verified
+          // and emptied the hash leg. The hash leg is now kind-aware so this cannot recur, but a
+          // record that speaks for objects it knows nothing about is a trap for the next reader.
+          key: `2hourly/${filename}`,
+          tier: "2hourly",
+          kind: "pre-encrypt",
+          by: "ci",
+          counts: res.counts,
+          reason: res.reason,
+          durationMs: tookMs,
+        }),
+      ),
+    );
+
+    // Refuse to upload a dump that does not restore. min-bytes and the TOC check both pass on one
+    // that is structurally fine and semantically empty; this is the gate that does not.
+    if (!res.ok) await fail(`pre-encrypt restore drill failed — ${res.reason}`);
+  };
+
+  // ── Dump to PLAINTEXT first, always ────────────────────────────────────────
+  // This used to be `pg_dump | age` straight to `out`, so under age the plaintext never existed as
+  // a file — and every check that needs to read a dump therefore had to happen AFTER encryption,
+  // which meant downloading, decrypting, and holding AGE_IDENTITY in CI to do it. The plaintext is
+  // right here; checking it here costs no key at all. See CB-303.
+  //
+  // The cost is real and deliberate: the dump is briefly at rest on the runner. Keep `plain` on a
+  // RAM disk (the caller sets TMPDIR) and shred it the moment it is encrypted — see below.
+  const plain = encryption === "none" ? out : join(tmp, `${fileBasename}-${stamp}.dump`);
+  console.log(`Dumping Postgres → ${plain} ...`);
+  {
     // Tee pg_dump's stderr: it still streams to the job log unchanged, but we keep a copy so the
     // alert can name the cause instead of saying "pg_dump failed" and making someone open Actions.
     const tee = stderrTee();
-    const code = await runToFile("pg_dump", [...dumpFlags, db.safeUrl], out, db.env, { onStderr: tee.onChunk });
+    const code = await runToFile("pg_dump", [...dumpFlags, db.safeUrl], plain, db.env, { onStderr: tee.onChunk });
     if (code !== 0) {
       const f = classifyPgFailure(tee.text());
       await fail(f.message, f.code);
     }
-  } else if (encryption === "age") {
+  }
+
+  const plainSize = statSync(plain).size;
+  console.log(`Dump size: ${Math.floor(plainSize / 1024 / 1024)} MB (${plainSize} bytes, plaintext)`);
+  if (plainSize < minBytes) await fail(`dump suspiciously small (${plainSize} < ${minBytes}) — not uploading`);
+
+  // ── Structural + restore validation of the PLAINTEXT, before it is encrypted ───────────────
+  await verifyPlaintext(plain);
+
+  // ── Encrypt ────────────────────────────────────────────────────────────────
+  if (encryption === "age") {
     if (!commandExists("age")) await fail("ENCRYPTION=age but 'age' not found");
     // Presence is already enforced by the schema (age ⇒ AGE_RECIPIENT); guard kept as defence-in-depth.
     const recipient = cfg.credentials.age.recipient;
     if (!recipient) await fail("ENCRYPTION=age requires AGE_RECIPIENT");
-    // Only the LEFT leg speaks libpq, so only it is classified. An `age` failure with a healthy
-    // pg_dump keeps the generic pipeline message rather than borrowing pg_dump's vocabulary.
-    const dumpTee = stderrTee();
-    const code = await pipeToFile(
-      { cmd: "pg_dump", args: [...dumpFlags, db.safeUrl] },
-      { cmd: "age", args: ["-r", recipient!] },
-      out,
-      db.env,
-      { onStderrA: dumpTee.onChunk },
-    );
-    if (code !== 0) {
-      const f = classifyPgFailure(dumpTee.text(), "pg_dump | age pipeline failed");
-      await fail(f.message, f.code);
+    // Belt-and-braces beside the schema's own check: nothing downstream can read a recipient back
+    // out of an age header, so if this is wrong we produce objects nobody can open and find out
+    // only at the next decrypt drill. Fail before writing any of them.
+    const pinned = cfg.expectRecipient;
+    if (pinned && pinned !== recipient) {
+      await fail(`AGE_RECIPIENT does not match the profile's pinned expect-recipient — refusing to encrypt`);
     }
-  } else {
-    // aes-gcm
-    await fail("ENCRYPTION=aes-gcm not implemented yet (encryption is a planned follow-up)");
+    console.log(`Encrypting → ${out} (recipient ${recipient!.slice(0, 16)}…${pinned ? ", matches the pinned recipient" : ""})`);
+    const code = await runToFile("age", ["-r", recipient!, plain], out);
+    if (code !== 0) await fail("age encrypt failed");
+    // The plaintext has done its job. Remove it BEFORE the upload, so it is gone for the longest
+    // part of the run rather than only when the tmp dir is torn down.
+    rmSync(plain, { force: true });
   }
 
   const size = statSync(out).size;
-  console.log(`Dump size: ${Math.floor(size / 1024 / 1024)} MB (${size} bytes)`);
-  if (size < minBytes) await fail(`dump suspiciously small (${size} < ${minBytes}) — not uploading`);
-
-  // ── Structural validation (#4): prove the dump is a parseable custom-format archive ────────
-  // `pg_restore -l` lists the TOC (cheap — header + table of contents, not the data); a corrupt or
-  // truncated archive can't be listed, and a real data dump has ≥1 TABLE/TABLE DATA entry. This
-  // catches a >dump.min-bytes-but-corrupt dump BEFORE it's reported as a successful backup. Only the
-  // plaintext (none-mode) is checkable here without a key; age is covered by integrity.verify-after-upload / the drill.
-  if (encryption === "none" && cfg.integrity.checkStructure) {
-    if (!commandExists("pg_restore")) {
-      process.stderr.write("warning: integrity.check-structure is on but pg_restore not found — skipping TOC validation\n");
-    } else {
-      const toc = capture("pg_restore", ["-l", out]);
-      if (!toc.ok) await fail("dump is not a parseable pg_dump archive (pg_restore -l failed)");
-      const tableEntries = toc.out.split("\n").filter((l) => /\bTABLE( DATA)?\b/.test(l)).length;
-      if (tableEntries === 0) await fail("dump TOC has no TABLE entries — suspect an empty or schema-only dump");
-      console.log(`Structural check: ${tableEntries} TABLE/TABLE DATA TOC entries — archive is parseable`);
-    }
-  }
+  if (size !== plainSize) console.log(`Encrypted size: ${Math.floor(size / 1024 / 1024)} MB (${size} bytes)`);
 
   // ── Content hash (#1): SHA-256 of the EXACT bytes we upload (ciphertext for age) ───────────
   // Streamed (never buffers the dump on the heap). Best-effort — a hash hiccup must not fail an
@@ -414,7 +512,25 @@ async function main(): Promise<void> {
   cleanup();
 }
 
-main().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+/**
+ * Only run when invoked directly. Without this, merely IMPORTING this module took a backup — or,
+ * in a test, validated config against an empty environment and called process.exit(1). That is
+ * why nothing in here had ever been unit-tested: it could not be imported. The sibling scripts
+ * (restore-drill-pg.ts, drill-object.ts) already guard this way.
+ */
+function isEntrypoint(): boolean {
+  const argv1 = process.argv[1];
+  if (!argv1) return false;
+  try {
+    return realpathSync(fileURLToPath(import.meta.url)) === realpathSync(argv1);
+  } catch {
+    return false;
+  }
+}
+
+if (isEntrypoint()) {
+  main().catch((e) => {
+    console.error(e);
+    process.exit(1);
+  });
+}
