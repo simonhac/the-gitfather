@@ -15,11 +15,11 @@ import {
 
 const rec = (id: string, outcome: WatchdogRecord["outcome"], name = id): WatchdogRecord => ({ id, name, outcome });
 const cron = (tick: string, delivered = true): CronTickRecord => ({ tick, delivered });
-const ROSTER = ["liveone", "mrtippy", "boost"];
+const ROSTER = ["alpha", "gamma", "beta"];
 
 test("tickDelivered: a full set of real verdicts is delivery", () => {
   assert.equal(
-    tickDelivered([rec("liveone", "fresh"), rec("mrtippy", "fresh"), rec("boost", "fresh")], ROSTER),
+    tickDelivered([rec("alpha", "fresh"), rec("gamma", "fresh"), rec("beta", "fresh")], ROSTER),
     true,
   );
 });
@@ -31,7 +31,7 @@ test("tickDelivered: a watchdog that ran and PAGED still counts as delivery", ()
   // attention.
   for (const bad of ["stale-broken", "stale-unhealed", "stale-no-heal", "broken-size", "no-objects", "bad-stamp"] as const) {
     assert.equal(
-      tickDelivered([rec("liveone", bad), rec("mrtippy", "fresh"), rec("boost", "recovered")], ROSTER),
+      tickDelivered([rec("alpha", bad), rec("gamma", "fresh"), rec("beta", "recovered")], ROSTER),
       true,
       `${bad} should still ping`,
     );
@@ -39,14 +39,14 @@ test("tickDelivered: a watchdog that ran and PAGED still counts as delivery", ()
 });
 
 test("tickDelivered: `error` and `no-config` mean the watchdog did NOT run", () => {
-  assert.equal(tickDelivered([rec("liveone", "error"), rec("mrtippy", "fresh"), rec("boost", "fresh")], ROSTER), false);
-  assert.equal(tickDelivered([rec("liveone", "no-config"), rec("mrtippy", "fresh"), rec("boost", "fresh")], ROSTER), false);
+  assert.equal(tickDelivered([rec("alpha", "error"), rec("gamma", "fresh"), rec("beta", "fresh")], ROSTER), false);
+  assert.equal(tickDelivered([rec("alpha", "no-config"), rec("gamma", "fresh"), rec("beta", "fresh")], ROSTER), false);
 });
 
 test("tickDelivered: a client silently missing from the results is NOT delivery", () => {
   // The failure this exists to catch: a client drops out of the roster or the watchdog never reaches
   // it, and the remaining two look perfect. Averaging over what came back would hide it.
-  assert.equal(tickDelivered([rec("liveone", "fresh"), rec("mrtippy", "fresh")], ROSTER), false);
+  assert.equal(tickDelivered([rec("alpha", "fresh"), rec("gamma", "fresh")], ROSTER), false);
 });
 
 test("tickDelivered: an empty roster is a misconfiguration, not health", () => {
@@ -102,20 +102,20 @@ test("tickDelivered: ONE CLIENT CAN YIELD SEVERAL RECORDS — a failed profile m
   // databases produces two records with the same id. Keying a Map by id kept only the LAST, so this
   // read as delivered and the reversed order read as not — a false green on a dead-man's switch,
   // order-dependent. Both orders must now be false.
-  const twoProfiles = ["liveone"];
+  const twoProfiles = ["alpha"];
   assert.equal(
-    tickDelivered([rec("liveone", "error", "db-a"), rec("liveone", "fresh", "db-b")], twoProfiles),
+    tickDelivered([rec("alpha", "error", "db-a"), rec("alpha", "fresh", "db-b")], twoProfiles),
     false,
     "error first",
   );
   assert.equal(
-    tickDelivered([rec("liveone", "fresh", "db-b"), rec("liveone", "error", "db-a")], twoProfiles),
+    tickDelivered([rec("alpha", "fresh", "db-b"), rec("alpha", "error", "db-a")], twoProfiles),
     false,
     "error last — this is the order the old Map-by-id silently accepted",
   );
   // Both healthy is still delivery.
   assert.equal(
-    tickDelivered([rec("liveone", "fresh", "db-a"), rec("liveone", "recovered", "db-b")], twoProfiles),
+    tickDelivered([rec("alpha", "fresh", "db-a"), rec("alpha", "recovered", "db-b")], twoProfiles),
     true,
   );
 });

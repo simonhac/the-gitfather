@@ -3,13 +3,13 @@ import assert from "node:assert/strict";
 import { checkRestoredTables, evalRowRatio, stampToIso, extForEncryption, isDumpObject, planDecrypt, type TableProbe } from "../restore-drill-pg.js";
 
 test("planDecrypt dispatches on the object's OWN extension, not the configured encryption", () => {
-  assert.deepEqual(planDecrypt("daily/boost-20260925T160306Z.dump.age"), { kind: "age" });
+  assert.deepEqual(planDecrypt("daily/beta-20260925T160306Z.dump.age"), { kind: "age" });
   // The CB-265 failure mode in miniature: a bucket holds both generations for a whole retention
   // window after the `encryption:` flip, so a plaintext object must still copy while the profile
   // says age. Nothing is passed here but the key, which is the point — there is no config to get
   // wrong, because the signature has nowhere to put it.
-  assert.deepEqual(planDecrypt("monthly/boost-20260901T160102Z.dump"), { kind: "copy" });
-  assert.equal(planDecrypt("weekly/boost-20260920T160000Z.dump.enc").kind, "unsupported");
+  assert.deepEqual(planDecrypt("monthly/beta-20260901T160102Z.dump"), { kind: "copy" });
+  assert.equal(planDecrypt("weekly/beta-20260920T160000Z.dump.enc").kind, "unsupported");
 });
 
 test("extForEncryption maps the encryption mode to the object extension", () => {
@@ -95,9 +95,9 @@ test("isDumpObject accepts EVERY dump extension, not just the configured one", (
   // The regression this guards: the durable enumeration and the drill selector both filtered on
   // `.${extForEncryption(cfg.encryption)}`, so the day a profile switched `encryption: none → age`
   // every pre-switch `.dump` object became invisible — and the run reported green on what was left.
-  assert.equal(isDumpObject("boost-20260908T160122Z.dump"), true);
-  assert.equal(isDumpObject("boost-20260909T160123Z.dump.age"), true);
-  assert.equal(isDumpObject("boost-20260909T160123Z.dump.enc"), true);
+  assert.equal(isDumpObject("beta-20260908T160122Z.dump"), true);
+  assert.equal(isDumpObject("beta-20260909T160123Z.dump.age"), true);
+  assert.equal(isDumpObject("beta-20260909T160123Z.dump.enc"), true);
 
   // Whatever extForEncryption can produce, isDumpObject must accept — the two must not drift apart.
   for (const mode of ["none", "age", "aes-gcm"]) {
@@ -108,19 +108,19 @@ test("isDumpObject accepts EVERY dump extension, not just the configured one", (
   // selected as a backup.
   assert.equal(isDumpObject("api_logs-2026-W27-p001.manifest.json"), false);
   assert.equal(isDumpObject("runs-2026-09.jsonl"), false);
-  assert.equal(isDumpObject("boost-20260909T160123Z.dump.tmp"), false);
-  assert.equal(isDumpObject("boost-20260909T160123Z.dumpx"), false);
-  assert.equal(isDumpObject("boost-20260909T160123Z.dump.age.part"), false);
+  assert.equal(isDumpObject("beta-20260909T160123Z.dump.tmp"), false);
+  assert.equal(isDumpObject("beta-20260909T160123Z.dumpx"), false);
+  assert.equal(isDumpObject("beta-20260909T160123Z.dump.age.part"), false);
 });
 
 test("a mixed-extension listing keeps BOTH generations", () => {
   const listing = [
-    "boost-20260906T160051Z.dump",       // written before the encryption switch
-    "boost-20260909T160123Z.dump.age",   // written after it
-    "boost-20260909T160123Z.manifest.json",
+    "beta-20260906T160051Z.dump",       // written before the encryption switch
+    "beta-20260909T160123Z.dump.age",   // written after it
+    "beta-20260909T160123Z.manifest.json",
   ];
   assert.deepEqual(listing.filter(isDumpObject), [
-    "boost-20260906T160051Z.dump",
-    "boost-20260909T160123Z.dump.age",
+    "beta-20260906T160051Z.dump",
+    "beta-20260909T160123Z.dump.age",
   ]);
 });

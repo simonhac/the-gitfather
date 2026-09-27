@@ -434,7 +434,7 @@ async function main(): Promise<void> {
   //   failures === 0   every hash check, restore gate and the census floor passed.
   //   all.length > 0   the run actually SAW durable objects. An empty listing verifies nothing,
   //                    and "the job exited 0" over nothing is precisely the too-weak signal that
-  //                    kept liveone's collector green while every store failed. Note a steady-state
+  //                    kept a consumer's collector green while every store failed. Note a steady-state
   //                    day where nothing is DUE is still clean — requiring work-done would make the
   //                    heartbeat go quiet on healthy days, which is the opposite of what we want.
   //

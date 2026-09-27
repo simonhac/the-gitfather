@@ -33,7 +33,7 @@ import "./lib/bootEnv.js"; // MUST be first — loads $PROFILE before backupType
 //
 // BOTH HALVES RUN AT PRUNE TIME, and the object half is easy to lose. `verify-after-upload` proves
 // the bytes landed when the week was ARCHIVED; it says nothing about the object weeks later, and
-// prune-after-weeks is deliberately far beyond archive-after-weeks (13 vs 4 in Boost's profile), so
+// prune-after-weeks is deliberately far beyond archive-after-weeks (13 vs 4 in a typical profile), so
 // prune always acts on an object last checked many runs earlier. pruneWeek() therefore re-reads the
 // object and re-checks it against the manifest's objectSha256 before any DELETE — without that, an
 // object that rotted, was truncated, or was tampered with after archiving is deleted from the
@@ -561,7 +561,7 @@ async function processTable(ctx: {
     // the single slot always went to the oldest non-pruned week — already archived, fingerprint
     // unchanged, `skip` — and the walk never reached a week that had never been archived. The
     // archive frontier could not advance past the prune frontier, and every run reported
-    // success having done nothing. Boost stalled at 2026-W32 for weeks that way.
+    // success having done nothing. one client stalled at 2026-W32 for weeks that way.
     //
     // The eligibility horizon still bounds the walk, so this is not unbounded.
     const candidates = eligibleWeeks({

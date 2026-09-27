@@ -15,14 +15,14 @@ import {
 
 const NOW = new Date("2026-09-25T00:00:00Z");
 const HOUR = 3_600_000;
-const ago = (ms: number) => jobProof("durableVerify", "boost", new Date(NOW.getTime() - ms));
+const ago = (ms: number) => jobProof("durableVerify", "beta", new Date(NOW.getTime() - ms));
 
 test("jobProofKey: sits under _health/<name>/, beside _log/ and _config/", () => {
-  assert.equal(jobProofKey("boost", "archive"), "_health/boost/archive.json");
+  assert.equal(jobProofKey("beta", "archive"), "_health/beta/archive.json");
 });
 
 test("parseJobProof: round-trips what the publisher writes, and refuses anything else", () => {
-  const p = jobProof("archive", "boost", NOW);
+  const p = jobProof("archive", "beta", NOW);
   assert.deepEqual(parseJobProof(JSON.stringify(p)), p);
   for (const bad of [null, "", "not json", "[]", JSON.stringify({ ...p, version: 2 }), JSON.stringify({ ...p, job: "backup" }),
     JSON.stringify({ ...p, name: "" }), JSON.stringify({ ...p, provenAt: "yesterday" })]) {
@@ -44,7 +44,7 @@ for (const [name, input, expected] of [
 const check = (proof: JobCheck["proof"], extra: Partial<JobCheck> = {}): JobCheck => ({ client: "c1", job: "durableVerify", proof, ...extra });
 
 test("jobsVerdict: every proof fresh → 200", () => {
-  const v = jobsVerdict([check(ago(2 * HOUR)), check(jobProof("archive", "boost", new Date(NOW.getTime() - 6 * 24 * HOUR)), { job: "archive" })], NOW);
+  const v = jobsVerdict([check(ago(2 * HOUR)), check(jobProof("archive", "beta", new Date(NOW.getTime() - 6 * 24 * HOUR)), { job: "archive" })], NOW);
   assert.equal(v.status, 200);
   assert.equal(v.body.failing, 0);
 });

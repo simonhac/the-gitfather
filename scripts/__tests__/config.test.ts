@@ -272,11 +272,11 @@ test("dashboard: path-prefix defaults to '' and accepts a value (shared-bucket k
 });
 
 test("joinObjectKey: slash-clean — empty prefix, set prefix, and stray slashes never yield '//'", () => {
-  assert.equal(joinObjectKey("", "boost", "index.html"), "boost/index.html");
-  assert.equal(joinObjectKey("backups", "boost", "index.html"), "backups/boost/index.html");
-  assert.equal(joinObjectKey("/backups/", "boost", "index.html"), "backups/boost/index.html");
-  assert.equal(joinObjectKey("backups/sub", "boost", "index.html"), "backups/sub/boost/index.html");
-  for (const k of [joinObjectKey("", "boost", "index.html"), joinObjectKey("/backups/", "boost", "index.html")]) {
+  assert.equal(joinObjectKey("", "beta", "index.html"), "beta/index.html");
+  assert.equal(joinObjectKey("backups", "beta", "index.html"), "backups/beta/index.html");
+  assert.equal(joinObjectKey("/backups/", "beta", "index.html"), "backups/beta/index.html");
+  assert.equal(joinObjectKey("backups/sub", "beta", "index.html"), "backups/sub/beta/index.html");
+  for (const k of [joinObjectKey("", "beta", "index.html"), joinObjectKey("/backups/", "beta", "index.html")]) {
     assert.ok(!k.includes("//") && !k.startsWith("/") && !k.endsWith("/"), `clean key: ${k}`);
   }
 });

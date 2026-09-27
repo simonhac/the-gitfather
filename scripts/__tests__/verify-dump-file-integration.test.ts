@@ -61,7 +61,7 @@ const urlFor = (db: string): string => {
   return u.toString();
 };
 
-/** The sentinel table's row count; `organisations` and `history` mirror Boost's nonempty gates. */
+/** The sentinel table's row count; `organisations` and `history` mirror a client's nonempty gates. */
 const PEOPLE = 703;
 
 function seedSource(): void {
@@ -85,7 +85,7 @@ function dumpSource(dir: string): string {
   return out;
 }
 
-/** Boost's own drill gates, minus everything verifyDumpFile is not allowed to see. */
+/** A client's own drill gates, minus everything verifyDumpFile is not allowed to see. */
 function cfg(): DumpVerifyConfig {
   return {
     drillDatabaseUrl: ADMIN_URL,

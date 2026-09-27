@@ -18,7 +18,7 @@ const claims = (over: Record<string, unknown> = {}): Record<string, unknown> => 
   iat: nowS - 5,
   nbf: nowS - 5,
   exp: nowS + 295,
-  repository: "simonhac/LiveOne",
+  repository: "acme/Alpha",
   repository_id: "987654321",
   job_workflow_ref: "simonhac/the-gitfather/.github/workflows/pg-backup.yml@refs/heads/main",
   run_id: "17000000001",
@@ -105,15 +105,15 @@ test("jwksKeySource: a failed refetch keeps the keys it had", async () => {
 });
 
 const roster: Client[] = [
-  { id: "liveone", owner: "simonhac", repo: "LiveOne", installationId: 1, bucket: "LIVEONE_R2", repositoryId: 987654321 },
-  { id: "boost", owner: "boost-suite", repo: "boost", installationId: 2, bucket: "BOOST_R2" },
+  { id: "alpha", owner: "acme", repo: "Alpha", installationId: 1, bucket: "ALPHA_R2", repositoryId: 987654321 },
+  { id: "beta", owner: "beta-org", repo: "beta", installationId: 2, bucket: "BETA_R2" },
 ];
 
 test("resolveNotifyTarget: maps repo + engine workflow to client and job", () => {
-  const r = resolveNotifyTarget(claims({ repository: "SIMONHAC/liveone" }) as unknown as GithubClaims, roster);
+  const r = resolveNotifyTarget(claims({ repository: "ACME/alpha" }) as unknown as GithubClaims, roster);
   assert.equal(r.ok, true);
   if (!r.ok) return;
-  assert.equal(r.target.client.id, "liveone");
+  assert.equal(r.target.client.id, "alpha");
   assert.equal(r.target.job, "backup");
   assert.equal(r.target.runAttempt, 1);
   assert.equal(r.target.jobId, "50000000001");
@@ -126,7 +126,7 @@ test("resolveNotifyTarget: maps repo + engine workflow to client and job", () =>
   ];
   for (const [file, job] of files) {
     const t = resolveNotifyTarget(
-      claims({ repository: "boost-suite/boost", job_workflow_ref: `simonhac/the-gitfather/.github/workflows/${file}@v2` }) as unknown as GithubClaims,
+      claims({ repository: "beta-org/beta", job_workflow_ref: `simonhac/the-gitfather/.github/workflows/${file}@v2` }) as unknown as GithubClaims,
       roster,
     );
     assert.equal(t.ok && t.target.job, job);
@@ -136,8 +136,8 @@ test("resolveNotifyTarget: maps repo + engine workflow to client and job", () =>
 test("resolveNotifyTarget: refuses strangers", () => {
   const r = (over: Record<string, unknown>) => resolveNotifyTarget(claims(over) as unknown as GithubClaims, roster);
   assert.deepEqual(r({ repository: "someone/else" }), { ok: false, error: "not_rostered" });
-  assert.deepEqual(r({ repository_id: "1" }), { ok: false, error: "repository_id" }, "the roster pins liveone's id");
-  assert.deepEqual(r({ job_workflow_ref: "simonhac/LiveOne/.github/workflows/pg-backup.yml@refs/heads/main" }), { ok: false, error: "not_engine_workflow" });
+  assert.deepEqual(r({ repository_id: "1" }), { ok: false, error: "repository_id" }, "the roster pins alpha's id");
+  assert.deepEqual(r({ job_workflow_ref: "acme/Alpha/.github/workflows/pg-backup.yml@refs/heads/main" }), { ok: false, error: "not_engine_workflow" });
   assert.deepEqual(r({ job_workflow_ref: "evil/the-gitfather/.github/workflows/pg-backup.yml@main" }), { ok: false, error: "not_engine_workflow" });
   assert.deepEqual(r({ job_workflow_ref: "simonhac/the-gitfather/.github/workflows/ci.yml@main" }), { ok: false, error: "not_engine_workflow" });
   assert.deepEqual(r({ run_id: "12x" }), { ok: false, error: "bad_claims" });

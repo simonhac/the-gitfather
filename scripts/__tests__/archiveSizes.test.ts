@@ -18,10 +18,10 @@ const LINE = JSON.stringify({
 // ── Key parsing ──────────────────────────────────────────────────────────────
 
 test("parseArchiveObjectKey: reads the week and part off the tail", () => {
-  assert.deepEqual(parseArchiveObjectKey("archive/api_logs/2026/boost-api_logs-2026-W02-p001.ndjson.zst.age"), {
+  assert.deepEqual(parseArchiveObjectKey("archive/api_logs/2026/beta-api_logs-2026-W02-p001.ndjson.zst.age"), {
     week: "2026-W02", part: 1, ext: "ndjson.zst.age",
   });
-  assert.deepEqual(parseArchiveObjectKey("archive/api_logs/2026/boost-api_logs-2026-W02-p012.manifest.json"), {
+  assert.deepEqual(parseArchiveObjectKey("archive/api_logs/2026/beta-api_logs-2026-W02-p012.manifest.json"), {
     week: "2026-W02", part: 12, ext: "manifest.json",
   });
 });
@@ -34,7 +34,7 @@ test("parseArchiveObjectKey: a hyphenated project or table name cannot confuse i
 
 test("parseArchiveObjectKey: anything that is not an archive part is not guessed at", () => {
   for (const k of ["archive/api_logs/_index/api_logs-2026.jsonl", "archive/api_logs/2026/notes.txt",
-                   "archive/api_logs/2026/boost-api_logs-2026-W02.ndjson", ""]) {
+                   "archive/api_logs/2026/beta-api_logs-2026-W02.ndjson", ""]) {
     assert.equal(parseArchiveObjectKey(k), null, k);
   }
 });
@@ -146,8 +146,8 @@ test("listSizes + patch: sizes taken from the objects the store actually holds",
   const store = new LocalStore(root);
   mkdirSync(join(root, "archive", "api_logs", "2026"), { recursive: true });
   mkdirSync(join(root, "archive", "api_logs", "_index"), { recursive: true });
-  writeFileSync(join(root, "archive/api_logs/2026/boost-api_logs-2026-W02-p001.ndjson.age"), "x".repeat(4096));
-  writeFileSync(join(root, "archive/api_logs/2026/boost-api_logs-2026-W02-p001.manifest.json"), "{}");
+  writeFileSync(join(root, "archive/api_logs/2026/beta-api_logs-2026-W02-p001.ndjson.age"), "x".repeat(4096));
+  writeFileSync(join(root, "archive/api_logs/2026/beta-api_logs-2026-W02-p001.manifest.json"), "{}");
   writeFileSync(join(root, "archive/api_logs/_index/api_logs-2026.jsonl"), `${LINE}\n`);
 
   const sizes = sizeIndexFrom(await store.listSizes("archive/api_logs"));

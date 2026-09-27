@@ -90,7 +90,7 @@ test("safeMention: a safe mention passes through; anything else (or nothing) is 
 test("safeUrl: only an https URL that cannot break Slack's <url|label> syntax", () => {
   const job = "https://github.com/o/r/actions/runs/1/job/2";
   assert.equal(safeUrl(job), job);
-  assert.equal(safeUrl("https://dash.example.com/backups/boost/index.html?x=1#y"), "https://dash.example.com/backups/boost/index.html?x=1#y");
+  assert.equal(safeUrl("https://dash.example.com/backups/beta/index.html?x=1#y"), "https://dash.example.com/backups/beta/index.html?x=1#y");
   for (const bad of [
     null,
     undefined,

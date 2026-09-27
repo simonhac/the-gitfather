@@ -6,8 +6,8 @@ import { parseArgs, tierOf } from "../drill-object.js";
 // If that guard is ever dropped, this file's mere existence would start hitting R2.
 
 test("parseArgs: --key and the safe defaults", () => {
-  const a = parseArgs(["--key", "monthly/boost-20260901T160102Z.dump.age"]);
-  assert.equal(a.key, "monthly/boost-20260901T160102Z.dump.age");
+  const a = parseArgs(["--key", "monthly/beta-20260901T160102Z.dump.age"]);
+  assert.equal(a.key, "monthly/beta-20260901T160102Z.dump.age");
   assert.equal(a.gate, "nonempty", "a durable copy is weeks old — a live ratio would be meaningless");
   assert.equal(a.record, true, "a drill that does not record is a drill nobody can see");
   assert.equal(a.list, false);
@@ -29,9 +29,9 @@ test("parseArgs: --list and --no-record", () => {
 });
 
 test("tierOf: reads the tier from the key, and answers null rather than guessing", () => {
-  assert.equal(tierOf("monthly/boost-20260901T160102Z.dump.age"), "monthly");
-  assert.equal(tierOf("intraday/boost-20260925T160306Z.dump.age"), "intraday");
-  assert.equal(tierOf("2hourly/boost-20260925T160306Z.dump.age"), "intraday", "the legacy prefix is the same tier");
-  assert.equal(tierOf("boost-20260925T160306Z.dump.age"), null, "no tier prefix");
+  assert.equal(tierOf("monthly/beta-20260901T160102Z.dump.age"), "monthly");
+  assert.equal(tierOf("intraday/beta-20260925T160306Z.dump.age"), "intraday");
+  assert.equal(tierOf("2hourly/beta-20260925T160306Z.dump.age"), "intraday", "the legacy prefix is the same tier");
+  assert.equal(tierOf("beta-20260925T160306Z.dump.age"), null, "no tier prefix");
   assert.equal(tierOf("quarterly/x.dump"), null, "not one of ours");
 });

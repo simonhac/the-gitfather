@@ -161,7 +161,7 @@ test("workBudget: a skip is free, so a run of already-archived weeks never exhau
   // from the oldest live row, so in the steady state the first several weeks are already
   // archived with unchanged fingerprints — `planArchive` returns `skip` for each. If a skip
   // spent the budget, the walk stopped on the first one and a week that had never been
-  // archived was never reached. Boost stalled at 2026-W32 that way, reporting success.
+  // archived was never reached. A client stalled at 2026-W32 that way, reporting success.
   const budget = workBudget(1);
   for (let i = 0; i < 8; i++) {
     assert.equal(budget.exhausted(), false, `skip #${i + 1} must not exhaust a budget of 1`);
@@ -249,12 +249,12 @@ test("eligibleWeeks: crosses a year boundary without a gap or a duplicate", () =
 test("archiveObjectKey: a folder per year, a file per week, part-numbered", () => {
   const w = isoWeek(2026, 23);
   assert.equal(
-    archiveObjectKey({ prefix: "archive/boost", name: "boost", table: "api_logs", week: w, part: 1, ext: "ndjson.zst.age" }),
-    "archive/boost/api_logs/2026/boost-api_logs-2026-W23-p001.ndjson.zst.age",
+    archiveObjectKey({ prefix: "archive/beta", name: "beta", table: "api_logs", week: w, part: 1, ext: "ndjson.zst.age" }),
+    "archive/beta/api_logs/2026/beta-api_logs-2026-W23-p001.ndjson.zst.age",
   );
   assert.equal(
-    manifestObjectKey({ prefix: "archive/boost", name: "boost", table: "api_logs", week: w, part: 2 }),
-    "archive/boost/api_logs/2026/boost-api_logs-2026-W23-p002.manifest.json",
+    manifestObjectKey({ prefix: "archive/beta", name: "beta", table: "api_logs", week: w, part: 2 }),
+    "archive/beta/api_logs/2026/beta-api_logs-2026-W23-p002.manifest.json",
   );
 });
 
@@ -263,21 +263,21 @@ test("archiveObjectKey: the folder follows the ISO week-numbering year, not the 
   const w = isoWeek(2026, 1);
   assert.equal(w.start.getUTCFullYear(), 2025, "the week really does start in 2025");
   assert.match(
-    archiveObjectKey({ prefix: "archive/boost", name: "boost", table: "api_logs", week: w, part: 1, ext: "ndjson.zst.age" }),
-    /\/2026\/boost-api_logs-2026-W01-p001\./,
+    archiveObjectKey({ prefix: "archive/beta", name: "beta", table: "api_logs", week: w, part: 1, ext: "ndjson.zst.age" }),
+    /\/2026\/beta-api_logs-2026-W01-p001\./,
   );
 });
 
 test("archiveObjectKey: tolerates a prefix written with stray slashes", () => {
   const w = isoWeek(2026, 23);
-  const key = archiveObjectKey({ prefix: "/archive/boost/", name: "boost", table: "api_logs", week: w, part: 1, ext: "ndjson" });
-  assert.equal(key, "archive/boost/api_logs/2026/boost-api_logs-2026-W23-p001.ndjson");
+  const key = archiveObjectKey({ prefix: "/archive/beta/", name: "beta", table: "api_logs", week: w, part: 1, ext: "ndjson" });
+  assert.equal(key, "archive/beta/api_logs/2026/beta-api_logs-2026-W23-p001.ndjson");
 });
 
 test("indexObjectKey: the derived index is per table+year, OUTSIDE any locked data prefix", () => {
   assert.equal(
-    indexObjectKey({ prefix: "archive/boost", table: "api_logs", year: 2026 }),
-    "archive/boost/api_logs/_index/api_logs-2026.jsonl",
+    indexObjectKey({ prefix: "archive/beta", table: "api_logs", year: 2026 }),
+    "archive/beta/api_logs/_index/api_logs-2026.jsonl",
   );
 });
 
@@ -536,7 +536,7 @@ test("planPrune: a zero-row week needs no delete but is still marked pruned", ()
 // ── The stored-object half of the prune gate ─────────────────────────────────
 // planPrune only compares the LIVE table against the manifest, which says nothing about whether
 // the stored object is still intact. The object is hash-verified when it is written, but a week is
-// pruned `prune-after-weeks - archive-after-weeks` later (9 weeks apart in Boost's profile), so in
+// pruned `prune-after-weeks - archive-after-weeks` later (9 weeks apart in a client's profile), so in
 // the steady state prune ALWAYS acts on an object last verified many runs ago. These cover the
 // second half: re-read the object at prune time and refuse on any drift.
 
@@ -545,7 +545,7 @@ const MANIFEST = (over: Record<string, unknown> = {}) =>
     week: "2026-W23",
     part: 1,
     rowCount: 40,
-    objectKey: "archive/boost/api_logs/2026/boost-api_logs-2026-W23-p001.ndjson.zst.age",
+    objectKey: "archive/beta/api_logs/2026/beta-api_logs-2026-W23-p001.ndjson.zst.age",
     objectSha256: "a".repeat(64),
     fingerprint: { n: 40, digest: "aaaa000000000000" },
     ...over,
@@ -555,7 +555,7 @@ test("parsePruneManifest: yields the key and hash the gate needs", () => {
   const r = parsePruneManifest(MANIFEST(), 1);
   assert.equal("error" in r, false);
   assert.deepEqual(r, {
-    objectKey: "archive/boost/api_logs/2026/boost-api_logs-2026-W23-p001.ndjson.zst.age",
+    objectKey: "archive/beta/api_logs/2026/beta-api_logs-2026-W23-p001.ndjson.zst.age",
     objectSha256: "a".repeat(64),
   });
 });
@@ -606,7 +606,7 @@ test("parsePruneManifest: a NON-empty week that lost its key still refuses — t
 test("parsePruneManifest: a zero-row week that DID write an object is still verified", () => {
   const r = parsePruneManifest(MANIFEST({ rowCount: 0 }), 1);
   assert.deepEqual(r, {
-    objectKey: "archive/boost/api_logs/2026/boost-api_logs-2026-W23-p001.ndjson.zst.age",
+    objectKey: "archive/beta/api_logs/2026/beta-api_logs-2026-W23-p001.ndjson.zst.age",
     objectSha256: "a".repeat(64),
   });
 });

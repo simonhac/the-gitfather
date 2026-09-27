@@ -19,8 +19,8 @@
 //               If the escrow were wrong, this is where it surfaces, while it is still free.
 //
 // Usage:
-//   npx tsx scripts/roll-r2-token.ts --vault boost-prod --bucket boost-pg-backups \
-//     --account-id <cf-account> [--prefix R2] [--repo boost-suite/boost]
+//   npx tsx scripts/roll-r2-token.ts --vault <project>-prod --bucket <project>-pg-backups \
+//     --account-id <cf-account> [--prefix R2] [--repo <owner>/<repo>]
 //
 // Omit --repo for an operator credential that must never reach CI (a read-only DR token).
 // ─────────────────────────────────────────────────────────────────────────────

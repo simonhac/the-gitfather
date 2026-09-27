@@ -178,9 +178,9 @@ test("backupDue: any published schedule due → dispatch; nothing published → 
 
 test("newestName: the lexical max across prefixes (same stamp format)", () => {
   const items = [
-    { dir: "2hourly", name: "boost-20260920T160000Z.dump" },
-    { dir: "intraday", name: "boost-20260921T000000Z.dump" },
-    { dir: "2hourly", name: "boost-20260920T080000Z.dump" },
+    { dir: "2hourly", name: "beta-20260920T160000Z.dump" },
+    { dir: "intraday", name: "beta-20260921T000000Z.dump" },
+    { dir: "2hourly", name: "beta-20260920T080000Z.dump" },
   ];
   assert.equal(newestName(items, (i) => i.name)?.dir, "intraday");
   assert.equal(newestName([], (i: { name: string }) => i.name), null);

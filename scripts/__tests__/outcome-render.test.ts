@@ -7,7 +7,7 @@ const outcome = (over: Partial<JobOutcome> = {}): JobOutcome => ({
   version: 1,
   source: "job",
   job: "backup",
-  name: "liveone",
+  name: "alpha",
   runId: "17000000001",
   runAttempt: 1,
   jobId: "50000000001",
@@ -25,10 +25,10 @@ const outcome = (over: Partial<JobOutcome> = {}): JobOutcome => ({
 const ctx = renderContext({
   tz: "Australia/Sydney",
   slotMinutes: 480,
-  name: "liveone",
-  dashboardUrl: "https://dash.example/liveone/",
+  name: "alpha",
+  dashboardUrl: "https://dash.example/alpha/",
   alertMention: "<!here>",
-  logUrl: "https://github.com/simonhac/LiveOne/actions/runs/17000000001/job/50000000001",
+  logUrl: "https://github.com/acme/Alpha/actions/runs/17000000001/job/50000000001",
 });
 
 test("jobLogUrl: per-job when the job id is known, else the run page", () => {
@@ -70,10 +70,10 @@ test("renderOutcome: a failed backup pages with the reason in a code span and a 
   assert.equal(r.row?.ok, false);
   assert.equal(
     r.page,
-    "<!here> 🔴 *<https://dash.example/liveone/|liveone DB backup>* FAILED at 18:00 — `credential rejected — PG_BACKUP_DATABASE_URL is stale` · " +
-      "<https://github.com/simonhac/LiveOne/actions/runs/17000000001/job/50000000001|job log>",
+    "<!here> 🔴 *<https://dash.example/alpha/|alpha DB backup>* FAILED at 18:00 — `credential rejected — PG_BACKUP_DATABASE_URL is stale` · " +
+      "<https://github.com/acme/Alpha/actions/runs/17000000001/job/50000000001|job log>",
   );
-  assert.match(r.webhook ?? "", /^🔴 PG backup FAILED \(liveone\): credential rejected/);
+  assert.match(r.webhook ?? "", /^🔴 PG backup FAILED \(alpha\): credential rejected/);
 });
 
 test("renderOutcome: untrusted text cannot mention, link or break out of its code span", () => {
@@ -101,7 +101,7 @@ test("renderOutcome: warnings are quiet (no mention)", () => {
     ctx,
   );
   assert.equal(r.page, undefined);
-  assert.equal(r.warn, "⚠️ *liveone backups* — `R2 key is 400d old`");
+  assert.equal(r.warn, "⚠️ *alpha backups* — `R2 key is 400d old`");
 });
 
 test("renderOutcome: a failed run with no recorded reason still pages", () => {
@@ -111,10 +111,10 @@ test("renderOutcome: a failed run with no recorded reason still pages", () => {
 
 test("renderOutcome: restore-drill OK notice", () => {
   const r = renderOutcome(
-    outcome({ job: "restoreDrill", summary: { kind: "restoreDrill", table: "readings", count: 1200, ratio: 0.99, key: "intraday/liveone-20260927T080030Z.dump" } }),
+    outcome({ job: "restoreDrill", summary: { kind: "restoreDrill", table: "readings", count: 1200, ratio: 0.99, key: "intraday/alpha-20260927T080030Z.dump" } }),
     ctx,
   );
-  assert.equal(r.info, "✅ PG restore-drill OK (liveone) — `readings` 1200 (ratio 0.99) — `intraday/liveone-20260927T080030Z.dump`");
+  assert.equal(r.info, "✅ PG restore-drill OK (alpha) — `readings` 1200 (ratio 0.99) — `intraday/alpha-20260927T080030Z.dump`");
 });
 
 test("renderOutcome: archive — summary when it did work, 🟠 for refusals/anomalies, 🔴 for a crash", () => {
@@ -123,7 +123,7 @@ test("renderOutcome: archive — summary when it did work, 🟠 for refusals/ano
     { table: "idle", weeksArchived: 0, rowsArchived: 0, weeksPruned: 0, rowsPruned: 0 },
   ];
   const ok = renderOutcome(outcome({ job: "archive", durationMs: 12_300, summary: { kind: "archive", dryRun: "none", tables } }), ctx);
-  assert.equal(ok.info, "🗄️ *liveone archive* ok in 12.3s\n`readings`: +2w/500 rows archived, −1w/200 rows pruned");
+  assert.equal(ok.info, "🗄️ *alpha archive* ok in 12.3s\n`readings`: +2w/500 rows archived, −1w/200 rows pruned");
   const dry = renderOutcome(outcome({ job: "archive", summary: { kind: "archive", dryRun: "source", tables } }), ctx);
   assert.equal(dry.info, undefined);
 
@@ -131,7 +131,7 @@ test("renderOutcome: archive — summary when it did work, 🟠 for refusals/ano
     outcome({ job: "archive", ok: false, exitCode: 1, summary: null, alerts: [{ severity: "page", code: "archive_anomaly", text: "week 2026-W30 shrank" }] }),
     ctx,
   );
-  assert.match(attention.page ?? "", /^<!here> 🟠 \*<https:\/\/dash\.example\/liveone\/\|liveone DB backup>\* archive needs attention/);
+  assert.match(attention.page ?? "", /^<!here> 🟠 \*<https:\/\/dash\.example\/alpha\/\|alpha DB backup>\* archive needs attention/);
   const crash = renderOutcome(
     outcome({ job: "archive", ok: false, exitCode: 1, summary: null, alerts: [{ severity: "page", code: "archive_failed", text: "connection reset" }] }),
     ctx,

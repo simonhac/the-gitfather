@@ -12,11 +12,11 @@ import type { DailyState } from "../lib/dailyRow.js";
 import { FakeGithub, FakeSlack, FakeStore } from "./fakes/workerFakes.js";
 
 const NOW = new Date("2026-09-27T08:05:00Z");
-const client: Client = { id: "liveone", owner: "simonhac", repo: "LiveOne", installationId: 1, bucket: "LIVEONE_R2", slack: { channel: "C0TESTCHAN1" } };
+const client: Client = { id: "alpha", owner: "acme", repo: "Alpha", installationId: 1, bucket: "ALPHA_R2", slack: { channel: "C0TESTCHAN1" } };
 const cfg: WatchdogConfig = {
   version: 1,
-  name: "liveone",
-  backupPrefix: "pg/sydney",
+  name: "alpha",
+  backupPrefix: "pg/alpha",
   timezone: "UTC",
   slotMinutes: 480,
   anchorHourUtc: 16,
@@ -36,7 +36,7 @@ const outcome = (over: Partial<JobOutcome> = {}): JobOutcome => ({
   version: 1,
   source: "job",
   job: "backup",
-  name: "liveone",
+  name: "alpha",
   runId: "17000000001",
   runAttempt: 1,
   jobId: "50000000001",
@@ -120,7 +120,7 @@ test("a failed backup ticks ❌ and threads a broadcast page under the row", asy
   assert.equal(page.broadcast, true);
   assert.match(page.text, /^<!here> 🔴 .*FAILED at 08:00 — `credential rejected`/);
   assert.equal(webhooks.length, 1);
-  const day = store.json("_status/liveone/2026-09-27.json") as DailyState;
+  const day = store.json("_status/alpha/2026-09-27.json") as DailyState;
   assert.equal(day.ts, "1000.1");
   assert.equal(day.channel, "C0TESTCHAN1");
 });
@@ -272,7 +272,7 @@ test("no record and GitHub is down: retry (so the job's curl retries)", async ()
 
 // ── the daily row ────────────────────────────────────────────────────────────
 
-const rowTarget = { stateName: "liveone", ctx: displayContext({ tz: "UTC", slotMinutes: 480, name: "liveone", dashboardUrl: null }) };
+const rowTarget = { stateName: "alpha", ctx: displayContext({ tz: "UTC", slotMinutes: 480, name: "alpha", dashboardUrl: null }) };
 
 test("row: the first backup posts it, later ones update it in place", async () => {
   const { store, slack } = setup();
@@ -283,7 +283,7 @@ test("row: the first backup posts it, later ones update it in place", async () =
     ["post", "update"],
   );
   assert.match(slack!.calls[1].text, /✅ 00:00 {2}· {2}🖐️ ❌ 08:00/);
-  const s = store.json("_status/liveone/2026-09-27.json") as DailyState;
+  const s = store.json("_status/alpha/2026-09-27.json") as DailyState;
   assert.equal(s.entries.length, 2);
   assert.equal(s.text, slack!.calls[1].text);
   assert.equal(s.entries[1].manual, undefined, "the legacy field is no longer written");
@@ -311,7 +311,7 @@ test("row: a refresh never creates an empty row", async () => {
 test("row: a row another app posted (cutover day) is re-posted, then updated as ours", async () => {
   const { store, slack } = setup();
   const legacy: DailyState = { channel: "C0TESTCHAN1", ts: "999.1", date: "2026-09-27", header: "", entries: [{ label: "00:00", ok: true, marker: "", manual: false }] };
-  store.seed("_status/liveone/2026-09-27.json", JSON.stringify(legacy));
+  store.seed("_status/alpha/2026-09-27.json", JSON.stringify(legacy));
   slack!.foreign.add("999.1");
   await upsertDailyRow(store, slack!, rowTarget, { day: NOW, now: NOW, entry: { label: "08:00", ok: true, marker: "", origin: "schedule" } });
   assert.deepEqual(
@@ -319,7 +319,7 @@ test("row: a row another app posted (cutover day) is re-posted, then updated as 
     ["update", "post"],
   );
   assert.match(slack!.calls[1].text, /✅ 00:00 {2}· {2}✅ 08:00/, "the legacy entry carries over");
-  assert.equal((store.json("_status/liveone/2026-09-27.json") as DailyState).ts, "1000.1");
+  assert.equal((store.json("_status/alpha/2026-09-27.json") as DailyState).ts, "1000.1");
 });
 
 test("row: the roster moved the client to another channel → a new row there", async () => {
@@ -329,13 +329,13 @@ test("row: the roster moved the client to another channel → a new row there", 
   const after = new FakeSlack("C0NEWCHANNEL");
   await upsertDailyRow(store, after, rowTarget, { day: NOW, now: NOW, entry: { label: "08:00", ok: true, marker: "", origin: "schedule" } });
   assert.deepEqual(after.calls.map((c) => c.kind), ["post"]);
-  assert.equal((store.json("_status/liveone/2026-09-27.json") as DailyState).channel, "C0NEWCHANNEL");
+  assert.equal((store.json("_status/alpha/2026-09-27.json") as DailyState).channel, "C0NEWCHANNEL");
 });
 
 test("row: a write that races another re-reads and keeps both entries", async () => {
   const { store, slack } = setup();
   await upsertDailyRow(store, slack!, rowTarget, { day: NOW, now: NOW, entry: { label: "00:00", ok: true, marker: "", origin: "schedule" } });
-  const key = "_status/liveone/2026-09-27.json";
+  const key = "_status/alpha/2026-09-27.json";
   let raced = false;
   store.beforePut = (k) => {
     if (k !== key || raced) return;
@@ -355,7 +355,7 @@ test("row: a backup that finishes after midnight ticks the day it started", asyn
   const { deps, put, store } = setup({ now: new Date("2026-09-28T00:01:00Z") });
   put(outcome({ startedAt: "2026-09-27T23:55:00.000Z", runId: "9" }));
   await notifyRun(deps, target({ runId: "9", iatMs: new Date("2026-09-28T00:01:00Z").getTime() }));
-  const s = store.json("_status/liveone/2026-09-27.json") as DailyState;
+  const s = store.json("_status/alpha/2026-09-27.json") as DailyState;
   assert.equal(s.entries[0].label, "23:55");
   assert.match(s.header, /Sun 27 Sep 2026/);
 });
@@ -370,13 +370,13 @@ test("slackPortFor: posts carry the roster identity; updates can't, and don't tr
     return new Response(JSON.stringify({ ok: true, ts: "1.2" }));
   }) as typeof fetch;
   try {
-    const port = slackPortFor("xoxb-test", { ...client, slack: { channel: "C0TESTCHAN1", username: "liveone backup", iconEmoji: ":zap:" } })!;
+    const port = slackPortFor("xoxb-test", { ...client, slack: { channel: "C0TESTCHAN1", username: "alpha backup", iconEmoji: ":zap:" } })!;
     await port.post("hi", { thread: "1.1", broadcast: true });
     await port.update("1.2", "hi again");
   } finally {
     globalThis.fetch = realFetch;
   }
-  assert.equal(bodies[0].username, "liveone backup");
+  assert.equal(bodies[0].username, "alpha backup");
   assert.equal(bodies[0].icon_emoji, ":zap:");
   assert.equal(bodies[0].thread_ts, "1.1");
   assert.equal(bodies[0].channel, "C0TESTCHAN1");

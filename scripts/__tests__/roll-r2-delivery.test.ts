@@ -25,12 +25,12 @@ const KEYID = "0123456789abcdef0123456789abcdef";
 function runRotation(): { status: number | null; stdout: string; stderr: string; rcloneLog: string } {
   const state = mkdtempSync(join(tmpdir(), "roll-delivery-"));
   const profile = join(state, "p.yaml");
-  writeFileSync(profile, "name: boost\n");
+  writeFileSync(profile, "name: beta\n");
   mkdirSync(join(state, "op"), { recursive: true });
 
   const r = spawnSync(
     process.execPath,
-    ["--import", "tsx", CLI, "--vault", "v", "--bucket", "boost-pg-backups", "--account-id", "acc123", "--repo", "o/r"],
+    ["--import", "tsx", CLI, "--vault", "v", "--bucket", "beta-pg-backups", "--account-id", "acc123", "--repo", "o/r"],
     {
       encoding: "utf8",
       // Blank third line = derive the secret from the token value.
@@ -65,7 +65,7 @@ test("the run-log call receives the verified credential, from a shell that has n
   const logCalls = rcloneLog.split("\n").filter((l) => l.includes("_log/"));
   assert.ok(logCalls.length > 0, `the run-log was never written to:\n${rcloneLog}`);
   for (const call of logCalls) {
-    assert.match(call, /R2_BUCKET=boost-pg-backups/, "the logger got the bucket");
+    assert.match(call, /R2_BUCKET=beta-pg-backups/, "the logger got the bucket");
     assert.match(call, new RegExp(`KEYID=${KEYID}`), "the logger got the credential");
   }
 });

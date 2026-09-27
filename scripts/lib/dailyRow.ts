@@ -116,7 +116,7 @@ export function failAlertTextIn(what: string, reason: string, logUrl: string, ct
 }
 
 /**
- * The day-message header for `now`, e.g. `*<url|boost DB backup> — Sun 22 Jun 2026 (AEST)*`. Recomputed
+ * The day-message header for `now`, e.g. `*<url|acme DB backup> — Sun 22 Jun 2026 (AEST)*`. Recomputed
  * on every persist (not just first creation), so adding `dashboard.url` relinks the existing day's message.
  */
 export function dailyHeaderIn(now: Date, ctx: RowContext): string {

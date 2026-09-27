@@ -49,8 +49,8 @@ test("reports TRUE and writes the record when the environment is set", () => {
     // against a directory instead of R2. Everything but the endpoint is the production code path.
     const dir = mkdtempSync(join(tmpdir(), "runlog-cred-"));
     const profile = join(dir, "p.yaml");
-    writeFileSync(profile, "name: boost\n");
-    mkdirSync(join(dir, "_log", "boost"), { recursive: true }); // rclone lsf errors on a missing local dir
+    writeFileSync(profile, "name: beta\n");
+    mkdirSync(join(dir, "_log", "beta"), { recursive: true }); // rclone lsf errors on a missing local dir
     process.env.PROFILE = profile;
     process.env.R2_BUCKET = dir;
     process.env.RUNLOG_RCLONE_REMOTE = "local";
@@ -58,7 +58,7 @@ test("reports TRUE and writes the record when the environment is set", () => {
 
     try {
       assert.equal(appendCredential(rec), true);
-      const f = join(dir, "_log", "boost", "credentials-2026-09.jsonl");
+      const f = join(dir, "_log", "beta", "credentials-2026-09.jsonl");
       assert.ok(existsSync(f), "the record landed in credentials-<YYYY-MM>.jsonl");
       assert.deepEqual(JSON.parse(readFileSync(f, "utf8").trim()), rec, "byte-for-byte what was passed in");
     } finally {

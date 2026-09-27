@@ -38,17 +38,17 @@ test("opFieldNames match the env-var names the workflows read", () => {
 });
 
 test("parseRollArgs: --repo is optional, everything else is required", () => {
-  const base = ["--vault", "boost-prod", "--bucket", "boost-pg-backups", "--account-id", "acc123"];
+  const base = ["--vault", "beta-prod", "--bucket", "beta-pg-backups", "--account-id", "acc123"];
   assert.deepEqual(parseRollArgs(base), {
-    vault: "boost-prod",
-    bucket: "boost-pg-backups",
+    vault: "beta-prod",
+    bucket: "beta-pg-backups",
     accountId: "acc123",
     prefix: "R2",
     repo: null,
     item: "backup",
     dryRun: false,
   });
-  assert.equal(parseRollArgs([...base, "--repo", "boost-suite/boost"]).repo, "boost-suite/boost");
+  assert.equal(parseRollArgs([...base, "--repo", "beta-org/beta"]).repo, "beta-org/beta");
   assert.equal(parseRollArgs([...base, "--prefix", "R2_READONLY"]).prefix, "R2_READONLY");
   assert.equal(parseRollArgs([...base, "--dry-run"]).dryRun, true);
   // The destination note defaults to `backup` — the item every client vault now keeps its
@@ -66,10 +66,10 @@ test("parseRollArgs: --repo is optional, everything else is required", () => {
 test("runlogEnv builds the environment the run-log needs from the verified credential", () => {
   // Construction only. Delivery — that the CLI actually hands this to the logger — is
   // roll-r2-delivery.test.ts; this test alone would stay green if the result were discarded.
-  const env = runlogEnv({ bucket: "boost-pg-backups", accountId: "acc123" }, "KEYID", "SECRET");
+  const env = runlogEnv({ bucket: "beta-pg-backups", accountId: "acc123" }, "KEYID", "SECRET");
   assert.deepEqual(env, {
     RUNLOG_RCLONE_REMOTE: "r2",
-    R2_BUCKET: "boost-pg-backups",
+    R2_BUCKET: "beta-pg-backups",
     RCLONE_CONFIG_R2_TYPE: "s3",
     RCLONE_CONFIG_R2_PROVIDER: "Cloudflare",
     RCLONE_CONFIG_R2_ACCESS_KEY_ID: "KEYID",

@@ -54,7 +54,7 @@ const NOT_A_VERDICT: ReadonlySet<WatchdogOutcome> = new Set<WatchdogOutcome>(["e
  *
  * Not "the Worker woke up": `scheduled()` runs perfectly happily with an invalid ROSTER, revoked
  * GitHub App auth, or a watchdog throwing on every client. A heartbeat that pings on mere
- * invocation would stay green through all three — the same trap as liveone's collector, where a
+ * invocation would stay green through all three — the same trap as a consumer's collector, where a
  * run-completed ping would have stayed green while every store failed.
  *
  * `expected` is passed separately rather than derived from `watchdog` so that a client silently

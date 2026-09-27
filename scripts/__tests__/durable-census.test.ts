@@ -6,7 +6,7 @@ import { DEFAULT_RETENTION, type LogRun, type RetentionMap } from "../lib/backup
 const NOW = Date.parse("2026-09-10T00:00:00Z");
 const DAY = 86_400_000;
 
-// Boost's live windows (the profile overrides the engine defaults for monthly).
+// A client's live windows (the profile overrides the engine defaults for monthly).
 const RETENTION: RetentionMap = {
   ...DEFAULT_RETENTION,
   monthly: { days: 365, label: "12 months" },
@@ -15,7 +15,7 @@ const RETENTION: RetentionMap = {
 const run = (o: Partial<LogRun> & { ts: string; tiers: LogRun["tiers"] }): LogRun => ({
   ok: true,
   bytes: 1,
-  key: `intraday/boost-${o.ts.replace(/[-:]/g, "")}.dump`,
+  key: `intraday/beta-${o.ts.replace(/[-:]/g, "")}.dump`,
   sha256: null,
   counts: null,
   runId: null,
@@ -29,8 +29,8 @@ const run = (o: Partial<LogRun> & { ts: string; tiers: LogRun["tiers"] }): LogRu
 test("expectedDurableKeys: a promotion inside its window is expected, in EVERY durable tier", () => {
   const runs = [run({ ts: "2026-09-06T16:00:51Z", tiers: ["intraday", "daily", "weekly"] })];
   assert.deepEqual(expectedDurableKeys(runs, RETENTION, NOW), [
-    "daily/boost-20260906T160051Z.dump",
-    "weekly/boost-20260906T160051Z.dump",
+    "daily/beta-20260906T160051Z.dump",
+    "weekly/beta-20260906T160051Z.dump",
   ]);
 });
 
@@ -67,19 +67,19 @@ test("expectedDurableKeys: BOTH generations are expected across an encryption sw
     run({
       ts: "2026-09-09T16:01:23Z",
       tiers: ["intraday", "daily"],
-      key: "intraday/boost-20260909T160123Z.dump.age",
+      key: "intraday/beta-20260909T160123Z.dump.age",
     }),
   ];
   assert.deepEqual(expectedDurableKeys(runs, RETENTION, NOW), [
-    "daily/boost-20260908T160122Z.dump",
-    "daily/boost-20260909T160123Z.dump.age",
+    "daily/beta-20260908T160122Z.dump",
+    "daily/beta-20260909T160123Z.dump.age",
   ]);
 });
 
 test("expectedDurableKeys: duplicates collapse and the result is stable-sorted", () => {
   const r = run({ ts: "2026-09-09T16:01:23Z", tiers: ["daily", "daily", "monthly"] });
   assert.deepEqual(expectedDurableKeys([r, r], RETENTION, NOW), [
-    "daily/boost-20260909T160123Z.dump",
-    "monthly/boost-20260909T160123Z.dump",
+    "daily/beta-20260909T160123Z.dump",
+    "monthly/beta-20260909T160123Z.dump",
   ]);
 });
