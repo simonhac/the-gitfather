@@ -112,6 +112,57 @@ When `--repo` is supplied, `PROFILE` names the run-log for the rotation record. 
 escrow and publication remain complete and the tool reports a warning. Without `--repo`, the tool
 escrows the credential but neither publishes it nor records its rotation.
 
+### Doing it, start to finish
+
+The tool is only the second half. The half before it happens in the Cloudflare dashboard, and it is
+the half with no undo.
+
+**1. Roll the token in Cloudflare.** R2 → **API tokens** → the existing CI token → **Roll**. Roll it;
+do not create a new one. A roll reissues the *value* and keeps the token's id and its permissions,
+so nothing else has to be re-scoped — whereas a new token means re-checking that it is **Object Read
+& Write**, limited to the one bucket, and then remembering to delete the old one. (A brand-new token
+is the right move only when you are replacing a *differently* scoped one.)
+
+Cloudflare then shows the three values [described below](#the-three-values-cloudflare-shows-you),
+once. **Leave that page open until step 3 reports success.** The old credential is already dead at
+this point: every backup between here and a completed publish will fail.
+
+**2. `--dry-run` first.** It runs the mate and connect checks and writes nothing anywhere, so a
+mis-paste costs a retype rather than a broken escrow:
+
+```bash
+PROFILE=… npm run roll-r2 -- --vault <vault> --bucket <bucket> --account-id <cf-account> --dry-run
+```
+
+**3. Run it for real** — same command without `--dry-run`, plus `--repo owner/name`. It prompts for
+three values, input hidden:
+
+| prompt | paste |
+|---|---|
+| `Token value` | the token value |
+| `Access Key ID` | the token's id |
+| `Secret Access Key (blank = derive it)` | the secret — **or leave it blank** and the tool computes `SHA-256(token value)` itself |
+
+Leaving the third blank is not a shortcut, it is a different trade: you skip the mate check (there
+is nothing independent left to compare against) in exchange for removing the chance of pasting the
+secret of a *different* token. Paste it when you have it.
+
+`--account-id` is the Cloudflare account id — the same value as the `R2_ACCOUNT_ID` secret. You
+cannot read that back out of GitHub, so take it from the escrow item in 1Password, or from the R2
+endpoint URL `https://<account-id>.r2.cloudflarestorage.com`.
+
+**4. Prove it landed.** The tool asserts the GitHub `updatedAt` timestamps moved, but that only says
+*something* was written:
+
+```bash
+gh secret list --repo <owner/name> | grep R2_     # both should show today
+gh workflow run pg-backup.yml --repo <owner/name> -f reason=manual
+```
+
+A manual backup is the cheap proof: it lands in the `2hourly` tier only, which expires in 2 days, so
+a bad roll costs nothing and you learn within minutes instead of at the next anchor. The rotation
+record shows up in the following `verify-durable` run as `credential R2: rotated 0d ago`.
+
 It does the checks in the order that fails cheapest, and writes nothing until they pass:
 
 | | |
@@ -137,16 +188,47 @@ holding no secret — the key-id tail is four characters). That record is the on
 rotation happened: a GitHub secret cannot be read back, and listing repository secrets needs a token
 more privileged than the job that would do the checking.
 
-From it, two read-outs — configure with `credential-rotation:` in the profile:
+From it, two read-outs:
 
 - **daily**, in `verify-durable`: one line per tracked credential, and a Slack note when any is
   overdue. Never a failure — an ageing token cannot corrupt a backup.
 - **on demand**: `npm run doctor -- verify-durable`, as an optional ⚠ check.
 
+**This is ON by default — `credential-rotation:` tunes it, it does not enable it.** `track` defaults
+to `["R2"]` and `max-age-days` to 365, so a profile with no `credential-rotation:` block at all is
+still age-checking its R2 credential. That is deliberate (a check nobody opted into is the only kind
+that catches the deployment nobody is looking after), but it does mean the first sign of it is
+usually a Slack line on a profile whose author never configured anything. Set `max-age-days: 0` to
+turn it off.
+
 The rule that makes it worth running: **absence is not health**. A tracked credential with no
 recorded rotation reports `unknown`, and `unknown` is grouped with `due`, not with `ok` — otherwise
 the check would be loudest about the credentials someone is already looking after and silent about
 the one that has sat untouched since the day it was minted.
+
+#### `never recorded` — read this before you re-roll
+
+```
+credential rotation: R2: never recorded — rotate it with roll-r2-token.ts so its age is known
+```
+
+That line means **no rotation record exists**, which is not the same as **no rotation happened**.
+Two quite different situations produce it, and only one of them wants a roll:
+
+| | what happened | what to do |
+|---|---|---|
+| **Never rolled through the tool** | the token was minted by hand, or pre-dates `roll-r2-token.ts` | roll it — you also gain the escrow, which is the bigger win |
+| **Rolled, but the record did not land** | escrow and publish succeeded; the run-log append failed (R2 unreachable, `PROFILE` unset, a missing profile `name`) and the tool warned | **do not re-roll.** The credential is fine. Re-rolling to fix bookkeeping destroys a working credential to quiet a log line |
+
+Tell them apart before acting: `gh secret list --repo <owner/name> | grep R2_` shows when the
+secrets were last *written*. A recent timestamp with no record is the second row. It is not proof —
+setting a secret to the same value also moves the timestamp — but a timestamp from years ago is
+good evidence of the first.
+
+The record is a plain JSONL line in the credential's own bucket
+(`_log/<name>/credentials-YYYY-MM.jsonl`), so the second row can also be closed by appending one by
+hand rather than rotating. Recording is best-effort by design: a logging hiccup must never fail the
+rotation it is describing, which is exactly why this state exists at all.
 
 ### The three values Cloudflare shows you
 

@@ -15,10 +15,13 @@ keys). Credentials are **never** in it — they come from the environment (GitHu
 - **`verify-durable:`** — `fresh`, `aged`, `retest-days`, `max-restores`
 - **`archive:`** *(optional — see [Archiving a table out of Postgres](archiving.md))* — `store-prefix`, `encryption` (`none`|`age`), `compression` (`zstd`|`gzip`|`none`), `compression-level`, and `tables:` — a list of `{ table, time-column, archive-after-weeks, prune-after-weeks, delete-batch-rows, max-weeks-per-run }`
 - **`staleness:`** — `slot-minutes`, `grace-minutes`, `max-age-hours` (unset → derived from the cadence), `repage-minutes`, `heal-workflow`, `self-heal`, `dry-run`. Consumed by the [Worker's watchdog](../scheduler/README.md): the backup publishes the validated block to `_config/<name>/watchdog.json` on every run
-- **`credential-rotation:`** — `max-age-days` (default `365`; 0 disables) and `track:` — the credential prefixes to
-  watch, matching the ENV names (`R2_ACCESS_KEY_ID` → `R2`). A tracked prefix with no recorded
-  rotation reports `unknown`, which is grouped with `due`. See
-  [Knowing when a rotation is overdue](r2-setup.md#knowing-when-a-rotation-is-overdue)
+- **`credential-rotation:`** — `max-age-days` (default `365`; 0 disables) and `track:` (default
+  `["R2"]`) — the credential prefixes to watch, matching the ENV names (`R2_ACCESS_KEY_ID` → `R2`).
+  **Both have defaults, so omitting the block leaves the check ON**, age-checking R2. A tracked
+  prefix with no recorded rotation reports `unknown`, which is grouped with `due` — and `unknown`
+  does *not* mean the credential was never rotated, only that no record of it exists. See
+  [Knowing when a rotation is overdue](r2-setup.md#knowing-when-a-rotation-is-overdue) and
+  [`never recorded`](r2-setup.md#never-recorded--read-this-before-you-re-roll)
 - **`slack:`** — `channel` (or the env `SLACK_CHANNEL`, which wins), `alert-mention`  ·  **`dashboard:`** — `label`, `hide-run-links`, `url`, `path-prefix`
 
 All have safe defaults — see **[Verifying backups and restoring for real](verify-and-restore.md)**.
