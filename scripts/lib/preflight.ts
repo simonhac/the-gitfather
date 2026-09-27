@@ -2,13 +2,14 @@
 // Read-only client probes for `doctor` — "is this consumer actually wired up?".
 //
 // Each probe answers one question about an EXTERNAL dependency (a binary, the R2
-// bucket, a Postgres endpoint, Slack, gh) and returns a {name, ok, detail} verdict.
-// Everything here is strictly read-only: `rclone lsf`, `psql 'select 1'`, Slack
-// `auth.test`, `--version`. No dump, no upload, no workflow trigger,
-// no Slack post — doctor must be safe to run against production creds.
+// bucket, a Postgres endpoint) and returns a {name, ok, detail} verdict.
+// Everything here is strictly read-only: `rclone lsf`, `psql 'select 1'`, `--version`.
+// No dump, no upload, no workflow trigger — doctor must be safe to run against production creds.
+// (Slack is not probed: jobs hold no Slack token. The scheduler Worker owns the only one, and its
+// /health reports whether Slack is accepting it.)
 //
 // Built on commandExists()/capture() from proc.ts (capture never throws and bounds its
-// output). Network probes fail FAST (short rclone/psql/fetch timeouts) so a wrong host
+// output). Network probes fail FAST (short rclone/psql timeouts) so a wrong host
 // reports "unreachable" instead of hanging the preflight.
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -94,27 +95,3 @@ export function checkPostgres(url: string, label: string): ProbeResult {
     conn.cleanup();
   }
 }
-
-/** Slack token is valid (auth.test). Read-only — posts nothing. */
-export async function checkSlack(token: string, channel: string): Promise<ProbeResult> {
-  const name = "Slack (auth.test)";
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 15_000);
-  try {
-    const res = await fetch("https://slack.com/api/auth.test", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/x-www-form-urlencoded" },
-      signal: controller.signal,
-    });
-    const body = (await res.json()) as { ok?: boolean; error?: string; team?: string };
-    if (body.ok) {
-      return { name, ok: true, detail: `authorized${body.team ? ` (team ${body.team})` : ""}, channel ${channel}` };
-    }
-    return { name, ok: false, detail: `auth.test failed: ${body.error ?? "unknown error"}` };
-  } catch (e) {
-    return { name, ok: false, detail: `request failed: ${(e as Error).message}` };
-  } finally {
-    clearTimeout(timer);
-  }
-}
-

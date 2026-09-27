@@ -16,13 +16,14 @@ Five reusable workflows, each with a thin caller here. `pg-backup` and `pg-dashb
 `pg-durable-verify` is strongly recommended (and supersedes `pg-restore-drill`); `pg-archive` is
 optional. There is **no staleness caller**: the watchdog runs inside the
 [Cloudflare Worker](../scheduler/README.md), which reads the `staleness:` block your backup publishes
-to the bucket — so a repo with no Actions minutes left is still watched. The `# see "Job-log link"` comments below refer to
-[Slack, the failure webhook, and the dead-man's-switch → Job-log link](slack-and-alerting.md#job-log-link).
+to the bucket — so a repo with no Actions minutes left is still watched. The `id-token: write` grant and
+`notify_url` below are how each job tells that Worker it finished — see
+[How a run reaches Slack](slack-and-alerting.md#how-a-run-reaches-slack).
 
 > **Secrets must be passed explicitly.** This repo is **public and owned by `simonhac`**, so for any
 > consumer in a *different* account/org, GitHub's `secrets: inherit` shortcut **does not work** (it
 > only passes secrets to reusable workflows in the *same* org/enterprise). The examples below therefore
-> pass each secret explicitly and thread the non-secret deployment identifiers (R2 bucket, Slack channel) as
+> pass each secret explicitly and thread the non-secret deployment identifiers (R2 bucket, notify URL) as
 > inputs — this works from any owner. All project *config* lives in the committed `profiles/*.yaml`. If your repo is in the same org as this one, you may use `secrets: inherit`.
 
 `pg-backup.yml`:
@@ -41,21 +42,19 @@ on:
 concurrency: { group: pg-backup, cancel-in-progress: false }
 jobs:
   backup:
-    permissions: { contents: read, actions: read }   # optional — precise job-log link in failure alerts; see "Job-log link"
+    permissions: { contents: read, id-token: write }   # id-token lets the job tell the scheduler it finished — no stored secret
     uses: simonhac/the-gitfather/.github/workflows/pg-backup.yml@main
     with:
       profile: pg-backup/myproject.yaml
       r2_bucket: ${{ vars.R2_BUCKET }}
-      slack_channel: ${{ vars.SLACK_CHANNEL }}
+      notify_url: ${{ vars.GITFATHER_NOTIFY_URL }}
       trigger: ${{ github.event_name == 'schedule' && 'schedule' || github.event.inputs.reason }}
     secrets:
       PG_BACKUP_DATABASE_URL: ${{ secrets.PG_BACKUP_DATABASE_URL }}
       R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
       R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}   # optional
       HEARTBEAT_URL: ${{ secrets.HEARTBEAT_URL }}       # optional
-      ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}   # optional failure webhook (no-bot fallback / redundant channel)
 ```
 
 `pg-restore-drill.yml`:
@@ -69,19 +68,17 @@ on:
 concurrency: { group: pg-restore-drill, cancel-in-progress: false }
 jobs:
   drill:
-    permissions: { contents: read, actions: read }   # optional — precise job-log link in failure alerts; see "Job-log link"
+    permissions: { contents: read, id-token: write }   # id-token lets the job tell the scheduler it finished — no stored secret
     uses: simonhac/the-gitfather/.github/workflows/pg-restore-drill.yml@main
     with:
       profile: pg-backup/myproject.yaml
       r2_bucket: ${{ vars.R2_BUCKET }}
-      slack_channel: ${{ vars.SLACK_CHANNEL }}
+      notify_url: ${{ vars.GITFATHER_NOTIFY_URL }}
     secrets:
       PG_BACKUP_DATABASE_URL: ${{ secrets.PG_BACKUP_DATABASE_URL }}
       R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
       R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}   # optional
-      ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}   # optional failure webhook
 ```
 
 `pg-durable-verify.yml` (runs **daily**) — guarantees *every* durable file is integrity-tested, not just
@@ -102,20 +99,18 @@ on:
 concurrency: { group: pg-durable-verify, cancel-in-progress: false }
 jobs:
   verify:
-    permissions: { contents: read, actions: read }   # optional — precise job-log link in failure alerts; see "Job-log link"
+    permissions: { contents: read, id-token: write }   # id-token lets the job tell the scheduler it finished — no stored secret
     uses: simonhac/the-gitfather/.github/workflows/pg-durable-verify.yml@main
     with:
       profile: pg-backup/myproject.yaml
       r2_bucket: ${{ vars.R2_BUCKET }}
-      slack_channel: ${{ vars.SLACK_CHANNEL }}
+      notify_url: ${{ vars.GITFATHER_NOTIFY_URL }}
     secrets:
       PG_BACKUP_DATABASE_URL: ${{ secrets.PG_BACKUP_DATABASE_URL }}
       R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
       R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}   # optional
       AGE_IDENTITY: ${{ secrets.AGE_IDENTITY }}   # only if backups are .age-encrypted
-      ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}   # optional failure webhook
       VERIFY_HEARTBEAT_URL: ${{ secrets.VERIFY_HEARTBEAT_URL }}   # optional push switch; omit it here and setting the secret does nothing
 ```
 
@@ -162,12 +157,12 @@ on:
 concurrency: { group: pg-archive, cancel-in-progress: false }
 jobs:
   archive:
-    permissions: { contents: read, actions: read }   # optional — precise job-log link; see "Job-log link"
+    permissions: { contents: read, id-token: write }   # id-token lets the job tell the scheduler it finished — no stored secret
     uses: simonhac/the-gitfather/.github/workflows/pg-archive.yml@main
     with:
       profile: pg-backup/myproject.yaml
       r2_bucket: ${{ vars.R2_BUCKET }}
-      slack_channel: ${{ vars.SLACK_CHANNEL }}
+      notify_url: ${{ vars.GITFATHER_NOTIFY_URL }}
       mode: ${{ inputs.mode || 'both' }}
       table: ${{ inputs.table || '' }}
       max_weeks: ${{ inputs.max_weeks || '' }}
@@ -180,8 +175,6 @@ jobs:
       R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       AGE_ARCHIVE_RECIPIENT: ${{ secrets.AGE_ARCHIVE_RECIPIENT }}   # only if archive.encryption: age
-      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}   # optional
-      ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}   # optional failure webhook
 ```
 
 > **Give every input a default.** The Cloudflare scheduler dispatches `archive` with **no inputs at
@@ -203,11 +196,9 @@ The caller reads these and passes them in (explicit `secrets:` + `with:` inputs,
 | secret | `R2_ACCOUNT_ID` | Cloudflare account id |
 | secret | `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | scoped R2 S3 token (Object Read & Write, **no delete**) |
 | **variable** | `R2_BUCKET` | private dump bucket name |
-| secret | `SLACK_BOT_TOKEN` | (optional) `xoxb-…`, scope `chat:write` |
-| **variable** | `SLACK_CHANNEL` | (optional) channel id `C…` — the non-secret id paired with the bot token. May instead live in the profile as `slack.channel`; the variable wins when both are set |
+| **variable** | `GITFATHER_NOTIFY_URL` | the scheduler's `/notify` URL, passed as `notify_url` — each job's last step POSTs it (authenticated by the run's OIDC token, so no secret) to get its run into Slack within seconds. Unset, the scheduler's reconcile tick still posts the run within ~10 min |
 | secret | `HEARTBEAT_URL` | (optional) dead-man's-switch ping URL — the backup |
 | secret | `VERIFY_HEARTBEAT_URL` | (optional) push dead-man's-switch for durable-verify — pinged only on a clean verify. The scheduler's `/health/jobs` already covers this with no secret (see [slack-and-alerting.md](slack-and-alerting.md#job-proofs-one-monitor-for-every-job)) |
-| secret | `ALERT_WEBHOOK_URL` | (optional) generic **failure** webhook (Slack-compatible `{"text":…}` POST) — a no-bot alert fallback, or a redundant failure channel into a host app's existing incoming webhook when the bot is also set |
 | secret | `AGE_RECIPIENT` / `AGE_IDENTITY` | (optional) only when `encryption: age` |
 | secret | `PG_ARCHIVE_DATABASE_URL` | (archive) the same DB, kept separate because this is the only task that **deletes** |
 | secret | `AGE_ARCHIVE_RECIPIENT` | (archive) age **public** recipient. Its identity stays OFFLINE — never a repo secret |

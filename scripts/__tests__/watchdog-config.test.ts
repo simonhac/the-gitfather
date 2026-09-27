@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { backupSchema, resolvedSlackChannel } from "../lib/config.js";
+import { backupSchema } from "../lib/config.js";
 import { parseWatchdogConfig, watchdogConfigFrom, watchdogConfigKey, WATCHDOG_CONFIG_VERSION } from "../lib/watchdogConfig.js";
 
 // The object the backup publishes for the Worker's watchdog: built from a validated profile, then
@@ -17,7 +17,7 @@ const NOW = new Date(Date.UTC(2026, 8, 10, 3, 0, 0));
 
 test("watchdog config: a validated profile round-trips through publish → parse with defaults applied", () => {
   const cfg = backupSchema.parse(base);
-  const published = watchdogConfigFrom(cfg, NOW, resolvedSlackChannel(cfg));
+  const published = watchdogConfigFrom(cfg, NOW);
   assert.equal(published.version, WATCHDOG_CONFIG_VERSION);
   assert.equal(published.name, "example");
   assert.equal(published.backupPrefix, "pg/example");
@@ -31,7 +31,6 @@ test("watchdog config: a validated profile round-trips through publish → parse
   assert.equal(published.selfHeal, true);
   assert.equal(published.dryRun, false);
   assert.equal(published.healWorkflow, "pg-backup.yml");
-  assert.equal(published.slackChannel, null); // no channel anywhere → Slack off for the watchdog
   assert.equal(published.alertMention, "<!here>");
   assert.equal(published.dashboardUrl, null);
   assert.equal(published.archives, false, "no archive tables → owes no archive proof");
@@ -41,23 +40,27 @@ test("watchdog config: a validated profile round-trips through publish → parse
   assert.deepEqual(parsed, published);
 });
 
-test("watchdog config: the Slack channel comes from env SLACK_CHANNEL first, else the profile's slack.channel", () => {
-  const fromProfile = backupSchema.parse({ ...base, slack: { channel: "C111" } });
-  assert.equal(resolvedSlackChannel(fromProfile), "C111");
-  const fromEnv = backupSchema.parse({ ...base, slack: { channel: "C111" }, credentials: { ...base.credentials, slackChannel: "C222" } });
-  assert.equal(resolvedSlackChannel(fromEnv), "C222");
-  assert.equal(watchdogConfigFrom(fromEnv, NOW, resolvedSlackChannel(fromEnv)).slackChannel, "C222");
+test("watchdog config: no Slack channel is published — the channel lives in the scheduler's roster", () => {
+  const published = watchdogConfigFrom(backupSchema.parse(base), NOW);
+  assert.ok(!("slackChannel" in published));
+  // A copy published by an older engine still carries one; the parser ignores it rather than refusing.
+  const legacy = parseWatchdogConfig(JSON.stringify({ ...published, slackChannel: "C111" }));
+  assert.ok(legacy);
+  assert.ok(!("slackChannel" in legacy));
 });
 
-test("watchdog config: a bot token needs a channel from EITHER source", () => {
-  const creds = { ...base.credentials, slackToken: "xoxb-1" };
-  assert.ok(!backupSchema.safeParse({ ...base, credentials: creds }).success);
-  assert.ok(backupSchema.safeParse({ ...base, credentials: creds, slack: { channel: "C111" } }).success);
-  assert.ok(backupSchema.safeParse({ ...base, credentials: { ...creds, slackChannel: "C222" } }).success);
+test("watchdog config: alert-mention is published as-is when safe, and reads back as the default when not", () => {
+  const pinged = watchdogConfigFrom(backupSchema.parse({ ...base, slack: { alertMention: "<!subteam^S0123ABCD>" } }), NOW);
+  assert.equal(pinged.alertMention, "<!subteam^S0123ABCD>");
+  assert.equal(parseWatchdogConfig(JSON.stringify(pinged))?.alertMention, "<!subteam^S0123ABCD>");
+  // Anyone holding the bucket key can rewrite the published copy, so the Worker never trusts it.
+  for (const bad of ["<!everyone>", "<https://evil.example|click>", "@here", "<!here> hi"]) {
+    assert.equal(parseWatchdogConfig(JSON.stringify({ ...pinged, alertMention: bad }))?.alertMention, "<!here>", bad);
+  }
 });
 
 test("watchdog config: the parser refuses anything the watchdog cannot run on (→ no-config, never a guess)", () => {
-  const good = watchdogConfigFrom(backupSchema.parse(base), NOW, "");
+  const good = watchdogConfigFrom(backupSchema.parse(base), NOW);
   const mutate = (patch: Record<string, unknown>) => parseWatchdogConfig(JSON.stringify({ ...good, ...patch }));
   assert.equal(parseWatchdogConfig(""), null);
   assert.equal(parseWatchdogConfig("{not json"), null);
@@ -81,7 +84,7 @@ test("watchdog config: the parser refuses anything the watchdog cannot run on (�
 });
 
 test("watchdog config: the cadence and anchor ride along; a pre-anchor config defaults to 16", () => {
-  const daily = watchdogConfigFrom(backupSchema.parse({ ...base, backupsPerDay: 1, anchorHourUtc: 5 }), NOW, "");
+  const daily = watchdogConfigFrom(backupSchema.parse({ ...base, backupsPerDay: 1, anchorHourUtc: 5 }), NOW);
   assert.equal(daily.slotMinutes, 1440);
   assert.equal(daily.anchorHourUtc, 5);
   assert.equal(parseWatchdogConfig(JSON.stringify(daily))?.anchorHourUtc, 5);
@@ -99,7 +102,7 @@ test("watchdog config: `archives` says whether this database owes an archive pro
     ...base,
     archive: { storePrefix: "archive/example", tables: [{ table: "public.api_logs", timeColumn: "created_at" }] },
   });
-  const published = watchdogConfigFrom(archiving, NOW, "");
+  const published = watchdogConfigFrom(archiving, NOW);
   assert.equal(published.archives, true);
   assert.equal(parseWatchdogConfig(JSON.stringify(published))?.archives, true);
 

@@ -133,3 +133,16 @@ test("verifyHeartbeatUrl is unset-means-off", () => {
   const creds = withEnv({ VERIFY_HEARTBEAT_URL: undefined }, () => credentialsFromEnv());
   assert.equal(creds.verifyHeartbeatUrl, undefined);
 });
+
+// ─── Slack is not a job credential any more (2026-09-27) ──────────────────────────────────────
+
+test("credentialsFromEnv ignores the retired Slack / webhook env vars", () => {
+  // The scheduler Worker holds the only Slack token (and the failure webhook). A job that still
+  // receives these — an old caller workflow — must neither read them nor trip the strict schema.
+  const creds = withEnv(
+    { SLACK_BOT_TOKEN: "xoxb-old", SLACK_CHANNEL: "C0123456789", ALERT_WEBHOOK_URL: "https://hooks.example.com/x" },
+    () => credentialsFromEnv(),
+  );
+  const leaked = JSON.stringify(creds);
+  for (const v of ["xoxb-old", "C0123456789", "hooks.example.com"]) assert.ok(!leaked.includes(v), `${v} must not be read`);
+});

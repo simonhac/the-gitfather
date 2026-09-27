@@ -45,7 +45,9 @@ import "./lib/bootEnv.js"; // MUST be first — loads $PROFILE before backupType
 //   PG_ARCHIVE_DATABASE_URL   the only task that DELETES; kept separate from the dump's URL
 //   AGE_ARCHIVE_RECIPIENT     age public recipient (archive.encryption: age)
 //   R2_ACCOUNT_ID / R2_BUCKET / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY   (unless --target=local:)
-// Optional: SLACK_BOT_TOKEN / SLACK_CHANNEL / ALERT_WEBHOOK_URL.
+//
+// Nothing here talks to Slack. A failure, each refusal and anomaly, and the per-table counts go into
+// the run's OUTCOME record (lib/outcomeRecorder.ts), which the scheduler Worker posts.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { parseArgs } from "node:util";
@@ -56,9 +58,9 @@ import { archiveSchema, reportConfigError, type ArchiveConfig } from "./lib/conf
 import { buildRawProfile } from "./lib/profile.js";
 import { run, commandExists, bestEffort, sha256File } from "./lib/proc.js";
 import { PgArchive } from "./lib/pgArchive.js";
-import { githubLogUrl } from "./lib/github.js";
 import { appendArchive } from "./runlog.js";
-import { slackEnabled, slackPost, alertWebhook, failAlertText } from "./lib/slack.js";
+import { startOutcome } from "./lib/outcomeRecorder.js";
+import { outcomeAlert } from "./lib/outcomeSink.js";
 import {
   parseWeekLabel,
   eligibleWeeks,
@@ -132,6 +134,9 @@ const warn = (msg: string): void => void process.stderr.write(`${msg}\n`);
 
 function fail(msg: string): never {
   warn(`✗ ${msg}`);
+  // Into the run's outcome record. Straight to the sink rather than through main()'s recorder, since
+  // this runs outside main() too (its .catch) — rec.alert is the same call.
+  outcomeAlert("page", "archive_failed", msg);
   process.exit(1);
 }
 
@@ -664,6 +669,8 @@ async function processTable(ctx: {
 // ── main ─────────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
+  // FIRST, before the arguments or the config are read, so a failure in either is recorded too.
+  const rec = startOutcome("archive");
   let args;
   try {
     args = parseArgs({
@@ -683,6 +690,7 @@ async function main(): Promise<void> {
   }
 
   if (args.help) {
+    rec.suppress("--help");
     log("usage: archive-table.ts [--mode archive|prune|both] [--table T] [--max-weeks N]");
     log("       [--target r2|local:<dir>] [--dry-run none|source|store] [--rebuild-index]");
     return;
@@ -699,6 +707,11 @@ async function main(): Promise<void> {
     fail((e as Error).message);
   }
   const guards = guardsFor(dryRun);
+  // The same rule as the run-log append below, for the same reasons: --dry-run=store promises to leave
+  // the store untouched, and a --target=local: rehearsal has no business announcing itself.
+  if (!guards.mayWriteStore || target.kind !== "r2") {
+    rec.suppress(target.kind !== "r2" ? "--target=local: rehearsal" : "--dry-run=store leaves the store untouched");
+  }
 
   const parsed = archiveSchema({ toR2: target.kind === "r2" }).safeParse(buildRawProfile());
   if (!parsed.success) {
@@ -706,6 +719,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   const cfg = parsed.data;
+  rec.setName(cfg.name!);
 
   for (const bin of ["psql", ...(cfg.archive.compression === "zstd" ? ["zstd"] : [])].concat(
     cfg.archive.encryption === "age" ? ["age"] : [],
@@ -807,43 +821,35 @@ async function main(): Promise<void> {
   if (keepWork) log(`\n--dry-run=store: artifacts left in ${workDir}`);
 
   const durationMs = Date.now() - SCRIPT_START_MS;
-  const label = `${cfg.name} archive`;
+
+  // What the scheduler announces: the per-table counts (its 🗄️ summary — it decides whether a run did
+  // enough to be worth one) and, below, a page for a failure or for each refusal and anomaly. Set before
+  // the exits, so a run that fails part-way still says what it did get done.
+  rec.summary({
+    kind: "archive",
+    dryRun,
+    tables: results.map((r) => ({
+      table: r.table,
+      weeksArchived: r.archived,
+      rowsArchived: r.rowsArchived,
+      weeksPruned: r.pruned,
+      rowsPruned: r.rowsPruned,
+    })),
+  });
 
   if (failure) {
     warn(`\n✗ ${failure.message}`);
-    if (slackEnabled()) {
-      const logUrl = await githubLogUrl();
-      await bestEffort("slack fail alert", () =>
-        slackPost(`${cfg.slack.alertMention || "<!here>"} ${failAlertText(`${label} FAILED`, failure!.message, logUrl)}`, {
-          broadcast: true,
-        }),
-      );
-    }
-    await bestEffort("alert webhook", () => alertWebhook(`🔴 ${label} FAILED — ${failure!.message}`));
+    rec.alert("page", "archive_failed", failure.message);
     process.exit(1);
   }
 
   if (refusals.length || anomalies.length) {
     // Neither is a crash — the rows are all still there — but both mean a human needs to look,
     // so they page rather than sitting quietly in a log nobody reads.
-    const lines = [...refusals, ...anomalies].map((m) => `• ${m}`).join("\n");
     warn(`\n⚠ ${refusals.length} refusal(s), ${anomalies.length} anomaly(ies)`);
-    if (slackEnabled()) {
-      await bestEffort("slack anomaly alert", () =>
-        slackPost(`${cfg.slack.alertMention || "<!here>"} 🟠 *${label}* needs attention:\n${lines}`, {
-          broadcast: true,
-        }),
-      );
-    }
-    await bestEffort("alert webhook", () => alertWebhook(`🟠 ${label} needs attention:\n${lines}`));
+    for (const m of refusals) rec.alert("page", "archive_refusal", m);
+    for (const m of anomalies) rec.alert("page", "archive_anomaly", m);
     process.exit(1);
-  }
-
-  if (slackEnabled() && dryRun === "none" && results.some((r) => r.archived || r.pruned)) {
-    const summary = results
-      .map((r) => `${r.table}: +${r.archived}w/${r.rowsArchived} rows archived, −${r.pruned}w/${r.rowsPruned} rows pruned`)
-      .join("\n");
-    await bestEffort("slack summary", () => slackPost(`🗄️ *${label}* ok in ${(durationMs / 1000).toFixed(1)}s\n${summary}`));
   }
 
   // The job proof (CB-299) — `_health/<name>/archive.json`, read by the scheduler's /health/jobs

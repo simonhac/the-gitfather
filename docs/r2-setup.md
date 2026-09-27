@@ -51,6 +51,8 @@ npx wrangler r2 bucket lifecycle add <your-bucket> expire-monthly <prefix>/month
 npx wrangler r2 bucket lifecycle add <your-bucket> abort-mpu      <prefix>/         --abort-multipart-days 1
 npx wrangler r2 bucket lifecycle add <your-bucket> expire-status  _status/          --expire-days 14
 npx wrangler r2 bucket lifecycle add <your-bucket> expire-log     _log/             --expire-days 760
+# _status/ also holds each run's outcome record (_status/_outcome/), which the scheduler Worker reads to
+# post to Slack. The same 14-day rule expires them; no extra rule is needed.
 # _config/ (the watchdog config the backup publishes for the Worker) and _health/ (the job proofs
 # verify and archive publish for /health/jobs) are overwritten every run and must NOT be locked or
 # expired — like _status/, they are control-plane state, not backups.
@@ -75,6 +77,21 @@ change lock/lifecycle config — it is the only R2 credential CI gets.
 
 For the dashboard, create a **separate public** bucket and a **write-only** token for it (the dump
 bucket gains no web surface).
+
+### `_status/_outcome/` — what the jobs leave for Slack
+
+Every CI run of backup, durable-verify, restore-drill and archive writes one small JSON **outcome
+record** to `_status/_outcome/<YYYYMMDDTHHMMSSZ>_<runId>_<attempt>_<job>_<name>.json` as it exits.
+It uses the same CI token; local runs write none. The [scheduler Worker](../scheduler/README.md)
+reads these records through its R2 binding and is the only thing that posts to Slack
+([how](slack-and-alerting.md#how-a-run-reaches-slack)). The Worker records its delivery state **on
+each record, as R2 custom metadata**: `gf-state` (`claimed`, `posted`, `invalid`, `rejected`,
+`gave_up`), `gf-at`, `gf-tries`, and `gf-error`. It rewrites the object in place to do so, with a
+compare-and-swap on its etag. So `_status/_outcome/` must stay **unlocked**, like the rest of
+`_status/`. A record holds the run's status, its summary and its alert reasons, the same kind of
+text the run-log keeps. A config failure names only the failing fields. The existing 14-day
+`expire-status` rule expires the records. `rclone lsjson -M r2:<bucket>/_status/_outcome/`
+shows each record with its delivery state.
 
 ---
 

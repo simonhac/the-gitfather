@@ -8,7 +8,7 @@
 //
 // Node-free on purpose: the watchdog now runs inside the Cloudflare Worker (scheduler/src/watchdog.ts)
 // and bundles this file, so the decision the Worker makes is the decision the tests here pin down.
-// The R2 persistence for the Actions-side scripts lives next door in alert-state.ts.
+// The Worker is also the only thing that persists the episode, through its R2 binding.
 //
 // Failure direction is deliberate: anything unreadable, unparseable or ambiguous resolves to PAGE.
 // An extra page is a nuisance; a swallowed one is the thing this whole system exists to prevent.

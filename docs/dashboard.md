@@ -74,9 +74,12 @@ A profile with no `archive:` block renders exactly the page it did before.
 
 ## Linking Slack to the published page
 
-Set **`dashboard.url`** in the profile to hyperlink the "`<basename> DB backup`" title — in the daily
-Slack header **and in every failure alert** — to the published page. The public hostname isn't derivable from the bucket name — fetch it once, as
-described in [setting-up-gitfather.md §3d](setting-up-gitfather.md#3d-public-dashboard--profile--secrets):
+Set **`dashboard.url`** in the profile to hyperlink the "`<basename> DB backup`" title to the
+published page, both in the daily Slack header **and in every failure alert**. Slack is posted by
+the scheduler Worker, which reads the URL from the backup's published `_config/<name>/watchdog.json`.
+So an edit lands with the next backup run, and the URL must be plain `https://`, or the title renders
+unlinked. The public hostname isn't derivable from the bucket name. Fetch it once, as described in
+[setting-up-gitfather.md §3d](setting-up-gitfather.md#3d-public-dashboard--profile--secrets):
 
 ```bash
 npx wrangler r2 bucket dev-url get <DASHBOARD_R2_BUCKET>   # managed r2.dev URL

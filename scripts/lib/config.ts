@@ -21,6 +21,9 @@ import { parseDuration, type Duration } from "./duration.js";
 import { DEFAULT_BACKUPS_PER_DAY, DEFAULT_RETENTION, slotMinutesFrom, type RetentionMap } from "./backupTypes.js";
 import { DEFAULT_ANCHOR_HOUR_UTC } from "./schedule.js";
 import { buildRawProfile } from "./profile.js";
+import { isOutcomeName } from "./jobOutcome.js";
+import { DEFAULT_MENTION, isSafeMention } from "./slackText.js";
+import { outcomeAlert } from "./outcomeSink.js";
 
 // ── Reusable grammars ────────────────────────────────────────────────────────
 
@@ -281,11 +284,15 @@ const archiveGroup = z
 
 const slackGroup = z
   .object({
-    // The channel id is NOT secret, so it may live here in the profile (the Worker's watchdog reads it
-    // from the published watchdog config). The env SLACK_CHANNEL (a GitHub Variable) still wins when
-    // set — see resolvedSlackChannel() — so existing consumers need not move it.
-    channel: opt(nonEmpty()),
-    alertMention: strDefault("<!here>"),
+    // The mention the scheduler Worker prepends to a page — the only Slack setting a profile owns.
+    // The channel and the bot's identity live in the scheduler's roster, next to the one Slack token.
+    // Held to a small grammar (slackText.ts) because it is the one piece of profile text the Worker
+    // posts unescaped; the Worker re-checks the published copy, but a typo should fail here rather
+    // than quietly read as the default.
+    alertMention: strDefault(DEFAULT_MENTION).refine(
+      isSafeMention,
+      "must be <!here>, <!channel>, a user <@U…>/<@W…> or a user group <!subteam^S…> — up to 4, separated by single spaces",
+    ),
   })
   .strict().prefault({} as never);
 
@@ -347,15 +354,12 @@ const credentialsGroup = z
         archiveIdentity: opt(nonEmpty()),
       })
       .strict().prefault({} as never),
-    slackToken: opt(nonEmpty()), // SLACK_BOT_TOKEN (secret)
-    slackChannel: opt(nonEmpty()), // SLACK_CHANNEL (non-secret id, paired with the token; a GitHub Variable)
     heartbeatUrl: opt(z.url()), // HEARTBEAT_URL — pinged by the BACKUP on success
     // VERIFY_HEARTBEAT_URL — pinged by DURABLE-VERIFY on a clean verify. Deliberately a separate
     // name from HEARTBEAT_URL: the two guard different failures (a backup not landing vs a backup
     // that lands but will not restore), they have different cadences, and one caller workflow can
     // see both. A shared name would let a green backup silence a broken restore.
     verifyHeartbeatUrl: opt(z.url()), // VERIFY_HEARTBEAT_URL
-    alertWebhookUrl: opt(z.url()), // ALERT_WEBHOOK_URL
   })
   .strict().prefault({} as never);
 
@@ -364,7 +368,9 @@ const credentialsGroup = z
 export const profileSchema = z.object({
   // required by every real task (see requireNameAndPrefix), optional at the profile level so the
   // dashboard --sample path (which needs neither) still validates with an empty profile.
-  name: opt(nonEmpty()),
+  // A plain [A-Za-z0-9._-] name: it keys object names, the outcome record the scheduler announces
+  // (lib/jobOutcome.ts), and the Slack header — a name outside that would silently record nothing.
+  name: opt(nonEmpty().refine(isOutcomeName, "must be a plain name: letters, digits, '.', '_' or '-' (max 64), starting with a letter or digit")),
   backupPrefix: opt(nonEmpty()),
   timezone,
   encryption: z.enum(ENCRYPTIONS).default("none"),
@@ -427,19 +433,9 @@ function requireR2(v: Profile, ctx: Ctx): void {
   if (!r.accessKeyId) miss(ctx, ["credentials", "r2", "accessKeyId"], "must be set");
   if (!r.secretAccessKey) miss(ctx, ["credentials", "r2", "secretAccessKey"], "must be set");
 }
-/** The Slack channel to post in: env SLACK_CHANNEL when set, else the profile's `slack.channel`, else "". */
-export const resolvedSlackChannel = (p: Profile): string => p.credentials.slackChannel || p.slack.channel || "";
-
-function requireSlackChannel(v: Profile, ctx: Ctx): void {
-  if (v.credentials.slackToken && !resolvedSlackChannel(v)) {
-    miss(ctx, ["credentials", "slackChannel"], "required when the Slack bot token (SLACK_BOT_TOKEN) is set (env SLACK_CHANNEL or profile slack.channel)");
-  }
-}
-
 export const backupSchema = profileSchema
   .superRefine(requireNameAndPrefix)
   .superRefine(requireR2)
-  .superRefine(requireSlackChannel)
   // The backup publishes the staleness block to the Worker's watchdog (lib/watchdogConfig.ts), so the
   // slot/grace/backstop relationships are validated HERE, before anything is published.
   .superRefine(requireValidStalenessSlot)
@@ -482,7 +478,6 @@ function requireRestoreTarget(v: Profile, ctx: Ctx): void {
 function requireDrillCreds(v: Profile, ctx: Ctx): void {
   requireNameAndPrefix(v, ctx);
   requireR2(v, ctx);
-  requireSlackChannel(v, ctx);
   requireRestoreTarget(v, ctx);
   if (v.encryption === "age" && !v.credentials.age.identity) {
     miss(ctx, ["credentials", "age", "identity"], "required when encryption=age (needed to decrypt .age objects)");
@@ -503,7 +498,6 @@ function requireDrillCreds(v: Profile, ctx: Ctx): void {
 function requireVerifyDurableCreds(v: Profile, ctx: Ctx): void {
   requireNameAndPrefix(v, ctx);
   requireR2(v, ctx);
-  requireSlackChannel(v, ctx);
   if (!v.verifyDurable.keyless) {
     requireRestoreTarget(v, ctx);
     if (v.encryption === "age" && !v.credentials.age.identity) {
@@ -529,14 +523,10 @@ export const verifyDurableSchema = profileSchema.superRefine(requireVerifyDurabl
 
 /**
  * The MANUAL drill (drill-object.ts) — someone proving by hand that a named stored object still
- * opens with the escrowed identity. Its requirements differ from the CI drill's in two ways that
- * both matter:
- *
- *   - no `PG_LIVE_DATABASE_URL`. Its default gate is `nonempty`, because a durable copy is usually
- *     weeks old and a ratio against a live table that has moved on means nothing. Requiring it
- *     anyway would hand production database credentials to a laptop for no gain.
- *   - no Slack channel. A human is watching the terminal; paging a channel about a drill someone
- *     is running on purpose is noise.
+ * opens with the escrowed identity. Its requirements differ from the CI drill's in one way that
+ * matters: no `PG_LIVE_DATABASE_URL`. Its default gate is `nonempty`, because a durable copy is
+ * usually weeks old and a ratio against a live table that has moved on means nothing. Requiring it
+ * anyway would hand production database credentials to a laptop for no gain.
  *
  * The identity is checked at the call site instead of here, because it is only needed for a `.age`
  * object and the key is not known until the argument is parsed.
@@ -597,7 +587,6 @@ function requireValidStalenessSlot(v: Profile, ctx: Ctx): void {
 export function archiveSchema(opts: { toR2?: boolean; writesArchives?: boolean } = {}) {
   const writes = opts.writesArchives !== false;
   return profileSchema
-    .superRefine(requireSlackChannel)
     .superRefine((v, ctx) => {
       if (!v.name) miss(ctx, ["name"], "must be set");
       if (!v.archive.storePrefix) miss(ctx, ["archive", "storePrefix"], "must be set");
@@ -726,11 +715,8 @@ const CRED_ENV: Record<string, string> = {
   "credentials.age.identity": "AGE_IDENTITY",
   "credentials.age.archiveRecipient": "AGE_ARCHIVE_RECIPIENT",
   "credentials.age.archiveIdentity": "AGE_ARCHIVE_IDENTITY",
-  "credentials.slackToken": "SLACK_BOT_TOKEN",
-  "credentials.slackChannel": "SLACK_CHANNEL",
   "credentials.heartbeatUrl": "HEARTBEAT_URL",
   "credentials.verifyHeartbeatUrl": "VERIFY_HEARTBEAT_URL",
-  "credentials.alertWebhookUrl": "ALERT_WEBHOOK_URL",
 };
 
 function displayPath(path: readonly (string | number | symbol)[]): string {
@@ -741,10 +727,17 @@ function displayPath(path: readonly (string | number | symbol)[]): string {
 
 export function reportConfigError(err: z.ZodError): void {
   process.stderr.write("✗ config validation failed:\n\n");
+  const fields: string[] = [];
   for (const issue of err.issues) {
-    process.stderr.write(`  ✗ ${displayPath(issue.path) || "(profile root)"} — ${issue.message}\n`);
+    const field = displayPath(issue.path) || "(profile root)";
+    if (!fields.includes(field)) fields.push(field);
+    process.stderr.write(`  ✗ ${field} — ${issue.message}\n`);
   }
   process.stderr.write("\nFix the field(s) above in your profile (YAML) or environment, then re-run.\n");
+  // The run's outcome record (lib/outcomeRecorder.ts) — so a config crash is announced as one rather
+  // than as a bare exit 1. Field NAMES only, never an issue message: a message can quote the value
+  // (expect-recipient's does), and this text leaves the job.
+  outcomeAlert("page", "config_invalid", `config validation failed: ${fields.join(", ")}`);
 }
 
 /**
@@ -771,7 +764,7 @@ export const loadDashboardConfig = (opts?: { fromR2?: boolean; upload?: boolean 
   loadConfig(dashboardSchema(opts));
 export const loadArchiveConfig = (opts?: { toR2?: boolean }): ArchiveConfig => loadConfig(archiveSchema(opts));
 
-// ── Validated singleton (for the libs that read config globally: slack.ts / runlog.ts / logStore.ts) ──
+// ── Validated singleton (for the libs that read config globally: runlog.ts / logStore.ts) ──
 // Validated with the loose-cred profileSchema (creds optional — those libs null-guard, and a task's
 // load*Config already enforced the creds it needs by the time these run).
 
@@ -785,10 +778,10 @@ export function getProfile(): Profile {
 }
 
 /**
- * Tolerant peer of getProfile() for BEST-EFFORT readers (slack.ts, backup's config-failure path):
- * returns the cached profile, else a loose-schema safeParse (which passes even when a task's required
- * *credential* is missing — those are optional here), else null. NEVER exits — so a Slack ❌ can still
- * be posted when a task-level config error has already been detected. Caches a successful parse.
+ * Tolerant peer of getProfile() for BEST-EFFORT readers (the outcome recorder, backup's config-failure
+ * path): returns the cached profile, else a loose-schema safeParse (which passes even when a task's
+ * required *credential* is missing — those are optional here), else null. NEVER exits — so a run can
+ * still be recorded when a task-level config error has already been detected. Caches a successful parse.
  */
 export function peekProfile(): Profile | null {
   if (cached) return cached;

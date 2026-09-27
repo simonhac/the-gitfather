@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { decideAlert, advanceAlertState, parseAlertState, type AlertState } from "../lib/alert-state.js";
+import { decideAlert, advanceAlertState, parseAlertState, type AlertState } from "../lib/alertDecision.js";
 import { formatElapsed } from "../lib/duration.js";
 
 const T0 = Date.UTC(2026, 7, 4, 16, 0, 0); // the first failed slot of the incident this fixes

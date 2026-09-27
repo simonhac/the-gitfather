@@ -39,12 +39,13 @@ their-repo                          the-gitfather (engine, public)
    `.context/gitfather-secrets.env` (§4).
 4. **Clone this engine repo, `npm ci`, and run `doctor`** against that profile (§5) — `npm run doctor`
    lives *here*, not in their repo.
-5. **Move credentials into GitHub Secrets** (and `R2_BUCKET` / `DASHBOARD_R2_BUCKET` / `SLACK_CHANNEL`
-   into **Variables**), then **add the caller workflows** ([wiring-a-consuming-repo.md](wiring-a-consuming-repo.md)),
-   pointing `profile:` at the new file. The callers carry no `schedule:` cron — the
-   [Cloudflare Worker](../scheduler/README.md) dispatches them and runs the staleness watchdog, so the
-   client must also be added to the Worker's roster (with an R2 binding to its bucket). Pushing
-   workflow files needs a token with the **`workflow`** scope.
+5. **Move credentials into GitHub Secrets** (and `R2_BUCKET` / `DASHBOARD_R2_BUCKET` /
+   `GITFATHER_NOTIFY_URL` into **Variables**), then **add the caller workflows**
+   ([wiring-a-consuming-repo.md](wiring-a-consuming-repo.md)), pointing `profile:` at the new file.
+   The callers carry no `schedule:` cron. The [Cloudflare Worker](../scheduler/README.md) dispatches
+   them, runs the staleness watchdog, and is the only thing that posts to Slack. So the client must
+   also be added to the Worker's roster, with an R2 binding to its bucket and a `slack` block naming
+   its channel. Pushing workflow files needs a token with the **`workflow`** scope.
 6. **Prove it:** trigger `pg-backup` via `workflow_dispatch` and confirm an object lands in R2.
 
 **Three things `doctor` cannot catch — a green checklist is *not* a proven backup:**
@@ -69,7 +70,7 @@ There are **two kinds of input**, and they live in **two different files**:
 | Kind | What | Where it goes | Committed? |
 |---|---|---|---|
 | **Config** | project choices (prefix, basename, schedule, thresholds, tz…) | `pg-backup/<name>.yaml` (in the consuming repo) | ✅ yes — checked into the consuming repo |
-| **Credentials** | DB URLs, R2 keys, Slack token… | environment / GitHub Secrets; locally a **gitignored** file under `.context/` | ❌ **never** committed |
+| **Credentials** | DB URLs, R2 keys, age keys… | environment / GitHub Secrets; locally a **gitignored** file under `.context/` | ❌ **never** committed |
 
 Your job is to produce three things, in order:
 
@@ -113,7 +114,7 @@ column is what you tell a user who doesn't already know the value.
 | Variable | Meaning | How to get it |
 |---|---|---|
 | `backup-prefix` | object-key prefix in R2, e.g. `pg/myapp` | user's choice; convention is `pg/<project>` |
-| `name` | names dump files + Slack message + log paths, e.g. `myapp` | user's choice; short slug |
+| `name` | names dump files + Slack message + log paths, e.g. `myapp` | user's choice; a short slug of letters, digits, `.`, `_` and `-`, starting with a letter or digit. It is part of each run's outcome-record key, so a name outside that set leaves runs that can't be announced |
 
 ### 2b. Database (→ secrets)
 
@@ -177,16 +178,26 @@ Everything here has a safe default or is feature-gated. Ask, but offer the defau
 | `AGE_RECIPIENT` | — | **required when `encryption: age`** (public key, `age1…`); used to encrypt |
 | `AGE_IDENTITY` | — | private key; used by the drill + durable-verify to decrypt (and by the backup only when `integrity.verify-after-upload`). NOT needed to take a backup, and not needed by `integrity.verify-before-encrypt` |
 
-### 3c. Slack status row (→ profile + secrets)
+### 3c. Slack status row (→ profile + one variable; the channel lives on the Worker)
+
+The jobs hold **no Slack credentials**. Each run writes an outcome record to the bucket, and the
+scheduler Worker posts it, using its one the-gitfather Slack app, to the channel in this client's
+**roster** entry ([slack-and-alerting.md](slack-and-alerting.md#how-a-run-reaches-slack)). So the
+channel, the bot's display name and icon, and the failure webhook are **operator** settings on the
+Worker ([Appendix A](#slack-the-gitfather-app-operator-only)), not profile keys or repo secrets. Ask
+the user for these and record them for the roster step (§6):
+- which channel (its ID, `C…`);
+- what name to post under (default `<id> backup`) and which icon;
+- whether they want a failure webhook.
+
+A `slack.channel` left in a profile now **fails validation**.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `SLACK_BOT_TOKEN` | (unset → Slack off) | `xoxb-…`, scope `chat:write` (secret, env) |
-| `SLACK_CHANNEL` / `slack.channel` | — | channel id `C…` (non-secret — either the env Variable or the profile key; env wins). **Required if `SLACK_BOT_TOKEN` is set** (else the row silently never posts). The Worker's watchdog posts to the same channel |
-| `slack.alert-mention` | `<!here>` | prepended to failure alerts (`<!here>` / `<!channel>`) — profile |
+| `slack.alert-mention` | `<!here>` | prepended to **pages** only (profile). One to four space-separated tokens from `<!here>`, `<!channel>`, a user `<@U…>`, a user group `<!subteam^S…>`. Anything else fails validation |
 | `timezone` | `UTC` | IANA tz for the daily row's date + HH:MM labels (e.g. `Australia/Perth`) |
-| `dashboard.url` | (unset) | if set, hyperlinks the Slack header's "`<basename> DB backup`" text to the dashboard. See note below on how to obtain it. |
-| `ALERT_WEBHOOK_URL` | (unset) | optional **failure** webhook (secret), independent of the bot — a Slack-compatible `{"text":…}` POST on backup/drill failure. A no-bot alert fallback, or a redundant failure channel into a host app's existing incoming webhook. Fires on failure only (no success spam). The watchdog's copy is a Worker secret (`ALERT_WEBHOOK_URL_<ID>`). |
+| `dashboard.url` | (unset) | if set, hyperlinks the Slack header's "`<basename> DB backup`" text to the dashboard. It must be an `https://` URL, or the Worker drops the link. See the note below on how to obtain it. |
+| `GITFATHER_NOTIFY_URL` | (unset → posts arrive up to ~10 min late) | a repo **Variable**: the Worker's `/notify` URL, which every caller passes as `notify_url`. With it, and the callers' `id-token: write`, a run is in Slack within seconds. Without it, the Worker's Slack tick still posts every run. Get it from the operator: `https://<worker-host>/notify` |
 
 ### 3d. Public dashboard (→ profile + secrets)
 
@@ -329,11 +340,7 @@ R2_SECRET_ACCESS_KEY="…"
 # drill (if used):
 DRILL_DATABASE_URL="postgres://…"
 PG_LIVE_DATABASE_URL="postgres://…"
-# slack (optional — TOKEN is the secret, CHANNEL is the paired non-secret id; both env):
-SLACK_BOT_TOKEN="xoxb-…"
-SLACK_CHANNEL="C…"
-# failure webhook (optional, independent of the bot):
-ALERT_WEBHOOK_URL="https://hooks.slack.com/services/…"
+# (no Slack values: the jobs hold none — Slack is configured on the scheduler Worker)
 # dashboard upload (optional):
 DASHBOARD_R2_BUCKET="…"
 DASHBOARD_R2_ACCESS_KEY_ID="…"
@@ -343,19 +350,22 @@ PG_ARCHIVE_DATABASE_URL="postgres://…"
 AGE_ARCHIVE_RECIPIENT="age1…"        # public key only; its identity stays OFFLINE
 ```
 
-> `R2_BUCKET`, `DASHBOARD_R2_BUCKET`, and `SLACK_CHANNEL` are stored as GitHub **Variables** (not Secrets)
-> in CI — they're the non-secret identifiers paired with the R2/Slack credentials; the DB URLs and
-> `*_ACCESS_KEY*`/token values are **Secrets**. For the *local* doctor run the env values all go in this
-> one file, and `PROFILE` points at the YAML for the rest.
+> `R2_BUCKET`, `DASHBOARD_R2_BUCKET` and `GITFATHER_NOTIFY_URL` are stored as GitHub **Variables** (not
+> Secrets) in CI. They are non-secret identifiers: the bucket names pair with the R2 credentials, and
+> the notify URL needs no credential because each run authenticates with its own OIDC token. The DB
+> URLs and `*_ACCESS_KEY*` values are **Secrets**. For the *local* doctor run the env values all go
+> in this one file (the notify URL isn't needed locally), and `PROFILE` points at the YAML for the
+> rest.
 
 ---
 
 ## 5. Run doctor and interpret the result
 
 `doctor` runs the **same** zod schema each task uses, then read-only client probes (R2 list,
-Postgres connect, Slack `auth.test`, `gh` auth, binary + pg-client-version checks). It is strictly
-read-only — no dump, no upload, no workflow trigger, no Slack post — so it's safe against production
-credentials.
+Postgres connect, `gh` auth, binary + pg-client-version checks). It is strictly read-only: no dump,
+no upload, no workflow trigger, no Slack post. That makes it safe against production credentials.
+It doesn't check Slack, because the jobs hold no Slack token. The scheduler Worker's `/health`
+reports whether Slack accepts the Worker's token.
 
 > **Where doctor runs.** `npm run doctor` is a script of *this* (engine) repo, not the consuming repo.
 > Run it from a checkout of the-gitfather, with `$PROFILE` pointed at the consuming repo's profile and
@@ -419,20 +429,57 @@ September 2026; if a UI label has moved, search the provider's docs rather than 
   "Getting `dashboard.url`" note in §3d for the permission prompt. It's also visible in the bucket's
   **Settings → Public Access** (R2.dev subdomain / Custom Domains) if the user prefers to read it off.
 
-### Slack (bot token, channel id)
+### Slack (the-gitfather app, operator only)
 
-- **`SLACK_BOT_TOKEN`** — `api.slack.com/apps` → **Create New App** → **From scratch** → pick the
-  workspace. Then **OAuth & Permissions** (left sidebar) → **Scopes → Bot Token Scopes** → add
-  **`chat:write`** → **Install to Workspace** → authorize → copy the **Bot User OAuth Token**
-  (starts with `xoxb-`). **Then invite the bot to the target channel** (`/invite @YourBot`) — it
-  can't post to a channel it isn't in.
-- **`SLACK_CHANNEL`** — open the channel in Slack → click the channel name to open details → scroll
-  to the bottom for the **Channel ID** (`C…`). (Or right-click the channel → **Copy link**; the ID
-  is the last path segment.)
-- **`ALERT_WEBHOOK_URL`** (optional, independent of the bot) — an **incoming webhook** URL. In Slack:
-  `api.slack.com/apps` → your app → **Incoming Webhooks** → enable → **Add New Webhook to Workspace**
-  → pick a channel → copy the `https://hooks.slack.com/services/…` URL. Any service that accepts a
-  `{"text":…}` POST works too — e.g. a host app's existing incoming-webhook endpoint.
+Slack is configured **once, on the scheduler Worker**, not in the consuming repo. No repo holds a
+Slack token, so there's no `SLACK_BOT_TOKEN`, `SLACK_CHANNEL` or `ALERT_WEBHOOK_URL` to set. If the
+operator's Worker already has the app, skip to step 4.
+
+1. **Create the app from a manifest.** Go to `api.slack.com/apps` → **Create New App** → **From a
+   manifest**, pick the workspace, and paste:
+   ```yaml
+   display_information:
+     name: the-gitfather
+   features:
+     bot_user:
+       display_name: the-gitfather
+       always_online: false
+   oauth_config:
+     scopes:
+       bot:
+         - chat:write            # post, and edit its own daily row
+         - chat:write.customize  # post under each client's roster username / icon
+   settings:
+     org_deploy_enabled: false
+     socket_mode_enabled: false
+     token_rotation_enabled: false   # the Worker holds a static token; a rotating one expires in 12 h
+   ```
+2. **Install to Workspace** and authorize. Then open **OAuth & Permissions** and copy the **Bot User
+   OAuth Token** (`xoxb-…`).
+3. **Store it on the Worker, and only there:** `cd scheduler && npx wrangler secret put SLACK_BOT_TOKEN`.
+   Don't put it in a repo secret or a local env file.
+4. **Invite the app to the client's channel** (`/invite @the-gitfather`). It can't post to a channel
+   it isn't in, and `/health` won't tell you, because it only checks the token.
+5. **The channel ID.** Open the channel, click its name, and the **Channel ID** (`C…`) is at the
+   bottom of the details. (Or right-click the channel → **Copy link**; the ID is the last path
+   segment.)
+6. **The roster.** Add a `slack` block to the client's entry in the Worker's `wrangler.jsonc` (in the
+   operator's infra repo), for example
+   `"slack": { "channel": "C…", "username": "<id> backup", "iconEmoji": ":floppy_disk:" }`.
+   `username` and one of `iconEmoji` / `iconUrl` are optional. Then deploy. See the
+   [scheduler README → `ROSTER`](../scheduler/README.md#roster-in-wranglerjsonc--vars).
+
+Two per-client values go with it:
+
+- **`GITFATHER_NOTIFY_URL`** (a Variable in each consuming repo): the Worker's `/notify` URL, e.g.
+  `https://gitfather-scheduler.<subdomain>.workers.dev/notify`. It isn't secret, because each run
+  authenticates with its own OIDC token. It lives in a Variable so the public engine never names the
+  Worker's host.
+- **The failure webhook** (optional): an incoming-webhook URL (in Slack, an app's **Incoming
+  Webhooks** page → **Add New Webhook**), or any endpoint that accepts a `{"text":…}` POST, such as a
+  host app's existing incoming webhook. It goes on the Worker, as
+  `npx wrangler secret put ALERT_WEBHOOK_URL_<ID>`, with the roster id upper-cased and
+  non-alphanumerics turned into `_`.
 
 ### Postgres (connection URLs)
 
@@ -475,18 +522,25 @@ September 2026; if a UI label has moved, search the provider's docs rather than 
 Once doctor is green locally, tell the user the remaining steps the engine can't do for them:
 
 1. Commit `pg-backup/<name>.yaml` to their consuming repo (verify no secret leaked in).
-2. Move the credentials from `.context/gitfather-secrets.env` into GitHub **Secrets** (and the
-   bucket/channel values into GitHub **Variables**) — see the
+2. Move the credentials from `.context/gitfather-secrets.env` into GitHub **Secrets**, and the
+   bucket names plus `GITFATHER_NOTIFY_URL` into GitHub **Variables**. See the
    [secrets/variables table](wiring-a-consuming-repo.md#3-set-the-secrets--variables-in-your-repo).
 3. Wire the caller workflows (`pg-backup.yml`, `pg-durable-verify.yml` — daily; supersedes the weekly
    `pg-restore-drill.yml` — `pg-dashboard.yml`, plus `pg-archive.yml` if they archive) per
    [wiring-a-consuming-repo.md](wiring-a-consuming-repo.md), pointing `profile:` at the new profile.
    **Pass every secret explicitly** — `secrets: inherit` silently passes nothing across owners (the #1
    first-run failure). Pushing the workflow files needs a token with the **`workflow`** scope.
-4. Add the client to the [Worker's roster](../scheduler/README.md) with an R2 binding to its bucket —
-   the Worker dispatches every cadence and runs the staleness watchdog. Remember `archive` is
-   **opt-in**, so its `cadences` list must name `"archive"` explicitly. The watchdog reports
-   `no-config` until the first backup run publishes the profile's `staleness:` block to the bucket.
+4. Add the client to the [Worker's roster](../scheduler/README.md) with an R2 binding to its bucket.
+   The Worker dispatches every cadence, runs the staleness watchdog, and posts to Slack. Remember:
+   - `archive` is **opt-in**, so its `cadences` list must name `"archive"` explicitly.
+   - Give it a `slack` block (channel, and optionally username and icon), and invite the the-gitfather
+     app to that channel ([Appendix A](#slack-the-gitfather-app-operator-only)). Without the block,
+     Slack is off for the client.
+   - Pinning `repositoryId` (`gh api repos/<owner>/<repo> --jq .id`) stops a deleted-and-recreated
+     repo of the same name from inheriting the client.
+
+   The watchdog reports `no-config` until the first backup run publishes the profile's `staleness:`
+   block to the bucket.
 5. If a first archive backfill ran, schedule a **`VACUUM FULL`** on that table: a plain `DELETE` only
    marks space reusable, so without it the table stops growing but never shrinks. It takes an
    `ACCESS EXCLUSIVE` lock — size the window to the table.

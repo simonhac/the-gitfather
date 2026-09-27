@@ -1,12 +1,21 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// gitfather-scheduler — a single Cloudflare Worker that replaces GitHub Actions cron AND runs the
-// staleness watchdog.
+// gitfather-scheduler — a single Cloudflare Worker that replaces GitHub Actions cron, runs the
+// staleness watchdog, and is the ONLY thing that posts to Slack.
 //
-// One Cron Trigger (*/10 * * * *) wakes the Worker every 10 minutes. It decides which cadences are
-// due from event.scheduledTime (the *intended* tick instant — not Date.now(), so a late delivery still
-// maps to the slot it was meant for), fires each client's caller workflow via GitHub's REST
-// `workflow_dispatch` API for the dispatched cadences, and runs the watchdog (watchdog.ts) natively
-// against each client's private bucket for the `staleness` cadence.
+// Two Cron Triggers, told apart by the minute they fire on:
+//   */10 * * * *               the main tick. It decides which cadences are due from
+//                              event.scheduledTime (the *intended* tick instant — not Date.now(), so a
+//                              late delivery still maps to the slot it was meant for), fires each
+//                              client's caller workflow via GitHub's REST `workflow_dispatch` API for
+//                              the dispatched cadences, and runs the watchdog (watchdog.ts) natively
+//                              against each client's private bucket for `staleness`.
+//   5,15,25,35,45,55 * * * *   the Slack tick (slackTick): re-renders each daily row so elapsed slots
+//                              show ⬜, announces any job outcome whose /notify never arrived, and
+//                              checks the token. A separate invocation, so Slack work can never eat
+//                              the main tick's subrequest budget.
+//
+// POST /notify is how a finished job says "look": authenticated by a GitHub OIDC token (oidc.ts), it
+// has the Worker announce that run's outcome record (deliver.ts).
 //
 // The reliability guarantee: the watchdog self-heals a missed backup and pages when it can't — and it
 // now lives OUTSIDE GitHub, so an Actions outage (including a billing lapse) is detected, not silenced.
@@ -26,10 +35,20 @@ import {
   type Client,
   type Env,
 } from "./github.js";
-import { readConfigsSettled, runWatchdogs, type ConfigRead, type WatchdogRecord } from "./watchdog.js";
+import { clientSecret, readConfigs, readConfigsSettled, runWatchdogs, type ConfigRead, type WatchdogRecord } from "./watchdog.js";
 import { backupDue, type BackupSchedule } from "../../scripts/lib/schedule.js";
-import { healthVerdict, tickDelivered, type CronTickRecord } from "./health.js";
+import { OUTCOME_PREFIX } from "../../scripts/lib/jobOutcome.js";
+import type { WatchdogConfig } from "../../scripts/lib/watchdogConfig.js";
+import { healthVerdict, slackHealth, tickDelivered, type CronTickRecord, type SlackTickRecord } from "./health.js";
 import { jobsHealth } from "./jobs.js";
+import { githubPortFor } from "./github.js";
+import { DEFAULT_ENGINE_REPO, GITHUB_JWKS_URL, jwksKeySource, resolveNotifyTarget, verifyGithubOidc } from "./oidc.js";
+import { deliverOutcome, notifyRun, pendingOutcomes, type DeliverDeps } from "./deliver.js";
+import { upsertDailyRow } from "./dailyRowStore.js";
+import { displayContext } from "./outcomeRender.js";
+import { authTest, isTransientSlackError, postWebhook } from "./slackApi.js";
+import { slackPortFor, type SlackPort } from "./slackPort.js";
+import type { ObjectStore } from "./objectStore.js";
 
 export type { Env } from "./github.js";
 
@@ -232,6 +251,191 @@ async function writeState(env: Env, rec: TickRecord): Promise<void> {
   }
 }
 
+// ── Slack: /notify and the Slack tick ─────────────────────────────────────────────────────────────
+
+/** The Slack tick runs at minute 5 of every 10 (the `5,15,25,35,45,55` trigger); the main tick at minute 0. */
+const SLACK_TICK_MINUTE = 5;
+const SLACK_STATE_KEY = "_scheduler/slack.json";
+const AUTH_CHECK_EVERY_MS = 3600_000;
+/** How far back the tick looks for unannounced outcomes — a day plus slack for a slow run. */
+const RECONCILE_WINDOW_MS = 26 * 3600_000;
+/** Leave a fresh record to its /notify (seconds behind it) before the tick claims it. */
+const RECONCILE_GRACE_MS = 3 * 60_000;
+/**
+ * Announcements per Slack tick, across ALL clients: each costs ~10 subrequests against the free plan's
+ * 50 per invocation, and in steady state /notify has already announced everything.
+ */
+const RECONCILE_MAX_PER_TICK = 2;
+/** Records looked at per tick: one that turns out already announced still costs a get, and must not crowd out the rest. */
+const RECONCILE_MAX_LOOKS = 6;
+
+// GitHub's OIDC signing keys, cached for this isolate's lifetime (see jwksKeySource).
+const oidcKeys = jwksKeySource(async () => {
+  const res = await fetch(GITHUB_JWKS_URL, { headers: { "User-Agent": "gitfather-scheduler" } });
+  if (!res.ok) throw new Error(`JWKS fetch failed ${res.status}`);
+  return res.json();
+});
+
+async function publishedConfigs(store: R2Bucket): Promise<WatchdogConfig[]> {
+  return (await readConfigs(store)).flatMap(({ cfg }) => (cfg ? [cfg] : []));
+}
+
+function deliverDeps(env: Env, client: Client, store: ObjectStore, configs: WatchdogConfig[], slack: SlackPort | null): DeliverDeps {
+  const webhookUrl = clientSecret(env, "ALERT_WEBHOOK_URL", client.id);
+  return {
+    client,
+    store,
+    slack,
+    github: githubPortFor(env, client),
+    configs,
+    webhook: (text) => postWebhook(webhookUrl, text),
+    engineRepo: env.ENGINE_REPO || DEFAULT_ENGINE_REPO,
+    now: () => new Date(),
+    log: (line) => console.log(`slack ${client.id}: ${line}`),
+  };
+}
+
+/**
+ * POST /notify — a finished job's last step. The body is ignored: the verified token alone says which
+ * client, which job and which run, and what gets posted comes from R2. 503 asks the caller's curl to
+ * retry (and the Slack tick is behind it either way).
+ */
+async function handleNotify(req: Request, env: Env): Promise<Response> {
+  if (req.method !== "POST") return Response.json({ error: "method_not_allowed" }, { status: 405, headers: { Allow: "POST" } });
+  const audience = env.NOTIFY_AUDIENCE;
+  if (!audience) return Response.json({ error: "not_configured" }, { status: 503 });
+  const token = /^Bearer\s+(\S+)$/i.exec(req.headers.get("Authorization") ?? "")?.[1] ?? "";
+  const v = await verifyGithubOidc(token, { audience, nowMs: Date.now(), keys: oidcKeys });
+  if (!v.ok) {
+    console.warn(`notify: token rejected: ${v.reason}`);
+    return Response.json({ error: "unauthorized" }, { status: 401 });
+  }
+  const clients = safeParseClients(env);
+  if (!clients) return Response.json({ error: "not_configured" }, { status: 503 });
+  const resolved = resolveNotifyTarget(v.claims, clients, env.ENGINE_REPO || DEFAULT_ENGINE_REPO);
+  if (!resolved.ok) {
+    console.warn(`notify: ${resolved.error} (${v.claims.repository} · ${v.claims.job_workflow_ref})`);
+    return Response.json({ error: resolved.error }, { status: 403 });
+  }
+  const { target } = resolved;
+  const { client } = target;
+  const store = env[client.bucket] as R2Bucket;
+  try {
+    const configs = await publishedConfigs(store);
+    const r = await notifyRun(deliverDeps(env, client, store, configs, slackPortFor(env.SLACK_BOT_TOKEN, client)), target);
+    console.log(`notify ${client.id}: ${target.job} run ${target.runId}/${target.runAttempt} → ${r.result} (${r.count} record(s))`);
+    return Response.json(r, { status: r.result === "retry" ? 503 : 200 });
+  } catch (e) {
+    console.error(`notify ${client.id}: ${target.job} run ${target.runId}: ${String(e)}`);
+    return Response.json({ error: "internal" }, { status: 503 });
+  }
+}
+
+/**
+ * The Slack tick: per client, refresh each backup's daily row (⬜ for elapsed slots) and list outcome
+ * records nobody has announced; then announce the oldest few. `recordHealth` is false for a manual run,
+ * so hitting it by hand can't keep /health's Slack check green while the cron is gone.
+ */
+async function slackTick(env: Env, t: Date, opts: { recordHealth: boolean }): Promise<{ refreshed: number; announced: string[]; pending: number }> {
+  const clients = safeParseClients(env);
+  if (!clients) return { refreshed: 0, announced: [], pending: 0 };
+  const now = new Date();
+  let refreshed = 0;
+
+  const perClient = await Promise.all(
+    clients.map(async (client) => {
+      const store = env[client.bucket] as R2Bucket;
+      const log = (line: string) => console.log(`slack ${client.id}: ${line}`);
+      try {
+        const configs = await publishedConfigs(store);
+        const slack = slackPortFor(env.SLACK_BOT_TOKEN, client);
+        if (slack) {
+          for (const cfg of configs) {
+            const ctx = displayContext({ tz: cfg.timezone, slotMinutes: cfg.slotMinutes, name: cfg.name, dashboardUrl: cfg.dashboardUrl });
+            const r = await upsertDailyRow(store, slack, { stateName: cfg.name, ctx }, { day: now, now, log });
+            if (!r.ok) log(`[${cfg.name}] daily row refresh failed: ${r.error}`);
+            else if (!r.skipped) refreshed++;
+          }
+        }
+        const pending = await pendingOutcomes(store, { sinceMs: now.getTime() - RECONCILE_WINDOW_MS, graceMs: RECONCILE_GRACE_MS, nowMs: now.getTime() });
+        return { client, store, configs, slack, pending };
+      } catch (e) {
+        console.error(`slack ${client.id}: tick failed: ${String(e)}`);
+        return null;
+      }
+    }),
+  );
+
+  // Oldest first across all clients (keys start with the run's start stamp), so nothing starves.
+  const queue = perClient
+    .flatMap((p) => (p ? p.pending.map((key) => ({ p, key })) : []))
+    .sort((a, b) => (a.key.slice(OUTCOME_PREFIX.length) < b.key.slice(OUTCOME_PREFIX.length) ? -1 : 1));
+  const announced: string[] = [];
+  let looked = 0;
+  for (const { p, key } of queue) {
+    if (announced.length >= RECONCILE_MAX_PER_TICK || looked >= RECONCILE_MAX_LOOKS) break;
+    looked++;
+    const r = await deliverOutcome(deliverDeps(env, p.client, p.store, p.configs, p.slack), key, { verified: false });
+    console.log(`slack ${p.client.id}: reconcile ${key.slice(OUTCOME_PREFIX.length)} → ${r}`);
+    if (r !== "already_posted" && r !== "claimed_elsewhere") announced.push(`${p.client.id}:${r}`);
+  }
+  if (queue.length > looked) console.warn(`slack: ${queue.length - looked} more unannounced outcome(s) — next tick`);
+
+  if (opts.recordHealth) await writeSlackTick(env, t, now);
+  return { refreshed, announced, pending: queue.length };
+}
+
+async function readSlackTick(env: Env): Promise<SlackTickRecord | null> {
+  const obj = await env.STATE.get(SLACK_STATE_KEY).catch(() => null);
+  if (!obj) return null;
+  try {
+    const v = JSON.parse(await obj.text()) as Partial<SlackTickRecord>;
+    if (typeof v.tick !== "string") return null;
+    return {
+      tick: v.tick,
+      authCheckedAt: typeof v.authCheckedAt === "string" ? v.authCheckedAt : null,
+      authOk: typeof v.authOk === "boolean" ? v.authOk : null,
+      ...(typeof v.authError === "string" ? { authError: v.authError } : {}),
+    };
+  } catch {
+    return null; // unparseable is indistinguishable from absent
+  }
+}
+
+/**
+ * Record the Slack tick for /health, re-checking the token hourly (auth.test). The record lands in the
+ * PUBLIC dashboard bucket, so it holds times and a Slack error code only.
+ */
+async function writeSlackTick(env: Env, t: Date, now: Date): Promise<void> {
+  const prev = await readSlackTick(env);
+  let auth: Omit<SlackTickRecord, "tick"> = {
+    authCheckedAt: prev?.authCheckedAt ?? null,
+    authOk: prev?.authOk ?? null,
+    ...(prev?.authError ? { authError: prev.authError } : {}),
+  };
+  const due = !auth.authCheckedAt || now.getTime() - Date.parse(auth.authCheckedAt) >= AUTH_CHECK_EVERY_MS;
+  if (env.SLACK_BOT_TOKEN && due) {
+    const r = await authTest(env.SLACK_BOT_TOKEN);
+    // A blip says nothing about the token — keep the previous verdict and ask again next tick.
+    if (r.ok || !isTransientSlackError(r.error)) {
+      auth = { authCheckedAt: now.toISOString(), authOk: r.ok, ...(r.ok ? {} : { authError: r.error }) };
+      if (!r.ok) console.error(`slack: auth.test failed: ${r.error} — Slack is DOWN for every client`);
+    }
+  }
+  const rec: SlackTickRecord = { tick: t.toISOString(), ...auth };
+  await env.STATE.put(SLACK_STATE_KEY, JSON.stringify(rec), { httpMetadata: { contentType: "application/json" } }).catch((e) =>
+    console.error(`slack.json put failed: ${String(e)}`),
+  );
+}
+
+/** Constant-time check of the X-Trigger-Secret header (an unset secret opens nothing). */
+function triggerSecretOk(req: Request, env: Env): boolean {
+  const enc = new TextEncoder();
+  const given = enc.encode(req.headers.get("X-Trigger-Secret") ?? "");
+  const want = enc.encode(env.TRIGGER_SECRET ?? "");
+  return want.length > 0 && given.length === want.length && crypto.subtle.timingSafeEqual(given, want);
+}
+
 // Manual endpoint for validating the dispatch + watchdog paths end-to-end, plus liveness/state reads.
 async function handleFetch(req: Request, env: Env): Promise<Response> {
   const url = new URL(req.url);
@@ -257,7 +461,9 @@ async function handleFetch(req: Request, env: Env): Promise<Response> {
       }
     }
     const roster = safeParseClients(env)?.length ?? 0;
-    const v = healthVerdict(last, roster, new Date());
+    const now = new Date();
+    const slack = slackHealth(await readSlackTick(env), Boolean(env.SLACK_BOT_TOKEN), now);
+    const v = healthVerdict(last, roster, now, { slack });
     return Response.json(v.body, { status: v.status });
   }
 
@@ -274,8 +480,16 @@ async function handleFetch(req: Request, env: Env): Promise<Response> {
     return Response.json(v.body, { status: v.status });
   }
 
-  if (req.headers.get("X-Trigger-Secret") !== env.TRIGGER_SECRET) {
+  // Open, like /health — but only a verified GitHub OIDC token for a rostered repo gets past it.
+  if (url.pathname === "/notify") return handleNotify(req, env);
+
+  if (!triggerSecretOk(req, env)) {
     return new Response("forbidden\n", { status: 403 });
+  }
+
+  if (url.pathname === "/slack") {
+    // Run the Slack tick now (refresh rows, announce unannounced outcomes) — for validating a deploy.
+    return Response.json(await slackTick(env, new Date(), { recordHealth: false }));
   }
 
   if (url.pathname === "/state") {
@@ -306,6 +520,12 @@ async function handleFetch(req: Request, env: Env): Promise<Response> {
 export default {
   async scheduled(event: ScheduledController, env: Env): Promise<void> {
     const t = new Date(event.scheduledTime); // intended tick instant (UTC)
+    // Keyed on the intended minute, not on event.cron's spelling, so the triggers can be written any way.
+    if (t.getUTCMinutes() % 10 === SLACK_TICK_MINUTE) {
+      const r = await slackTick(env, t, { recordHealth: true });
+      console.log(`slack tick ${t.toISOString()} cron=${event.cron} refreshed=${r.refreshed} pending=${r.pending} announced=[${r.announced.join(",")}]`);
+      return;
+    }
     const cadences = dueCadences(t);
     const clients = safeParseClients(env);
     if (!clients) return; // bad roster — logged; nothing to do

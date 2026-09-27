@@ -4,7 +4,8 @@
 
 The profile is a single **nested YAML** file ([`profiles/example.yaml`](../profiles/example.yaml), kebab-case
 keys). Credentials are **never** in it — they come from the environment (GitHub secrets). Top level:
-`name` (db shortname), `backup-prefix`, `timezone`, `encryption`, `anchor-hour-utc`. Groups:
+`name` (db shortname: letters, digits, `.`, `_`, `-`, since it keys each run's outcome record),
+`backup-prefix`, `timezone`, `encryption`, `anchor-hour-utc`. Groups:
 
 - **`dump:`** — `flags`, `client-major`, `min-bytes`
 - **`integrity:`** — `checksum`, `check-structure`, `verify-before-encrypt`, `verify-after-upload`
@@ -23,7 +24,11 @@ keys). Credentials are **never** in it — they come from the environment (GitHu
   does *not* mean the credential was never rotated, only that no record of it exists. See
   [Knowing when a rotation is overdue](r2-setup.md#knowing-when-a-rotation-is-overdue) and
   [`never recorded`](r2-setup.md#never-recorded--read-this-before-you-re-roll)
-- **`slack:`** — `channel` (or the env `SLACK_CHANNEL`, which wins), `alert-mention`  ·  **`dashboard:`** — `label`, `hide-run-links`, `url`, `path-prefix`
+- **`slack:`** — `alert-mention` only: the mention the scheduler Worker puts on a page. The channel,
+  the bot's name and icon, and the failure webhook live on the Worker, in the client's
+  [roster entry](../scheduler/README.md#roster-in-wranglerjsonc--vars) and secrets. A leftover
+  `slack.channel` is rejected
+- **`dashboard:`** — `label`, `hide-run-links`, `url`, `path-prefix`
 
 All have safe defaults — see **[Verifying backups and restoring for real](verify-and-restore.md)**.
 
@@ -38,7 +43,7 @@ The grammars are strict where a typo is genuinely catchable and lenient where th
 
 | Strict (catches typos) | Lenient (presence + light shape) |
 |---|---|
-| `encryption` ∈ {`none`,`age`,`aes-gcm`} · `anchor-hour-utc` 0–23 · `drill.min-row-ratio` 0–1 · `drill.max-row-ratio` ≥ 1 · `drill.max-row-drop` 0–1 · `staleness.max-age-hours` > slot + grace (unset → derived) · `backups-per-day` a factor of 24 (`staleness.slot-minutes` is deprecated — accepted only if it agrees) · `staleness.grace-minutes` 0–720 · `archive.*` (`compression` ∈ {`zstd`,`gzip`,`none`}, `encryption` ∈ {`none`,`age`}, per-table `prune-after-weeks` ≥ `archive-after-weeks`, no duplicate table entries, `delete-batch-rows` 1–500000, `max-weeks-per-run` 1–10000) · `credential-rotation.max-age-days` 0–3650 · `dump.min-bytes`/`verify-durable.retest-days`/`verify-durable.max-restores` (ints) · `timezone` (real IANA zone) · `retention.*` (durations like `13 weeks`) · booleans `staleness.self-heal`/`dry-run` · `integrity.checksum`/`check-structure`/`verify-before-encrypt`/`verify-after-upload` · `verify-durable.fresh`/`aged` (YAML `true`/`false` or `1/0/yes/no/on/off`) | credential ENV vars: `*_DATABASE_URL` scheme = `postgres(ql)://` · R2 account id / keys · bucket names (whitespace-free) · `AGE_RECIPIENT`/`AGE_IDENTITY` · `SLACK_BOT_TOKEN` · table-name lists (`drill.present-tables`/`nonempty-tables`) · `archive.store-prefix` / `tables[].table` / `time-column` · `AGE_ARCHIVE_RECIPIENT` · `credential-rotation.track` (a list of prefix names) |
+| `encryption` ∈ {`none`,`age`,`aes-gcm`} · `anchor-hour-utc` 0–23 · `drill.min-row-ratio` 0–1 · `drill.max-row-ratio` ≥ 1 · `drill.max-row-drop` 0–1 · `staleness.max-age-hours` > slot + grace (unset → derived) · `backups-per-day` a factor of 24 (`staleness.slot-minutes` is deprecated — accepted only if it agrees) · `staleness.grace-minutes` 0–720 · `archive.*` (`compression` ∈ {`zstd`,`gzip`,`none`}, `encryption` ∈ {`none`,`age`}, per-table `prune-after-weeks` ≥ `archive-after-weeks`, no duplicate table entries, `delete-batch-rows` 1–500000, `max-weeks-per-run` 1–10000) · `credential-rotation.max-age-days` 0–3650 · `dump.min-bytes`/`verify-durable.retest-days`/`verify-durable.max-restores` (ints) · `timezone` (real IANA zone) · `retention.*` (durations like `13 weeks`) · booleans `staleness.self-heal`/`dry-run` · `integrity.checksum`/`check-structure`/`verify-before-encrypt`/`verify-after-upload` · `verify-durable.fresh`/`aged` (YAML `true`/`false` or `1/0/yes/no/on/off`) · `slack.alert-mention` (1–4 space-separated `<!here>`/`<!channel>`/`<@U…>`/`<!subteam^S…>`) | credential ENV vars: `*_DATABASE_URL` scheme = `postgres(ql)://` · R2 account id / keys · bucket names (whitespace-free) · `AGE_RECIPIENT`/`AGE_IDENTITY` · table-name lists (`drill.present-tables`/`nonempty-tables`) · `archive.store-prefix` / `tables[].table` / `time-column` · `AGE_ARCHIVE_RECIPIENT` · `credential-rotation.track` (a list of prefix names) |
 
 Conditional rules are enforced too: `encryption: age` ⇒ `AGE_RECIPIENT` (backup) / `AGE_IDENTITY`
 (drill, and durable-verify **unless** `verify-durable.keyless`, which instead REFUSES an identity and
@@ -47,17 +52,20 @@ check that still reports success, so the two situations are told apart by a decl
 by an absence); `integrity.verify-after-upload` + `encryption: age` ⇒ `AGE_IDENTITY` (backup);
 `integrity.verify-before-encrypt` ⇒ `drill.row-count-table` + `DRILL_DATABASE_URL` but **never**
 `AGE_IDENTITY`; `expect-recipient` set ⇒ it must equal `AGE_RECIPIENT`, or the config is rejected
-before the dump rather than after a bucket of unopenable objects has accumulated;
-`SLACK_BOT_TOKEN` set ⇒ `SLACK_CHANNEL`; an `archive:` block ⇒ `archive.store-prefix`, at least
-one entry in `archive.tables`, and `PG_ARCHIVE_DATABASE_URL`; `archive.encryption: age` ⇒
-`AGE_ARCHIVE_RECIPIENT`. Real credential/endpoint validity isn't guessed from a regex;
-it's proven by `doctor`'s live probes.
+before the dump rather than after a bucket of unopenable objects has accumulated; an `archive:`
+block ⇒ `archive.store-prefix`, at least one entry in `archive.tables`, and `PG_ARCHIVE_DATABASE_URL`;
+`archive.encryption: age` ⇒ `AGE_ARCHIVE_RECIPIENT`. Real credential/endpoint validity isn't guessed
+from a regex; it's proven by `doctor`'s live probes.
+
+A config failure in CI is still announced. The run's outcome record carries a `config_invalid` page
+that names the failing fields, never their values, and the Worker posts it like any other failure.
 
 `doctor` is a **read-only** preflight — *"is this consumer actually wired up?"* — for verifying a
 freshly-configured repo before go-live. It runs the **same** config schema, then probes the external
 clients (binaries on PATH, `pg_dump`/`pg_restore` version, R2 bucket reachable via `rclone lsf`,
-Postgres via `select 1`, Slack `auth.test`). It performs **no writes** — no dump, no upload, no
-workflow trigger, no Slack post — so it's safe against production creds.
+Postgres via `select 1`). It performs **no writes** — no dump, no upload, no workflow trigger, no
+Slack post — so it's safe against production creds. It doesn't probe Slack: the jobs hold no Slack
+token, and the scheduler Worker's `/health` reports whether Slack accepts the Worker's token.
 
 ```bash
 npm run doctor -- backup           # one task: backup | archive | drill | verify-durable | dashboard
@@ -77,10 +85,12 @@ Optionally add a `doctor all` step to CI before the real task. It complements (d
 npm ci                                                   # one-time: installs tsx
 export PG_BACKUP_DATABASE_URL='postgresql://…:5432/…?sslmode=require'
 export R2_ACCOUNT_ID=… R2_BUCKET=<your-bucket> R2_ACCESS_KEY_ID=… R2_SECRET_ACCESS_KEY=…
-export SLACK_BOT_TOKEN=xoxb-…                            # optional
-# Run twice: the first posts the day's Slack message, the second UPDATES it with a 2nd tick.
 FORCE_TIERS="intraday daily" PROFILE=profiles/example.yaml npx tsx scripts/backup-pg-to-r2.ts
 ```
+
+A local run posts **nothing to Slack**. With no `GITHUB_RUN_ID` it writes no outcome record, so the
+scheduler Worker has nothing to announce. To see a run in Slack, `workflow_dispatch` it
+(`gh workflow run pg-backup.yml -f reason=manual`). It then ticks the day's row with a 🖐️.
 
 Any local dump file lives under a tmp dir and is removed on exit — never commit a dump (it may contain
 PII).
@@ -104,20 +114,46 @@ The secrets are arriving **empty** — the task aborts at its zod config pre-fli
 `secrets: inherit` if your caller is in the **same org** as this repo.
 
 A useful sanity check: if `vars.R2_BUCKET` etc. also read empty, the `vars` context isn't crossing the
-owner boundary either — which is why the callers pass bucket/channel names as inputs rather than reading
-`vars.*` inside the reusable workflow.
+owner boundary either. That is why the callers pass the bucket name and the notify URL as inputs
+rather than reading `vars.*` inside the reusable workflow.
 
-### Backups are failing but Slack shows nothing (only the dead-man's-switch paged)
+### Every run fails with `✗ slack — Unrecognized key: "channel"` after upgrading
 
-This is expected, not a second bug. The Slack daily row is **in-band** — it's written *by the backup
-script*, so it can only report failures the script reaches far enough to handle (a failed `pg_dump`,
-a bad upload, a too-small dump). Failures *before* that point — empty secrets, a workflow that won't
-start, a runner that dies, the dispatch not landing — never reach the Slack code. Two out-of-band
-watchers cover exactly these cases: the [Worker's staleness watchdog](../scheduler/README.md) pages when
-no object lands for a slot (and tries one catch-up dispatch first), and the **dead-man's-switch**
-(`HEARTBEAT_URL` → healthchecks.io etc.) pages on the *absence* of a success ping even if the Worker
-itself is down. Treat a STALE page or a healthchecks alarm with a quiet Slack row as "the
-wiring/secrets/runner is broken," and check the Actions run logs.
+The profile still has `slack.channel`. The channel moved to the client's
+[roster entry](../scheduler/README.md#roster-in-wranglerjsonc--vars) on the Worker, where it sits next
+to the only Slack token, and the profile schema now rejects the key rather than quietly ignoring it.
+Delete it from the profile, and make sure the roster entry has a `slack` block. Slack announces the
+failure as `config validation failed: slack`.
+
+### Backups are failing but Slack shows nothing
+
+Slack is written only by the scheduler Worker, from each run's outcome record plus a notify. So a
+silent channel means one of three things:
+- the Worker isn't posting, or not to this channel;
+- the run wrote no record, and its notify didn't arrive either;
+- the run never started.
+
+[Slack and alerting → When Slack shows nothing](slack-and-alerting.md#when-slack-shows-nothing)
+walks through it. In brief:
+
+- **`GET /health` on the Worker** reports `"slack": "failing"` when the Slack tick has stopped or the
+  token fails `auth.test`. It can't see an app that was never invited to the channel. That shows as
+  `not_in_channel` in `npm run tail`.
+- **A failure in setup** (checkout, `npm ci`) writes no record. The notify step still runs, and the
+  Worker announces the failed step from the Actions API. But nothing reaches Slack if that notify is
+  lost too, or if the runner died outright.
+- **A run that never started** (a workflow that won't start, a dispatch that didn't land, lapsed
+  Actions billing) has no record and no notify. Empty secrets are *not* this case, because the script
+  starts and fails config validation. If the R2 credentials came through, its `config_invalid`
+  record is announced. If they didn't, the notify's GitHub fallback announces the failed step. Two out-of-band watchers cover exactly
+  that:
+  - the [Worker's staleness watchdog](../scheduler/README.md) pages when no object lands for a slot,
+    after trying one catch-up dispatch;
+  - the **dead-man's-switch** (`HEARTBEAT_URL` on BetterStack) pages on the *absence* of a success
+    ping, even if the Worker itself is down.
+
+Treat a STALE page, or a heartbeat alarm alongside a quiet Slack row, as "the
+wiring/secrets/runner is broken", and check the Actions run logs.
 
 ### An amber "Drill failed" cell, or a `restore-drill`/`durable-verify FAILED` page
 

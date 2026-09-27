@@ -6,9 +6,11 @@ import {
   tickDelivered,
   tickAgeMs,
   healthVerdict,
+  slackHealth,
   HEALTH_MAX_TICK_AGE_MS,
   type WatchdogRecord,
   type CronTickRecord,
+  type SlackTickRecord,
 } from "../../scheduler/src/health.js";
 
 const rec = (id: string, outcome: WatchdogRecord["outcome"], name = id): WatchdogRecord => ({ id, name, outcome });
@@ -141,4 +143,45 @@ test("healthVerdict: a future timestamp is rejected, not treated as fresh", () =
   const v = healthVerdict(cron("2026-09-12T02:00:00Z"), 3, now);
   assert.equal(v.status, 503);
   assert.match(v.body.reason ?? "", /future/);
+});
+
+// ── Slack: the Worker is the only thing that posts, so a dead Slack must show on /health ───────────
+
+const slackTick = (tick: string, authOk: boolean | null = true, authError?: string): SlackTickRecord => ({
+  tick,
+  authCheckedAt: tick,
+  authOk,
+  ...(authError ? { authError } : {}),
+});
+
+test("slackHealth: no token configured is 'off', not a failure", () => {
+  assert.deepEqual(slackHealth(null, false, new Date()), { ok: true, state: "off" });
+});
+
+test("slackHealth: a missing record is a failure (it is what a missing second cron looks like)", () => {
+  const h = slackHealth(null, true, new Date());
+  assert.equal(h.ok, false);
+  assert.equal(h.reason, "no Slack tick recorded");
+});
+
+test("slackHealth: stale tick and failing auth", () => {
+  const now = new Date("2026-09-27T08:30:00Z");
+  assert.equal(slackHealth(slackTick("2026-09-27T08:25:00Z"), true, now).ok, true);
+  assert.equal(slackHealth(slackTick("2026-09-27T08:00:00Z"), true, now).reason, "Slack tick is stale");
+  assert.equal(slackHealth(slackTick("2026-09-27T08:25:00Z", false, "token_revoked"), true, now).reason, "Slack auth failing: token_revoked");
+  assert.equal(slackHealth(slackTick("2026-09-27T08:25:00Z", null), true, now).ok, true, "not yet checked is not a failure");
+});
+
+test("healthVerdict: a failing Slack turns /health red, after the cron checks", () => {
+  const now = new Date("2026-09-11T23:58:00Z");
+  const failing = { ok: false, state: "failing" as const, reason: "Slack auth failing: invalid_auth" };
+  const v = healthVerdict(cron("2026-09-11T23:55:00Z"), 3, now, { slack: failing });
+  assert.equal(v.status, 503);
+  assert.equal(v.body.reason, "Slack auth failing: invalid_auth");
+  assert.equal(v.body.slack, "failing");
+  // A dead cron is still reported as the dead cron.
+  assert.equal(healthVerdict(cron("2026-09-11T23:00:00Z"), 3, now, { slack: failing }).body.reason, "last cron tick is stale");
+  const ok = healthVerdict(cron("2026-09-11T23:55:00Z"), 3, now, { slack: { ok: true, state: "ok" } });
+  assert.equal(ok.status, 200);
+  assert.equal(ok.body.slack, "ok");
 });

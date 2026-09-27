@@ -32,7 +32,8 @@ repo, and credentials come from the environment (GitHub secrets), never from the
   Worker, that re-triggers a missed backup slot and pages when it can't — so an Actions outage is
   detected rather than silencing the detector. → [`scheduler/README.md`](scheduler/README.md)
 - **Alerting that survives GitHub being the broken thing** — one Slack message per day updated in
-  place, a failure-only webhook, and an external dead-man's-switch.
+  place, a failure-only webhook, and an external dead-man's-switch. Every message is posted by the
+  Worker, which holds the only Slack token; the jobs hold none, and just leave an outcome record.
   → [Slack and alerting](docs/slack-and-alerting.md)
 - **A static backup-history dashboard** — a single self-contained page built from an append-only
   run-log in R2. No server, no database. → [Backup-history dashboard](docs/dashboard.md)
@@ -47,15 +48,16 @@ repo, and credentials come from the environment (GitHub secrets), never from the
 - **Guarded R2 token rotation** — `npm run roll-r2` mates, connects, escrows and publishes a rolled
   credential in that order, and tracks when one is overdue.
   → [Rotating an R2 token](docs/r2-setup.md#rotating-an-r2-token--npm-run-roll-r2)
-- **An optional Cloudflare scheduler** — one Worker firing every client's workflows on time, instead
-  of GitHub's best-effort cron. → [`scheduler/`](scheduler/README.md)
+- **A Cloudflare scheduler** — one Worker firing every client's workflows on time, instead of
+  GitHub's best-effort cron. It is also the only thing that posts to Slack.
+  → [`scheduler/`](scheduler/README.md)
 
 ---
 
 ## How it fits together
 
-The reusable workflows live here; **each consuming repo keeps a thin caller workflow** that owns the
-cron schedule + secrets and passes the path to its own profile. Because this repo is public, the
+The reusable workflows live here; **each consuming repo keeps a thin caller workflow** that owns its
+secrets and passes the path to its own profile. Because this repo is public, the
 reusable workflows check out their own script code with no token. Because the profile lives in the
 *caller* repo, each reusable workflow checks out two things: the caller repo (for the profile) and this
 repo (for the scripts).
@@ -71,11 +73,16 @@ your-repo                              the-gitfather (this repo, public)
     pg-archive.yml ──────────uses────────►  pg-archive.yml          (optional, weekly)
 ```
 
-> **Scheduling and the watchdog live in the Cloudflare Worker.** The caller workflows carry no
-> `schedule:` cron; one free Worker dispatches every client's backups/verifies on a punctual cadence
-> and runs the staleness watchdog natively every 10 minutes against each client's bucket. The backup
-> job publishes its profile's `staleness:` block to the bucket for it, so config flows GitHub →
-> Cloudflare, never the reverse. See [`scheduler/README.md`](scheduler/README.md).
+> **Scheduling, the watchdog and Slack live in the Cloudflare Worker.** The caller workflows carry
+> no `schedule:` cron. One free Worker:
+> - dispatches every client's backups and verifies on a punctual cadence;
+> - runs the staleness watchdog natively every 10 minutes against each client's bucket;
+> - is the only thing that posts to Slack.
+>
+> Each run leaves an outcome record in its bucket, and its last step tells the Worker it finished
+> (`POST /notify`, authenticated by the run's GitHub OIDC token). The backup job also publishes its
+> profile's `staleness:` block to the bucket, so config flows GitHub → Cloudflare, never the reverse.
+> See [`scheduler/README.md`](scheduler/README.md).
 
 ---
 
@@ -108,10 +115,14 @@ By hand, in order:
    → [Wiring a consuming repo](docs/wiring-a-consuming-repo.md)
 4. **Set the secrets and variables** in your repo; secrets must be passed **explicitly**, not with
    `secrets: inherit`. → [Secrets and variables](docs/wiring-a-consuming-repo.md#3-set-the-secrets--variables-in-your-repo)
-5. **Preflight**: `npm ci && PROFILE=pg-backup/<name>.yaml npm run doctor -- all` — read-only, safe
+5. **Add the client to the Worker's roster**, with an R2 binding to its bucket and a `slack` block
+   naming its channel, and invite the the-gitfather Slack app to that channel.
+   → [`ROSTER`](scheduler/README.md#roster-in-wranglerjsonc--vars)
+6. **Preflight**: `npm ci && PROFILE=pg-backup/<name>.yaml npm run doctor -- all` — read-only, safe
    against production creds. → [`doctor`](docs/configuration-and-troubleshooting.md#config-validation--doctor)
-6. **Fire the backup once** by `workflow_dispatch` and confirm an object lands under
-   `<backup-prefix>/intraday/`, a run appears in `_log/`, and the dashboard renders.
+7. **Fire the backup once** by `workflow_dispatch` and confirm three things: an object lands under
+   `<backup-prefix>/intraday/`, a run appears in `_log/`, and the day's Slack row gets a 🖐️ ✅ tick.
+   Then check that the dashboard renders.
 
 ---
 
@@ -130,11 +141,11 @@ the-gitfather/
     roll-r2-token.ts          # escrow a rolled/minted R2 token: verify → 1Password → GitHub secrets
     profile-export.ts         # emit the few profile values a CI bash step needs, as KEY=value
     runlog.ts                 # append-only run/verification log in R2 (the dashboard's source of truth)
-    lib/                      # shared internals: config + profile schema, R2/Postgres/Slack clients,
-                              #   scheduling, tier maths, log store, preflight probes (all .ts)
+    lib/                      # shared internals: config + profile schema, R2/Postgres clients, the outcome
+                              #   record, scheduling, tier maths, log store, preflight probes (all .ts)
     __tests__/                # unit + bash-parity tests (node:test via tsx)
   dashboard/                  # the static page: template.html + heatmap.ts (SVG renderer) + theme.ts
-  scheduler/                  # the Cloudflare Worker: schedules every client's workflows + runs the staleness watchdog
+  scheduler/                  # the Cloudflare Worker: schedules every client's workflows, runs the staleness watchdog, posts to Slack
   profiles/example.yaml       # copy this into YOUR repo and edit
   docs/                       # the documentation linked below
   .github/
@@ -157,10 +168,10 @@ Built as a GitHub-Actions toolkit (TypeScript run via `tsx`), but every script i
 | [Verifying backups and restoring for real](docs/verify-and-restore.md) | The three integrity checkpoints, and the DR restore recipe |
 | [Archiving a table out of Postgres](docs/archiving.md) | The optional archiver: weeks, prune gating, keys, backfills |
 | [Backup-history dashboard](docs/dashboard.md) | What every cell means, what is published, how it's built |
-| [Slack and alerting](docs/slack-and-alerting.md) | The daily row, the failure webhook, the dead-man's-switch |
+| [Slack and alerting](docs/slack-and-alerting.md) | How a run reaches Slack, what posts where, the daily row, the failure webhook, the dead-man's-switch |
 | [Configuration, `doctor`, and troubleshooting](docs/configuration-and-troubleshooting.md) | Profile reference, validation, preflight, local runs, symptoms |
 | [Where this fits: 3-2-1-1-0](docs/threat-model.md) | The honest mapping, and the threat model |
-| [`scheduler/README.md`](scheduler/README.md) | The Cloudflare Worker: scheduler + staleness watchdog, roster, cutover |
+| [`scheduler/README.md`](scheduler/README.md) | The Cloudflare Worker: scheduler, staleness watchdog, Slack delivery, roster, cutover |
 | [`profiles/example.yaml`](profiles/example.yaml) | The annotated profile — every knob, with its default |
 
 ---

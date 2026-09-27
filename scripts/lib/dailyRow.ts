@@ -3,10 +3,9 @@
 //
 // One message per display-timezone day, persisted as _status/<basename>/<date>.json and updated
 // in place: a ✅/❌ + HH:MM tick per run, a 🖐️/🩹 origin marker, and a ⬜ placeholder for every
-// elapsed-but-empty slot. lib/slack.ts wraps these with the profile's timezone/cadence/name for the
-// Actions-side scripts; the Cloudflare Worker's watchdog passes the same values from the published
-// watchdog config. One renderer, two runtimes — so a row the backup wrote and a row the watchdog
-// refreshed can never disagree about what a slot looks like.
+// elapsed-but-empty slot. The scheduler Worker is the row's only writer (scheduler/src/dailyRowStore.ts):
+// it ticks the row from each backup's outcome record and re-renders it as slots elapse, passing the
+// timezone/cadence/name from the backup's published watchdog config.
 //
 // Node-free and env-free by construction: nothing here may import backupTypes.ts at value level
 // (it reads process.env at module load, which the Worker does not have).
@@ -32,7 +31,7 @@ export interface DailyEntry {
   ok: boolean;
   marker: string;
   origin?: RunOrigin; // drives the row marker (schedule → none, manual → 🖐️, self-heal → 🩹)
-  manual?: boolean; // @deprecated legacy field; still WRITTEN for cross-version safety, READ as fallback
+  manual?: boolean; // @deprecated legacy field — no longer written; READ as a fallback for rows written before
 }
 
 export interface DailyState {
@@ -41,6 +40,8 @@ export interface DailyState {
   date: string;
   header: string;
   entries: DailyEntry[];
+  /** The text last accepted by Slack — a refresh that renders the same text skips the update. */
+  text?: string;
 }
 
 export const pad2 = (n: number): string => String(n).padStart(2, "0");
@@ -190,6 +191,7 @@ export function parseDailyState(raw: string): DailyState | null {
       date: v.date,
       header: typeof v.header === "string" ? v.header : "",
       entries: v.entries as DailyEntry[],
+      ...(typeof v.text === "string" ? { text: v.text } : {}),
     };
   } catch {
     return null;

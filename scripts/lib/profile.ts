@@ -10,7 +10,7 @@
 //   3. merges credentials from the environment into a `credentials` group (buildRawProfile),
 //   4. bridges DISPLAY_TZ and SLOT_MINUTES into process.env (bridgeProfileEnv) — called by bootEnv as
 //      the FIRST import, so the module-load Intl formatters and the derived slot constants in
-//      backupTypes/backupHistory/slack pick them up.
+//      backupTypes/backupHistory pick them up.
 //
 // IMPORTANT: this module imports ONLY `yaml` + `node:fs` — never config.ts/backupTypes.ts — so that
 // importing it (from bootEnv) does NOT evaluate backupTypes.ts before bridgeDisplayTz() has run.
@@ -83,11 +83,8 @@ export function credentialsFromEnv(): Record<string, unknown> {
       archiveRecipient: e.AGE_ARCHIVE_RECIPIENT,
       archiveIdentity: e.AGE_ARCHIVE_IDENTITY,
     },
-    slackToken: e.SLACK_BOT_TOKEN,
-    slackChannel: e.SLACK_CHANNEL,
     heartbeatUrl: e.HEARTBEAT_URL,
     verifyHeartbeatUrl: e.VERIFY_HEARTBEAT_URL,
-    alertWebhookUrl: e.ALERT_WEBHOOK_URL,
   };
 }
 

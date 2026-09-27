@@ -12,7 +12,7 @@
 #
 # Keys are kebab-case. Every task validates this file (zod) at startup and fails fast
 # with one aggregated report naming any missing/malformed field. To check a freshly-wired
-# consumer end-to-end (config + live R2/Postgres/Slack/gh probes, read-only):
+# consumer end-to-end (config + live R2/Postgres probes, read-only):
 #
 #   PROFILE=profiles/example.yaml npm run doctor -- all
 #
@@ -22,12 +22,14 @@
 #                             PgBouncer on :6432; pg_dump needs the direct endpoint, usually :5432)
 #   R2_ACCOUNT_ID / R2_BUCKET / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY
 #   DRILL_DATABASE_URL / PG_LIVE_DATABASE_URL   (restore-drill / durable-verify)
-#   SLACK_BOT_TOKEN          (optional) xoxb-… (scope chat:write) — enables the daily Slack row
 #   HEARTBEAT_URL            (optional) dead-man's-switch ping hit on success
-#   ALERT_WEBHOOK_URL        (optional) generic failure webhook
 #   AGE_RECIPIENT / AGE_IDENTITY   (only if encryption: age)
 #   PG_ARCHIVE_DATABASE_URL  (archive, optional) — the archiver is the only task that DELETES
 #   AGE_ARCHIVE_RECIPIENT    (archive, optional) — the age PUBLIC key; its identity stays OFFLINE
+#
+# No Slack credentials, anywhere: the jobs hold no Slack token. Each run leaves an outcome record in
+# the bucket and the-gitfather's scheduler posts from it — its roster, not this file, says which
+# channel and under what bot name/icon (see `slack:` below).
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Object-key layout: <backup-prefix>/<tier>/<name>-<stamp>.<ext>
@@ -160,11 +162,11 @@ staleness:                     # the watchdog — runs in the Cloudflare Worker 
   self-heal: true              # false = alert only (never auto-retry)
   dry-run: false               # true = log the trigger, don't fire
 
-slack:                         # optional. The bot token is env: SLACK_BOT_TOKEN (a secret).
-  channel: ""                  # channel id (C…) to post in — non-secret, so it may live here. The env
-                               #   SLACK_CHANNEL (a GitHub Variable) wins when set. The Worker's watchdog
-                               #   posts to this channel too (from the published watchdog config).
-  alert-mention: "<!here>"     # prepended to failure alerts (<!here> active members, <!channel> everyone)
+slack:                         # optional. The mention is the only Slack setting a profile owns: the channel
+                               #   and the bot's name/icon live in the scheduler's roster, next to its token.
+  alert-mention: "<!here>"     # prepended to pages. <!here> (active members), <!channel> (everyone), a user
+                               #   <@U…>, or a user group <!subteam^S…> — up to 4, separated by single spaces.
+                               #   Anything else is refused: it is the one profile text posted unescaped.
 
 dashboard:                     # optional public backup-history dashboard
   label: ""                    # display label; defaults to `name`

@@ -145,8 +145,6 @@ function runArchiver(profile: string, args: string[], extraEnv: Record<string, s
       PGSSLROOTCERT: "",
       PROFILE: profile,
       PG_ARCHIVE_DATABASE_URL: dbUrl(),
-      SLACK_BOT_TOKEN: "",
-      SLACK_CHANNEL: "",
       ...extraEnv,
     },
   }).replace(/\s+$/, "");

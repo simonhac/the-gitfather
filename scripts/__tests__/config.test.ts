@@ -10,6 +10,7 @@ import {
   joinObjectKey,
   configWarnings,
 } from "../lib/config.js";
+import { drainOutcomeAlerts } from "../lib/outcomeSink.js";
 
 // Minimal valid nested profiles (config from YAML + credentials from env). Tests mutate one field at a time.
 const r2 = { accountId: "acct", bucket: "my-bucket", accessKeyId: "k", secretAccessKey: "s" };
@@ -55,8 +56,10 @@ test("retention: defaults to 2 days / 3 weeks / 13 weeks / 2 years as { days, la
 test("strict: unknown / typo'd / misplaced keys are rejected, not silently dropped", () => {
   assert.ok(!backupSchema.safeParse({ ...backupBase, bogusTopLevel: 1 }).success);
   assert.ok(!backupSchema.safeParse({ ...backupBase, retention: { weekley: "1 week" } }).success); // tier typo
-  // Slack creds belong in env, not under the YAML slack: group — must fail, not silently disable Slack.
+  // The only Slack key a profile owns is alert-mention. A token or a channel under slack: (the
+  // channel's old home) must fail, not be silently ignored — they live in the scheduler's roster now.
   assert.ok(!backupSchema.safeParse({ ...backupBase, slack: { token: "xoxb-1", channel: "C1" } }).success);
+  assert.ok(!backupSchema.safeParse({ ...backupBase, slack: { channel: "C1" } }).success);
 });
 
 test("retention: overrides parse; a malformed duration is rejected", () => {
@@ -232,9 +235,27 @@ test("drill: encryption=age requires age.identity (AGE_IDENTITY)", () => {
   assert.ok(drillSchema.safeParse({ ...drillBase, encryption: "age", credentials: { ...drillBase.credentials, age: { identity: "/run/key.txt" } } }).success);
 });
 
-test("slack token (SLACK_BOT_TOKEN) set requires SLACK_CHANNEL (credentials.slackChannel)", () => {
-  assert.ok(!backupSchema.safeParse({ ...backupBase, credentials: { ...backupBase.credentials, slackToken: "xoxb-1" } }).success);
-  assert.ok(backupSchema.safeParse({ ...backupBase, credentials: { ...backupBase.credentials, slackToken: "xoxb-1", slackChannel: "C123" } }).success);
+test("slack.alert-mention: defaults to <!here>; only the mention grammar is accepted", () => {
+  const mention = (alertMention: unknown) => backupSchema.safeParse({ ...backupBase, slack: { alertMention } });
+  assert.equal(backupSchema.safeParse(backupBase).data?.slack.alertMention, "<!here>");
+  assert.equal(mention("").data?.slack.alertMention, "<!here>", "blank → the default");
+  for (const ok of ["<!here>", "<!channel>", "<@U0123ABC>", "<@W0123ABC>", "<!subteam^S0123ABC>", "<!here> <@U0123ABC>"]) {
+    assert.equal(mention(ok).data?.slack.alertMention, ok, ok);
+  }
+  // It is the one piece of profile text the scheduler posts unescaped, so anything that is not a
+  // plain mention — a link, a broadcast Slack has no token for, prose — is refused at the profile.
+  for (const bad of ["@here", "<!everyone>", "<https://evil.example|click>", "<!here> please", "<!here>  <!channel>", "<!here> <!here> <!here> <!here> <!here>"]) {
+    const r = mention(bad);
+    assert.ok(!r.success, bad);
+    assert.match(r.error!.issues.map((i) => i.message).join(" "), /<!here>, <!channel>, a user/);
+  }
+});
+
+test("credentials: the retired Slack token / channel / webhook are not credentials any more", () => {
+  // Strict: a caller still threading them into the credential group would be a bug, not a no-op.
+  for (const k of ["slackToken", "slackChannel", "alertWebhookUrl"]) {
+    assert.ok(!backupSchema.safeParse({ ...backupBase, credentials: { ...backupBase.credentials, [k]: "x" } }).success, k);
+  }
 });
 
 test("dashboard: --upload requires DASHBOARD_R2_BUCKET; reading R2 requires R2_BUCKET + name", () => {
@@ -283,6 +304,46 @@ test("reportConfigError: lists kebab field + ENV credential names, never values"
   assert.ok(out.includes("R2_BUCKET"), "credential ENV name");
   assert.ok(out.includes("PG_BACKUP_DATABASE_URL"), "credential ENV name");
   assert.ok(!out.includes("rot13") && !out.includes("bad bucket") && !out.includes("http://nope"), "no values leaked");
+});
+
+test("reportConfigError: pages config_invalid into the outcome record — field names only, never a value", () => {
+  const report = (input: Record<string, unknown>) => {
+    const r = backupSchema.safeParse(input);
+    assert.ok(!r.success);
+    drainOutcomeAlerts(); // start from an empty sink
+    const orig = process.stderr.write.bind(process.stderr);
+    (process.stderr as unknown as { write: (s: string) => boolean }).write = () => true;
+    try {
+      reportConfigError(r.error!);
+    } finally {
+      process.stderr.write = orig;
+    }
+    const alerts = drainOutcomeAlerts();
+    assert.equal(alerts.length, 1, "one alert per report, however many issues");
+    assert.equal(alerts[0].severity, "page");
+    assert.equal(alerts[0].code, "config_invalid");
+    assert.match(alerts[0].text, /^config validation failed: /);
+    return alerts[0].text;
+  };
+
+  // Field-level issues: kebab YAML keys and credential ENV names, as in the stderr report.
+  const fields = report({
+    ...backupBase,
+    anchorHourUtc: 99,
+    credentials: { ...backupBase.credentials, databaseUrl: "http://nope" },
+  });
+  assert.ok(fields.includes("anchor-hour-utc") && fields.includes("PG_BACKUP_DATABASE_URL"), fields);
+  assert.ok(!fields.includes("99") && !fields.includes("http://nope"), `value leaked: ${fields}`);
+
+  // expect-recipient's issue MESSAGE quotes both recipients (fine on the job's own stderr); the
+  // outcome leaves the job, so it carries the field name alone.
+  const pinned = report({
+    ...backupBase,
+    encryption: "age",
+    expectRecipient: "age1pinned-value",
+    credentials: { ...backupBase.credentials, age: { recipient: "age1other-value" } },
+  });
+  assert.equal(pinned, "config validation failed: AGE_RECIPIENT");
 });
 
 // ── CB-303: the recipient pin, and verify-before-encrypt's own requirements ──
