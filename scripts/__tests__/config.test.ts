@@ -387,6 +387,11 @@ test("verify-durable keyless defaults OFF — existing profiles keep restoring",
 test("verify-durable: the re-hash rotation and drill-staleness defaults", () => {
   const d = verifyDurableSchema.safeParse(drillBase).data?.verifyDurable;
   assert.equal(d?.rehashPerRun, 1, "on by default — every deployment has the hash-once weakness");
-  assert.equal(d?.rehashMaxAgeDays, 90, "the rotation's own dead-man's switch, on by default");
+  assert.equal(
+    d?.rehashMaxAgeDays,
+    0,
+    "OFF by default — on day one the backlog spans the whole corpus's age, so this would page " +
+      "nightly for a sweep on a condition the rotation itself just created",
+  );
   assert.equal(d?.drillMaxAgeDays, 0, "off by default — only keyless deployments depend on a manual drill");
 });

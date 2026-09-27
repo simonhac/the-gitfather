@@ -112,8 +112,12 @@ verify-durable:                # daily durable-tier verification (verify-durable
                                # "the bytes are unchanged" stays a CURRENT claim and not one made
                                # once on first sight. Oldest-first, so the budget lands on the
                                # long-lived tiers by itself. 0 disables.
-  rehash-max-age-days: 90      # page if the least-recently-hashed object exceeds this (0 = off).
-                               # Roughly 2x your sweep time = objects / rehash-per-run runs.
+  rehash-max-age-days: 0       # 0 = off (the default). Page if the least-recently-hashed object
+                               # exceeds this; roughly 2x your sweep (objects / rehash-per-run runs).
+                               # Turn it on only AFTER the rotation has swept once: before the
+                               # rotation existed each object was hashed once and never again, so on
+                               # day one the backlog spans your whole corpus's age and this would
+                               # page nightly for a sweep — an alarm its own feature just created.
   drill-max-age-days: 0        # warn when the newest MANUAL drill (drill-object.ts) is older than
                                # this. Set it if you run keyless: that drill is then the ONLY proof
                                # your escrowed identity still opens a stored object.

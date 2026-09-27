@@ -66,9 +66,13 @@ missed run self-corrects:
   recurring proof. One per run is a single download and sweeps a ~46-object corpus in ~46 days,
   and because it picks the oldest first, the budget lands on the long-lived `weekly`/`monthly`
   copies by itself: a `daily` copy expires before its turn ever comes round.
-- **`verify-durable.rehash-max-age-days`** (default 90, 0 disables) **pages** when the
-  least-recently-hashed object exceeds it. A rotation that stops — set to 0, or outgrown by the
-  corpus — otherwise decays coverage with no symptom at all. Set it to roughly twice your sweep.
+- **`verify-durable.rehash-max-age-days`** (**default 0 — off**) **pages** when the
+  least-recently-hashed object exceeds it. A rotation that stops, or one outgrown by the corpus,
+  otherwise decays coverage with no symptom at all. Set it to roughly twice your sweep, and turn it
+  on only **after** the rotation has swept once: beforehand each object carries a single hash from
+  the day it was promoted, so the backlog spans your whole corpus's age and this pages every night
+  for a sweep. Unlike `rehash-per-run`, defaulting this on would fire an alarm on a condition the
+  feature itself introduced.
 - **Census floor** (always on): the durable listing is checked against the run-log, which independently
   records every promotion and the retention window it is still inside. Anything the log names that the
   listing did not return **pages**, naming the keys. A filtered listing cannot otherwise tell "nothing is
