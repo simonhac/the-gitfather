@@ -179,8 +179,18 @@ const verifyDurableGroup = z
     rehashPerRun: intIn(1, 0, 1000),
     // Page when the least-recently-hashed object is older than this. A rotation that stops — set
     // to 0, or outgrown by the corpus — otherwise degrades coverage with no symptom whatsoever.
-    // 0 disables the check. Set it to roughly twice your sweep time.
-    rehashMaxAgeDays: intIn(90, 0, 3650),
+    // Set it to roughly twice your sweep time (objects ÷ rehash-per-run runs).
+    //
+    // DEFAULTS OFF, unlike rehash-per-run, and the asymmetry is the point. Turning the rotation on
+    // by default only costs a download. Turning this on by default PAGES every existing deployment
+    // for its first sweep: before the rotation existed, each object was hashed once when it was
+    // first promoted and never again, so on day one the backlog spans the whole corpus's age. A
+    // check that fires on a condition its own feature just created is indistinguishable from a
+    // real alarm, and it fires nightly for ~46 runs.
+    //
+    // So enable it deliberately, once the rotation has swept at least once. At steady state every
+    // object is re-hashed within one sweep, and a breach then means something genuinely stopped.
+    rehashMaxAgeDays: intIn(0, 0, 3650),
     // Warn when the newest MANUAL restore drill is older than this. In keyless mode that drill is
     // the only thing that ever proves the escrowed key still opens a stored object, and it runs on
     // a human's cadence — so the one failure mode with no signal at all is somebody forgetting.
