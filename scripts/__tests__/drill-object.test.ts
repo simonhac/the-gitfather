@@ -23,6 +23,11 @@ test("parseArgs: an unknown flag throws rather than being ignored", () => {
   assert.throws(() => parseArgs(["--norecord"]), /unknown argument --norecord/);
 });
 
+test("parseArgs: --kit-id picks the stored recovery kit; by default there is none (the newest is used)", () => {
+  assert.equal(parseArgs(["--key", "daily/x.dump", "--kit-id", "2026-09-28-0c2c348e95da"]).kitId, "2026-09-28-0c2c348e95da");
+  assert.equal(parseArgs(["--key", "daily/x.dump"]).kitId, undefined);
+});
+
 test("parseArgs: --list and --no-record", () => {
   assert.equal(parseArgs(["--list"]).list, true);
   assert.equal(parseArgs(["--key", "daily/x.dump", "--no-record"]).record, false);

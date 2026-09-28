@@ -140,6 +140,9 @@ test("parseArgs: each command, and its required flags", () => {
   assert.deepEqual(parseArgs(["practice", "--ceremony", "c.yaml", "--issue", "P3"]), { cmd: "practice", ceremony: "c.yaml", issue: "P3", out: undefined });
   assert.deepEqual(parseArgs(["recover", "--recipient", RECIPIENT, "--share", "a.txt"]), { cmd: "recover", recipient: RECIPIENT, shares: ["a.txt"] });
   assert.deepEqual(parseArgs(["check-share"]), { cmd: "check-share" });
+  assert.deepEqual(parseArgs(["drill", "--kit", "k"]), { cmd: "drill", kit: "k", image: "python:3.12-bookworm" });
+  assert.deepEqual(parseArgs(["drill", "--kit", "k", "--image", "debian:13"]), { cmd: "drill", kit: "k", image: "debian:13" });
+  assert.throws(() => parseArgs(["drill"]), /drill needs --kit/);
   assert.throws(() => parseArgs(["cards"]), /needs --ceremony/);
   assert.throws(() => parseArgs(["recover"]), /needs --recipient/);
   assert.throws(() => parseArgs(["recover", "--recipient", "x", "--share", "a", "--share", "b", "--share", "c"]), /at most two/);

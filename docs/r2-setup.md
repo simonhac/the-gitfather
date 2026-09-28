@@ -116,6 +116,23 @@ The same CI token works: Object Read & Write, no delete.
 
 ---
 
+## The recovery-kit prefix
+
+The [recovery kit](key-escrow.md#the-recovery-kit) lives in the same bucket as the backups, under
+`recovery-kit/` at the bucket root. Like the archive prefix it must be **permanent**: no lifecycle rule
+covers it (the rules above are all under `<prefix>/`, `_status/` and `_log/`). Unlike the archive, it
+never needs cleaning up, since each kit is small and written once, so it is locked **indefinitely**:
+
+```bash
+# NO lifecycle expiry rule on recovery-kit/.
+npx wrangler r2 bucket lock add <your-bucket> lock-recovery-kit recovery-kit/ --retention-indefinite
+```
+
+The lock stops a leaked credential deleting or overwriting a kit. Removing a kit means removing this
+rule first, with account-level credentials. Uploading and verifying need only the CI token.
+
+---
+
 ## Rotating an R2 token — `npm run roll-r2`
 
 Rolling an R2 API token is the only way to **learn** its credential: neither Cloudflare nor GitHub

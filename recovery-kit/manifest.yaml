@@ -1,0 +1,162 @@
+# The RECOVERY KIT manifest — every artifact a stranger needs to open the backups years from now,
+# pinned by version and SHA-256. `npm run recovery-kit -- build` fetches each one, refuses any whose
+# bytes don't match, and assembles the kit; see docs/key-escrow.md#the-recovery-kit.
+#
+# What belongs here is what RECOVERY needs, not what runs the backups: nobody opening a backup in ten
+# years needs tsx, zod or the scheduler Worker. Not here on purpose: rclone (R2 speaks plain S3, so any
+# S3 client fetches the objects) and this repo (the kit's README walks the no-repo path).
+#
+# BUMPING an artifact: change `version`, `url` and `path` together, then take the new `sha256` from
+# a source you trust independently of the download itself, and write down which one in `checksum`:
+#   - PyPI:       https://pypi.org/pypi/<package>/<version>/json → urls[].digests.sha256
+#   - age:        the release's asset digests: gh api repos/FiloSottile/age/releases/tags/<tag>
+#   - zstd:       the release's <file>.sha256 asset
+#   - PostgreSQL: https://ftp.postgresql.org/pub/source/v<version>/<file>.sha256
+#   - specs:      pin `url` to a commit, never a branch; hash the file you reviewed
+# shamir-mnemonic stays at the version CI tests against (.github/workflows/ci.yml); bump both together.
+# PostgreSQL's major must be at least every profile's `dump.client-major` (default 17): pg_restore
+# refuses a dump from a newer pg_dump. Then run `build`, `upload` and `verify`, and an offline drill.
+
+artifacts:
+  # ── SLIP-39: the standard the key cards are written in ────────────────────────────────────────────
+  # With the spec and its word list, a person can rebuild a split key by hand even if every
+  # implementation has gone.
+  - path: slip39/slip-0039.md
+    name: SLIP-39 specification
+    version: satoshilabs/slips@78c87bc
+    url: https://raw.githubusercontent.com/satoshilabs/slips/78c87bc63ba1e4479dad7ffd3b18584430d8efb6/slip-0039.md
+    sha256: 7b4269f66f10f03ac685ea7c76f742bfbf56211af1af29339eadef9acba1f856
+    checksum: hashed at review
+  - path: slip39/wordlist.txt
+    name: SLIP-39 word list (1,024 words)
+    version: satoshilabs/slips@78c87bc
+    url: https://raw.githubusercontent.com/satoshilabs/slips/78c87bc63ba1e4479dad7ffd3b18584430d8efb6/slip-0039/wordlist.txt
+    sha256: bcc4555340332d169718aed8bf31dd9d5248cb7da6e5d355140ef4f1e601eec3
+    checksum: hashed at review; byte-identical to the list inside the shamir-mnemonic wheel
+
+  # ── Python: the reference code that turns the cards back into a key ─────────────────────────────────
+  # Wheels, not sdists: a pure-Python wheel installs with `pip install --no-index` and no build
+  # backend, which an sdist would have to download. A wheel is a zip of the .py source, so it is the
+  # source too. click is only for the `shamir` command-line tool (`shamir-mnemonic[cli]`).
+  - path: python/shamir_mnemonic-0.3.0-py3-none-any.whl
+    name: shamir-mnemonic (SLIP-39 reference implementation)
+    version: 0.3.0
+    url: https://files.pythonhosted.org/packages/1d/38/2124e565afe40993949dbc89da6c654a2c9a1b24dd80039812ef7cdbaef3/shamir_mnemonic-0.3.0-py3-none-any.whl
+    sha256: 188c6b5bd00d5e756e12e2b186c3cb7c98ff7ff44df608d4c1d2077f6b6e730f
+    checksum: PyPI
+  - path: python/bech32-1.2.0-py3-none-any.whl
+    name: bech32 (BIP-173 reference implementation)
+    version: 1.2.0
+    url: https://files.pythonhosted.org/packages/b6/41/7022a226e5a6ac7091a95ba36bad057012ab7330b9894ad4e14e31d0b858/bech32-1.2.0-py3-none-any.whl
+    sha256: 990dc8e5a5e4feabbdf55207b5315fdd9b73db40be294a19b3752cde9e79d981
+    checksum: PyPI
+  - path: python/click-8.5.0-py3-none-any.whl
+    name: click (for the shamir command-line tool)
+    version: 8.5.0
+    url: https://files.pythonhosted.org/packages/58/50/6c0d534c5f134586a8e1ba4e330569e32f057e33372ae556463212fb4cd3/click-8.5.0-py3-none-any.whl
+    sha256: 255bc9599cf7748b4b1a446ccc735421bd08a2ae529a8b88597d3de5664ee360
+    checksum: PyPI
+
+  # ── age: decrypts every .age object ────────────────────────────────────────────────────────────────
+  # Static binaries (each tarball holds age and age-keygen), the source, and the format spec.
+  - path: age/age-v1.3.2-darwin-arm64.tar.gz
+    name: age for macOS (Apple silicon)
+    version: v1.3.2
+    url: https://github.com/FiloSottile/age/releases/download/v1.3.2/age-v1.3.2-darwin-arm64.tar.gz
+    sha256: e2020b073c44f692685a24d6abc378817eb81ffaaf49fd0531ef8565f767f2f5
+    checksum: GitHub release asset digest
+  - path: age/age-v1.3.2-darwin-amd64.tar.gz
+    name: age for macOS (Intel)
+    version: v1.3.2
+    url: https://github.com/FiloSottile/age/releases/download/v1.3.2/age-v1.3.2-darwin-amd64.tar.gz
+    sha256: 1d1e4bc66e1427edad7739ae7616157de0e79db8b6d2a1497d7d9925fb06a539
+    checksum: GitHub release asset digest
+  - path: age/age-v1.3.2-linux-amd64.tar.gz
+    name: age for Linux (x86-64)
+    version: v1.3.2
+    url: https://github.com/FiloSottile/age/releases/download/v1.3.2/age-v1.3.2-linux-amd64.tar.gz
+    sha256: cbe24006683f8eb669266162894b9a522a1af52f2665fbc63a4bb032ed26ac10
+    checksum: GitHub release asset digest
+  - path: age/age-v1.3.2-linux-arm64.tar.gz
+    name: age for Linux (ARM64)
+    version: v1.3.2
+    url: https://github.com/FiloSottile/age/releases/download/v1.3.2/age-v1.3.2-linux-arm64.tar.gz
+    sha256: 6b8dc4333c53a5a57c9e5834e3a48f92605d7154014cd07269ff3327db5d37f4
+    checksum: GitHub release asset digest
+  - path: age/age-v1.3.2-windows-amd64.zip
+    name: age for Windows (x86-64)
+    version: v1.3.2
+    url: https://github.com/FiloSottile/age/releases/download/v1.3.2/age-v1.3.2-windows-amd64.zip
+    sha256: f48d8f8f9ebe903ab5027ed067652f2cc1db94bc206976430133b905dcd8e8c7
+    checksum: GitHub release asset digest
+  - path: age/age-v1.3.2-source.tar.gz
+    name: age source
+    version: v1.3.2
+    url: https://github.com/FiloSottile/age/releases/download/v1.3.2/age-v1.3.2-source.tar.gz
+    sha256: c160d6f907992561413a28818f7d7585b35977cdbc449f3e96c4f8c99d22d21e
+    checksum: GitHub release asset digest
+  - path: age/age-spec.md
+    name: age file format specification (age-encryption.org/v1)
+    version: C2SP/C2SP@fc7f312
+    url: https://raw.githubusercontent.com/C2SP/C2SP/fc7f312aff098ed080f3dd5a3da4fd820be17a2e/age.md
+    sha256: b0a767b91a184c536e8a04002f7bba7521388fee3989f5891e23cc1aaa00232f
+    checksum: hashed at review
+
+  # ── zstd: archive objects are zstd-compressed before they are encrypted ─────────────────────────────
+  # Upstream publishes binaries for Windows only; the source builds with `make` and a C compiler and
+  # has no dependencies.
+  - path: zstd/zstd-1.5.7.tar.gz
+    name: zstd source
+    version: 1.5.7
+    url: https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz
+    sha256: eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3
+    checksum: release .sha256 asset
+  - path: zstd/zstd-v1.5.7-win64.zip
+    name: zstd for Windows (x86-64)
+    version: 1.5.7
+    url: https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-v1.5.7-win64.zip
+    sha256: acb4e8111511749dc7a3ebedca9b04190e37a17afeb73f55d4425dbf0b90fad9
+    checksum: hashed at review
+  - path: zstd/rfc8878.txt
+    name: Zstandard format specification (RFC 8878)
+    version: RFC 8878
+    url: https://www.rfc-editor.org/rfc/rfc8878.txt
+    sha256: 8ee6be03534113f5689cda75b9539a02e0704a2506d420814223e506420aeea4
+    checksum: hashed at review
+
+  # ── PostgreSQL: pg_restore turns a .dump back into a database ───────────────────────────────────────
+  - path: postgres/postgresql-17.11.tar.gz
+    name: PostgreSQL source
+    version: "17.11"
+    url: https://ftp.postgresql.org/pub/source/v17.11/postgresql-17.11.tar.gz
+    sha256: 5367f6fb2ec97efe1eb2e0c7926bb33438e51b0bd3a9733b88498056a7dc9a7e
+    checksum: ftp.postgresql.org .sha256
+  # Dumps are pg_dump's custom format (-Fc), which gzip-compresses its contents by default: a
+  # pg_restore built without zlib cannot read them.
+  - path: postgres/zlib-1.3.2.tar.gz
+    name: zlib source (pg_restore needs it to read compressed dumps)
+    version: 1.3.2
+    url: https://github.com/madler/zlib/releases/download/v1.3.2/zlib-1.3.2.tar.gz
+    sha256: bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16
+    checksum: GitHub release asset digest
+  # Since PostgreSQL 17 the source tarball no longer carries its generated parsers, so building it
+  # needs bison and flex (and Perl, which every Unix has), and both of those need m4. Each of the
+  # three builds with ./configure && make.
+  - path: postgres/m4-1.4.21.tar.gz
+    name: GNU m4 source (bison and flex need it)
+    version: 1.4.21
+    url: https://ftp.gnu.org/gnu/m4/m4-1.4.21.tar.gz
+    sha256: 38ae59f7a30bf9c108193cc5c25fbb06014f21e230c7ede2eff614f7b7c37ed8
+    checksum: hashed after a good GPG signature (the .sig beside it on ftp.gnu.org)
+  - path: postgres/bison-3.8.2.tar.gz
+    name: GNU bison source (building PostgreSQL needs it)
+    version: 3.8.2
+    url: https://ftp.gnu.org/gnu/bison/bison-3.8.2.tar.gz
+    sha256: 06c9e13bdf7eb24d4ceb6b59205a4f67c2c7e7213119644430fe82fbd14a0abb
+    checksum: hashed after a good GPG signature (the .sig beside it on ftp.gnu.org)
+  - path: postgres/flex-2.6.4.tar.gz
+    name: flex source (building PostgreSQL needs it)
+    version: 2.6.4
+    url: https://github.com/westes/flex/releases/download/v2.6.4/flex-2.6.4.tar.gz
+    sha256: e87aae032bf07c26f85ac0ed3250998c37621d95f8bd748b31f15b33c45ee995
+    checksum: hashed at review

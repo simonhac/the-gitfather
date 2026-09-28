@@ -145,7 +145,8 @@ out.
 ### Without this repo
 
 The cards say "SLIP-39" so that anyone can do a recovery even if this repo is gone. You need the
-reference CLI and a four-line bech32 conversion:
+reference CLI and a four-line bech32 conversion. The [recovery kit](#the-recovery-kit) carries both, and
+its README walks the same path with no network at all; with the internet still there:
 
 ```bash
 python3 -m venv slip39 && slip39/bin/pip install 'shamir-mnemonic[cli]' bech32
@@ -154,6 +155,83 @@ slip39/bin/python -c "import bech32,sys; print(bech32.bech32_encode('age-secret-
   bech32.convertbits(bytes.fromhex(sys.argv[1]), 8, 5)).upper())" <hex> > identity.txt
 age-keygen -y identity.txt         # must print the recipient the card's Unlocks code abbreviates
 ```
+
+## The recovery kit
+
+The cards are only half of a recovery. Years from now, whoever holds them also needs the code that
+reads them, age, zstd and `pg_restore`, and none of that can be assumed to be one download away. The
+**recovery kit** is all of it, pinned and checksummed, stored in the backup bucket beside the backups:
+
+| | |
+|---|---|
+| **SLIP-39** | The spec and its 1,024-word list: with these alone, a key can be rebuilt by hand |
+| **Python** | `shamir-mnemonic` (the version CI tests), `bech32` and `click`, as wheels that install offline |
+| **age** | Binaries for macOS (arm64, amd64), Linux (amd64, arm64) and Windows, the source, and the spec |
+| **zstd** | The source, the Windows binary, and RFC 8878. Table archives are zstd-compressed before encryption. |
+| **PostgreSQL** | The source for the dump major, with zlib (dumps are gzip-compressed), bison, flex and m4 (building it needs them) |
+| **Docs** | A "start here" README for a stranger, `build-tools.sh`, this runbook, and the manifest |
+
+It holds what *recovery* needs, not what runs the backups. The npm tooling, rclone (R2 speaks plain S3)
+and this repo are deliberately left out.
+
+[`recovery-kit/manifest.yaml`](../recovery-kit/manifest.yaml) pins each artifact by URL, version and
+SHA-256, and says where each checksum came from. The comment at its top says how to bump one.
+
+```bash
+npm run recovery-kit -- build [--out <dir>]      # fetch, refuse any byte that differs, assemble; also <dir>.tar
+npm run key-shares -- drill --kit <dir>          # prove it complete, offline (below)
+R2_ACCOUNT_ID=… R2_BUCKET=… R2_ACCESS_KEY_ID=… R2_SECRET_ACCESS_KEY=… \
+  npm run recovery-kit -- upload --kit <dir>     # store it under recovery-kit/<date>-<digest>/, then re-verify
+npm run recovery-kit -- verify [--kit-id <id>]   # re-download every stored kit and re-hash every byte
+```
+
+- **Each kit is stored once, and never changed.** Its id is the date plus a digest of its `SHA256SUMS`.
+  Uploading a kit whose digest is already stored does nothing. `SHA256SUMS` goes up last, so a kit
+  without one is an upload that was cut short; `verify` calls it incomplete and `upload` resumes it.
+- **The prefix is locked with no expiry.** Set that up once, by hand, with account-level credentials:
+  [R2 setup](r2-setup.md#the-recovery-kit-prefix). The CI token (read and write, no delete) is enough to
+  upload and verify.
+- **Rebuild and upload after bumping the manifest**, or after editing this runbook: the kit carries a
+  copy. `verify` marks a stored kit that is older than the manifest.
+- **A second copy on a USB drive**, held by one of the key holders, covers losing R2 itself. `build`
+  writes the kit as one plain `.tar` too, for that. A holder who keeps the drive with their card is still
+  only one share: the kit holds no secret.
+
+### Proving the kit offline
+
+A kit nobody has recovered from is a kit on faith. The offline drill runs a whole recovery in a
+container with **no network**, holding only the kit and a practice issue:
+
+```bash
+npm run key-shares -- drill --kit <dir>   # Docker, OrbStack or Podman (DOCKER=<binary>); about 5 minutes
+```
+
+It makes two throwaway keys, splits each 2-of-3, and hands the container holders 1 and 3's shares, the
+public recipient each key must derive, and an archive file made the way the archiver makes them (rows,
+then zstd, then age). Inside a stock `python:3.12-bookworm` image started with `--network none`,
+[`recovery-kit/offline-drill.sh`](../recovery-kit/offline-drill.sh) follows the kit's README:
+
+1. It checks it really is offline, then checks the kit against `SHA256SUMS`.
+2. It installs the Python wheels with `pip --no-index`, and checks the library's word list is the spec's.
+3. It rebuilds both keys with `shamir recover` and the bech32 one-liner.
+4. It runs the kit's `build-tools.sh`, which builds age, zstd, m4, bison, flex, zlib and PostgreSQL.
+5. It checks each rebuilt key derives its recipient, and opens the archive file.
+6. It dumps a small database with the kit's own `pg_dump -Fc` (the host's may be a newer major) and
+   encrypts it to the practice recipient. Then it decrypts that with the rebuilt key, restores it, and
+   checks the row.
+
+If the kit lacks anything a recovery needs, a step fails. That is how bison, flex and m4 got into it:
+PostgreSQL 17's source no longer includes its generated parser, and the first drill failed on it. Run
+the drill after every change to the manifest, before uploading.
+
+### The monthly drill runs on the kit
+
+The [manual drill](verify-and-restore.md#verifying-backups-integrity) (`npm run drill-object`) does not
+use the laptop's own age and `pg_restore`. It downloads the newest complete kit from the bucket (or
+`--kit-id <id>`) and checks every byte, then builds the kit's tools and runs the drill on them. The kit's
+id goes into the verification record. The first drill on a new kit takes a few extra minutes; the tools
+are cached per kit id after that, in `~/.cache/the-gitfather/kit-tools/` (or `$GITFATHER_KIT_CACHE`).
+With `verify-durable.drill-max-age-days` set, only drills that ran on the kit count as recent.
 
 ## When holders change, or a card is lost
 
@@ -165,4 +243,4 @@ age-keygen -y identity.txt         # must print the recipient the card's Unlocks
   age key itself: generate a new identity, switch the recipients to it, and escrow the new key. Objects
   encrypted to the old key stay readable with it until they age out of retention.
 - **Once a year:** ask each holder to confirm they still have their card and know where it is, and run
-  a practice drill.
+  a practice drill. Run `npm run recovery-kit -- verify` too.
