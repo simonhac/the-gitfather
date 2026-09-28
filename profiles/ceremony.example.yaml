@@ -1,0 +1,41 @@
+# A key-escrow ceremony file — see docs/key-escrow.md. Nothing here is secret (the identities come
+# from the environment at ceremony time), but it names people, so keep the real one in the consuming
+# repo or somewhere private, not in this public repo.
+#
+#   npm run key-shares -- cards    --ceremony ceremony.yaml   # live cards, from the real keys
+#   npm run key-shares -- practice --ceremony ceremony.yaml   # practice cards, throwaway keys
+
+org: Example Co
+system: Postgres backups        # printed in the card's header; this is the default
+issue: "1"                      # bump for every live re-issue; printed on each card. Default: today's date
+# date: 28 September 2026       # printed as-is; default: today
+# runbook: github.com/simonhac/the-gitfather/blob/main/docs/key-escrow.md   # the default
+
+# Exactly three. Holder N gets share N of every key; each card lists the other two, so a holder
+# always knows who else can help.
+holders:
+  - name: Alex Example
+    role: Director
+    phone: +61 400 000 001
+    email: alex@example.com
+  - name: Bea Sample
+    role: Engineering lead
+    phone: +61 400 000 002
+    email: bea@example.com
+  - name: Casey Demo
+    role: External accountant
+    phone: +61 400 000 003
+    email: casey@example.com
+
+# One or two keys per card. `identity-env` names the variable holding the identity (the key itself
+# or a path to a key file) when `cards` runs; `recipient` pins its public key, and the ceremony
+# refuses to split an identity that does not derive it.
+keys:
+  - title: Daily backups key
+    blurb: Opens the daily, weekly and monthly database backups.
+    identity-env: AGE_IDENTITY
+    recipient: age1khd7y6y5ywhrsnel77czrkv7d7c85prsv6gf5qlfjezmhdyfzeustjkl6l
+  - title: Archive key
+    blurb: Opens the long-term archives of old table rows.
+    identity-env: AGE_ARCHIVE_IDENTITY
+    recipient: age1fgnnrsuddhc9epqakuh2rg4qeu0xgpkrzvegg44uxttvrnwmj3ese877qk

@@ -80,7 +80,8 @@ WORM too) — run the whole pipeline there before pointing it at R2.
 ### Encryption: a different recipient from the dumps
 
 `archive.encryption: age` uses **`AGE_ARCHIVE_RECIPIENT`**, not the dumps' `AGE_RECIPIENT`. Keep the
-matching identity **offline** (a password manager, not a GitHub secret). CI never needs it: verification
+matching identity **offline** (a password manager, not a GitHub secret), and escrow it so losing that
+one copy is survivable — see [Key escrow](key-escrow.md). CI never needs it: verification
 is hash- and fingerprint-based, so a leaked CI credential can move archives around but cannot read a
 single row.
 

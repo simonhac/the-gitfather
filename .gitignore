@@ -11,3 +11,6 @@ scheduler/.wrangler/
 .env
 .env.*
 .DS_Store
+# key-shares cards hold secret words: print them, never commit them
+*-recovery-share-*-of-3-*.pdf
+*-practice-share-*-of-3-*.pdf
