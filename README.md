@@ -48,7 +48,7 @@ repo, and credentials come from the environment (GitHub secrets), never from the
 - **A recovery kit** — `npm run recovery-kit` stores everything a stranger needs to open the backups
   (the SLIP-39 spec and code, age, zstd, PostgreSQL's source) beside them, pinned and checksummed; an
   offline drill proves it complete, and the monthly manual drill runs on its tools.
-  → [The recovery kit](docs/key-escrow.md#the-recovery-kit)
+  → [Recovery kit guide](docs/recovery-kit-guide.md) (runbooks) · [how it works](docs/recovery-kit.md)
 - **A read-only preflight** — `npm run doctor -- all` runs the real config schema plus live probes of
   every external client, and writes nothing.
   → [Configuration & `doctor`](docs/configuration-and-troubleshooting.md#config-validation--doctor)
@@ -177,7 +177,9 @@ Built as a GitHub-Actions toolkit (TypeScript run via `tsx`), but every script i
 | [R2 buckets, retention, locks and tokens](docs/r2-setup.md) | The GFS tiers, the `wrangler` setup, and rotating the CI token |
 | [Verifying backups and restoring for real](docs/verify-and-restore.md) | The three integrity checkpoints, and the DR restore recipe |
 | [Archiving a table out of Postgres](docs/archiving.md) | The optional archiver: weeks, prune gating, keys, backfills |
-| [Key escrow: 2-of-3 recovery cards](docs/key-escrow.md) | Splitting the decrypt keys among three holders, the ceremony, practice drills, recovery, and the recovery kit |
+| [Key escrow: 2-of-3 recovery cards](docs/key-escrow.md) | Splitting the decrypt keys among three holders, the ceremony, practice drills, recovery |
+| [Recovery kit guide](docs/recovery-kit-guide.md) | Runbooks: a full restore, and the monthly check; keeping the kit current |
+| [The recovery kit: how it works](docs/recovery-kit.md) | What the kit holds and why, pinning, storage and locking, the offline drill |
 | [Backup-history dashboard](docs/dashboard.md) | What every cell means, what is published, how it's built |
 | [Slack and alerting](docs/slack-and-alerting.md) | How a run reaches Slack, what posts where, the daily row, the failure webhook, the dead-man's-switch |
 | [Configuration, `doctor`, and troubleshooting](docs/configuration-and-troubleshooting.md) | Profile reference, validation, preflight, local runs, symptoms |

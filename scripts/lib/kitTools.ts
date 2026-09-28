@@ -58,7 +58,7 @@ export async function chooseKit(store: Store, wanted?: string): Promise<string> 
   for (const id of [...ids].reverse()) if (await store.exists(`${KIT_PREFIX}/${id}/${SUMS_FILE}`)) return id;
   throw new Error(
     `no complete recovery kit is stored under ${KIT_PREFIX}/ — the drill runs on the kit's tools, so store one first: ` +
-      "npm run recovery-kit -- build, then upload (docs/key-escrow.md#the-recovery-kit)",
+      "npm run recovery-kit -- build, then upload (docs/recovery-kit-guide.md#updating-the-kit)",
   );
 }
 

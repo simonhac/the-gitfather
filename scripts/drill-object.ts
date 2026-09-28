@@ -14,7 +14,8 @@ import "./lib/bootEnv.js"; // MUST be first — loads $PROFILE before backupType
 // It runs on the RECOVERY KIT's tools, not the laptop's: age, pg_restore and psql are built from a
 // kit stored in the bucket (lib/kitTools.ts — downloaded, SHA-checked, built once per kit and cached),
 // and the kit's id goes into the record. So each monthly drill also proves the stored kit can still
-// build the tools a recovery needs, and that they open a real object. See docs/key-escrow.md.
+// build the tools a recovery needs, and that they open a real object. See docs/recovery-kit.md; the
+// monthly runbook is docs/recovery-kit-guide.md#runbook-the-monthly-check.
 //
 // Usage — list what is there, then drill one:
 //   PROFILE=… npx tsx scripts/drill-object.ts --list

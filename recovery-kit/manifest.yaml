@@ -1,6 +1,6 @@
 # The RECOVERY KIT manifest — every artifact a stranger needs to open the backups years from now,
 # pinned by version and SHA-256. `npm run recovery-kit -- build` fetches each one, refuses any whose
-# bytes don't match, and assembles the kit; see docs/key-escrow.md#the-recovery-kit.
+# bytes don't match, and assembles the kit; see docs/recovery-kit.md.
 #
 # What belongs here is what RECOVERY needs, not what runs the backups: nobody opening a backup in ten
 # years needs tsx, zod or the scheduler Worker. Not here on purpose: rclone (R2 speaks plain S3, so any
