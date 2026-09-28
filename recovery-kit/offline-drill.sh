@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
 # The OFFLINE RECOVERY DRILL, run inside a container with no network by
-# `npm run key-shares -- drill --kit <dir>` (see docs/key-escrow.md#proving-the-kit-offline).
+# `npm run key-shares -- drill --kit <dir>` (see docs/recovery-kit.md#proof-not-faith-the-offline-drill).
 #
 # It follows the kit's README step by step, using nothing but the kit (read-only at /kit) and a
 # practice issue (read-only at /drill): two holders' shares of two throwaway keys, the public

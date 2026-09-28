@@ -92,11 +92,9 @@ AGE_IDENTITY="$(op read 'op://<vault>/<item>/AGE_IDENTITY')" \
   PROFILE=… npm run drill-object -- --key monthly/<name>-<stamp>.dump.age
 ```
 
-It runs on the **recovery kit's tools**, not the laptop's: it downloads the newest complete kit from
-the bucket (or `--kit-id <id>`), checks every byte, builds the kit's age, `pg_restore` and `psql`, and
-puts them first on `PATH` ([why](key-escrow.md#the-monthly-drill-runs-on-the-kit)). So each drill also
-proves the stored kit still works. The first drill on a new kit takes a few extra minutes to build; the
-tools are cached per kit after that. With no kit stored, the drill refuses to run.
+It runs on the **recovery kit's tools**, not the laptop's: it builds age, `pg_restore` and `psql` from
+the kit stored in the bucket, and refuses to run with no kit stored
+([how](recovery-kit.md#the-monthly-manual-drill-runs-on-the-kit)).
 
 It records a `kind: "restore"`, `by: "manual"` verification, naming the kit, which is what lights the dashboard's
 **bright** cell — nothing automated sets that any more, so bright green means a person decrypted and
@@ -107,38 +105,13 @@ compare against a live table, so a routine drill never hands production credenti
 > wraps a MULTI-LINE value in literal double quotes, and age then rejects it with
 > `unknown identity type: "# created: …`.
 
-**Running it — a monthly runbook.** Under `verify-durable.keyless` this drill is the *only* proof that
-the escrowed identity still opens what is in the bucket, so give it a cadence and keep a log.
-`verify-durable.drill-max-age-days` (set it a little above the cadence — e.g. 45 for monthly) makes
+**Running it monthly.** Under `verify-durable.keyless` this drill is the *only* proof that the
+escrowed identity still opens what is in the bucket, so give it a cadence and keep a log. The
+step-by-step runbook (which object, credentials, where it restores, what a failure means) is
+[the monthly check](recovery-kit-guide.md#runbook-the-monthly-check).
+`verify-durable.drill-max-age-days` (set it a little above the cadence, e.g. 45 for monthly) makes
 durable-verify post a quiet warning once the newest `by: manual` restore that ran on the recovery kit
 is older than that, and "has NEVER been run with the recovery kit" until the first one is recorded.
-
-1. **What to drill.** Prefer the newest **encrypted** durable copy — ideally the newest `monthly/`
-   one. After `encryption: none → age`, the monthly tier stays plaintext until the first
-   anchor-hour run on the 1st of the next month, so until then drill the newest encrypted
-   `weekly/` object instead. A plaintext `.dump` restores without the identity (the drill prints
-   "Fetched OK — a plaintext object"), so it proves the old generation still restores, not that the
-   key works; drill one of those separately if you need that evidence too.
-2. **Where it restores.** Any throwaway Postgres whose major is ≥ the dump's — a local server over its
-   Unix socket is fine, e.g. `DRILL_DATABASE_URL='postgresql://<you>@localhost/postgres?host=/tmp&sslmode=disable'`.
-   The kit's client is built without SSL, so use a local server, not a remote one.
-   The drill drops and recreates a `gitfather_drill` database there and **leaves it** after the run;
-   it holds a copy of production, so drop it when you are done
-   (`psql -h /tmp -d postgres -c 'DROP DATABASE gitfather_drill'`).
-3. **Credentials.** The R2 variables for the bucket (read, plus write under `_log/` to record the
-   result) and `AGE_IDENTITY` for an `.age` object — each read straight from your secret manager into
-   the command, never written to disk:
-   ```bash
-   PROFILE=path/to/profile.yaml \
-   R2_ACCOUNT_ID="$(op read op://<vault>/<item>/R2_ACCOUNT_ID)" R2_BUCKET="$(op read op://<vault>/<item>/R2_BUCKET)" \
-   R2_ACCESS_KEY_ID="$(op read op://<vault>/<item>/R2_ACCESS_KEY_ID)" R2_SECRET_ACCESS_KEY="$(op read op://<vault>/<item>/R2_SECRET_ACCESS_KEY)" \
-   AGE_IDENTITY="$(op read op://<vault>/<item>/AGE_IDENTITY)" \
-   DRILL_DATABASE_URL='postgresql://<you>@localhost/postgres?host=/tmp&sslmode=disable' \
-     npm run drill-object -- --key weekly/<name>-<stamp>.dump.age
-   ```
-4. **Record it.** The run-log record is automatic; also note the object key, the date, the row counts
-   the drill prints and its time in the project's own (private) drill log, so the history survives the
-   run-log's retention and a human can see the cadence being kept.
 
 Net, with restores enabled: **weekly/monthly are validated three times or more** (hash on write +
 restore at ~2 weeks + a re-hash roughly every sweep thereafter), **daily twice** (hash on write, plus
@@ -192,6 +165,7 @@ pg_restore --no-owner --no-privileges --disable-triggers -j4 -d restore_target r
 `--disable-triggers` (target must be superuser) avoids FK ordering issues; provider-managed schemas may
 warn in a vanilla Postgres — restore into a fresh instance of the same platform for a faithful recovery.
 
-If the identity for step 2 is gone with its vault, two of the three key holders can rebuild it — see
-[Key escrow](key-escrow.md#recovering-a-key). If age or a new enough `pg_restore` is not to hand, the
-[recovery kit](key-escrow.md#the-recovery-kit) in the same bucket (`recovery-kit/`) builds both offline.
+This is the short version. The full runbook covers choosing the object, rebuilding the key from the
+cards if its vault is gone, getting age and `pg_restore` from the [recovery kit](recovery-kit.md) in
+the same bucket, and checking the result before switching over:
+[Runbook: full restore](recovery-kit-guide.md#runbook-full-restore).

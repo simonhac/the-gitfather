@@ -1,6 +1,6 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // The RECOVERY KIT — everything a stranger needs to open the backups years from now, stored beside
-// them. See docs/key-escrow.md#the-recovery-kit.
+// them. See docs/recovery-kit.md, and docs/recovery-kit-guide.md for the runbooks.
 //
 // Escrowing the keys (key-shares.ts) is only half of recovery: the cards are useless without the code
 // that reads them, age, zstd and pg_restore, and in ten years none of those can be assumed to be one
