@@ -468,8 +468,9 @@ worst Slack is quieter or later for a while.
    - drop `slack_channel`, `SLACK_BOT_TOKEN` and `ALERT_WEBHOOK_URL`, which the reusable workflows
      still declare as ignored no-ops so an older caller doesn't break.
 
-   Runs now post within seconds. Delete the unused `SLACK_CHANNEL` and `ALERT_WEBHOOK_URL` repo
-   settings.
+   Runs now post within seconds. The repo's `SLACK_CHANNEL`, `SLACK_BOT_TOKEN` and
+   `ALERT_WEBHOOK_URL` are no longer needed BY THE GITFATHER CALLERS; check the repo's other
+   workflows before deleting them. A missing one mutes those workflows' alerts silently.
 
 **Cutover day posts each client's row twice.** The old bots' rows can't be edited by the new app, so
 the first tick after the switch gets `cant_update_message` and **re-posts that day's row once**.

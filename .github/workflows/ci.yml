@@ -56,6 +56,14 @@ jobs:
           pg-client-major: "17"
           install-age: "true"
       - run: npm ci
+      # key-shares delegates the Shamir arithmetic to the SLIP-39 reference implementation. A venv,
+      # because the runner's system Python refuses a global pip install (PEP 668); pinned, because it
+      # is the code that splits the backup keys.
+      - name: Install the SLIP-39 reference library
+        run: |
+          python3 -m venv /tmp/slip39
+          /tmp/slip39/bin/pip install --quiet shamir-mnemonic==0.3.0
+          echo "SLIP39_PYTHON=/tmp/slip39/bin/python" >> "$GITHUB_ENV"
       - run: npm run typecheck
       # The scheduler Worker typechecks against workers-types, not Node's — a separate project the
       # root typecheck never sees whole (it only reaches the Worker modules the tests import).

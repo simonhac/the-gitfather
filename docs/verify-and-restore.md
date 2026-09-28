@@ -184,3 +184,6 @@ pg_restore --no-owner --no-privileges --disable-triggers -j4 -d restore_target r
 
 `--disable-triggers` (target must be superuser) avoids FK ordering issues; provider-managed schemas may
 warn in a vanilla Postgres — restore into a fresh instance of the same platform for a faithful recovery.
+
+If the identity for step 2 is gone with its vault, two of the three key holders can rebuild it — see
+[Key escrow](key-escrow.md#recovering-a-key).
