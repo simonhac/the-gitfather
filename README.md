@@ -45,6 +45,10 @@ repo, and credentials come from the environment (GitHub secrets), never from the
 - **2-of-3 key escrow** — `npm run key-shares` splits each decrypt key into three SLIP-39 word shares
   and prints one A4 card per holder; any two holders rebuild it, without meeting, and practice issues
   let you drill that at any time. → [Key escrow](docs/key-escrow.md)
+- **A recovery kit** — `npm run recovery-kit` stores everything a stranger needs to open the backups
+  (the SLIP-39 spec and code, age, zstd, PostgreSQL's source) beside them, pinned and checksummed; an
+  offline drill proves it complete, and the monthly manual drill runs on its tools.
+  → [The recovery kit](docs/key-escrow.md#the-recovery-kit)
 - **A read-only preflight** — `npm run doctor -- all` runs the real config schema plus live probes of
   every external client, and writes nothing.
   → [Configuration & `doctor`](docs/configuration-and-troubleshooting.md#config-validation--doctor)
@@ -143,6 +147,7 @@ the-gitfather/
     doctor.ts                 # read-only preflight: same config schema + live client probes
     roll-r2-token.ts          # escrow a rolled/minted R2 token: verify → 1Password → GitHub secrets
     key-shares.ts             # 2-of-3 key escrow: split the age identities into SLIP-39 holder cards; recover
+    recovery-kit.ts           # build / upload / verify the offline recovery kit stored beside the backups
     profile-export.ts         # emit the few profile values a CI bash step needs, as KEY=value
     runlog.ts                 # append-only run/verification log in R2 (the dashboard's source of truth)
     lib/                      # shared internals: config + profile schema, R2/Postgres clients, the outcome
@@ -151,6 +156,7 @@ the-gitfather/
   dashboard/                  # the static page: template.html + heatmap.ts (SVG renderer) + theme.ts
   scheduler/                  # the Cloudflare Worker: schedules every client's workflows, runs the staleness watchdog, posts to Slack
   profiles/example.yaml       # copy this into YOUR repo and edit
+  recovery-kit/               # the kit's pinned manifest, its build-tools.sh, and the offline drill
   docs/                       # the documentation linked below
   .github/
     workflows/                # REUSABLE (on: workflow_call): pg-backup, pg-durable-verify,
@@ -171,7 +177,7 @@ Built as a GitHub-Actions toolkit (TypeScript run via `tsx`), but every script i
 | [R2 buckets, retention, locks and tokens](docs/r2-setup.md) | The GFS tiers, the `wrangler` setup, and rotating the CI token |
 | [Verifying backups and restoring for real](docs/verify-and-restore.md) | The three integrity checkpoints, and the DR restore recipe |
 | [Archiving a table out of Postgres](docs/archiving.md) | The optional archiver: weeks, prune gating, keys, backfills |
-| [Key escrow: 2-of-3 recovery cards](docs/key-escrow.md) | Splitting the decrypt keys among three holders, the ceremony, practice drills, recovery |
+| [Key escrow: 2-of-3 recovery cards](docs/key-escrow.md) | Splitting the decrypt keys among three holders, the ceremony, practice drills, recovery, and the recovery kit |
 | [Backup-history dashboard](docs/dashboard.md) | What every cell means, what is published, how it's built |
 | [Slack and alerting](docs/slack-and-alerting.md) | How a run reaches Slack, what posts where, the daily row, the failure webhook, the dead-man's-switch |
 | [Configuration, `doctor`, and troubleshooting](docs/configuration-and-troubleshooting.md) | Profile reference, validation, preflight, local runs, symptoms |

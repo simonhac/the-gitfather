@@ -9,6 +9,7 @@
     "doctor": "tsx scripts/doctor.ts",
     "drill-object": "tsx scripts/drill-object.ts",
     "key-shares": "tsx scripts/key-shares.ts",
+    "recovery-kit": "tsx scripts/recovery-kit.ts",
     "roll-r2": "tsx scripts/roll-r2-token.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",

@@ -384,18 +384,20 @@ async function main(): Promise<void> {
   // forgot" a real failure mode with, otherwise, no signal whatsoever — the cadence would live
   // only in a doc. A warning rather than a page, matching credential ageing below: a missed drill
   // is not corruption, and a hard page on a human-cadence task is one people learn to ignore.
+  // Only a drill that ran on the stored RECOVERY KIT's tools counts (the record names its kit): the
+  // same drill also proves the kit can still build what a recovery needs.
   if (cfg.verifyDurable.drillMaxAgeDays > 0) {
     const manual = log.verifications
-      .filter((v) => v.ok && v.by === "manual" && provesStoredObjectRestores(v.kind))
+      .filter((v) => v.ok && v.by === "manual" && provesStoredObjectRestores(v.kind) && v.kit)
       .map((v) => Date.parse(v.ts))
       .filter((n) => Number.isFinite(n));
     const newest = manual.length ? Math.max(...manual) : null;
     const ageDays = newest === null ? null : Math.floor((nowMs - newest) / 86_400_000);
     if (ageDays === null || ageDays > cfg.verifyDurable.drillMaxAgeDays) {
-      const what = ageDays === null ? "has NEVER been run" : `was ${ageDays}d ago`;
+      const what = ageDays === null ? "has NEVER been run with the recovery kit" : `was ${ageDays}d ago`;
       const msg =
         `manual decrypt drill ${what} (limit ${cfg.verifyDurable.drillMaxAgeDays}d) — ` +
-        `nothing else proves the escrowed age identity still opens a stored object. ` +
+        `nothing else proves the escrowed age identity and the stored recovery kit still open a stored object. ` +
         `Run: npm run drill-object -- --key <tier>/<object>`;
       process.stderr.write(`${msg}\n`);
       rec.alert("warn", "manual_drill_overdue", msg);

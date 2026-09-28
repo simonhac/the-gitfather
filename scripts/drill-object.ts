@@ -11,6 +11,11 @@ import "./lib/bootEnv.js"; // MUST be first — loads $PROFILE before backupType
 // bright cell. Nothing automated can set that any more, on purpose: the bright green means a person
 // decrypted and restored that exact object.
 //
+// It runs on the RECOVERY KIT's tools, not the laptop's: age, pg_restore and psql are built from a
+// kit stored in the bucket (lib/kitTools.ts — downloaded, SHA-checked, built once per kit and cached),
+// and the kit's id goes into the record. So each monthly drill also proves the stored kit can still
+// build the tools a recovery needs, and that they open a real object. See docs/key-escrow.md.
+//
 // Usage — list what is there, then drill one:
 //   PROFILE=… npx tsx scripts/drill-object.ts --list
 //   AGE_IDENTITY="$(op read 'op://<vault>/<item>/AGE_IDENTITY')" \
@@ -21,6 +26,7 @@ import "./lib/bootEnv.js"; // MUST be first — loads $PROFILE before backupType
 //   --gate nonempty|live-ratio   default nonempty: a durable copy is usually weeks old, so the live
 //                         table has moved on and a ratio against it would be meaningless
 //   --no-record           drill but do not write a verification record
+//   --kit-id <id>         the stored recovery kit to build the tools from (default: the newest)
 //
 // AGE_IDENTITY may be the key ITSELF or a path to a file holding it. If you pipe it from 1Password,
 // use `op read` (or `--format=json`): the plain `op item get --fields` form wraps a MULTI-LINE value
@@ -38,11 +44,14 @@ import "./lib/bootEnv.js"; // MUST be first — loads $PROFILE before backupType
 
 import { mkdtempSync, rmSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadManualDrillConfig } from "./lib/config.js";
 import { capture, commandExists } from "./lib/proc.js";
 import { appendVerify } from "./runlog.js";
+import { KIT_BINARIES, prepareKitTools } from "./lib/kitTools.js";
+import { R2Store } from "./lib/store.js";
+import { loadManifest } from "./recovery-kit.js";
 import {
   drillCoreFromProfile,
   isDumpObject,
@@ -61,6 +70,7 @@ export interface DrillArgs {
   gate: DrillGate;
   list: boolean;
   record: boolean;
+  kitId?: string;
 }
 
 /** Pure, and exported so the argument grammar is testable without R2, a key or a database. */
@@ -69,18 +79,20 @@ export function parseArgs(argv: string[]): DrillArgs {
   let gate: DrillGate = "nonempty";
   let list = false;
   let record = true;
+  let kitId: string | undefined;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--list") list = true;
     else if (a === "--no-record") record = false;
     else if (a === "--key") key = argv[++i];
+    else if (a === "--kit-id") kitId = argv[++i];
     else if (a === "--gate") {
       const g = argv[++i];
       if (g !== "nonempty" && g !== "live-ratio") throw new Error(`--gate must be nonempty or live-ratio (got ${g})`);
       gate = g;
     } else throw new Error(`unknown argument ${a}`);
   }
-  return { key, gate, list, record };
+  return { key, gate, list, record, ...(kitId ? { kitId } : {}) };
 }
 
 /** The tier a key names, for the verification record. Unparseable → null rather than a guess. */
@@ -102,7 +114,7 @@ async function main(): Promise<void> {
     process.exit(1);
   };
 
-  for (const bin of ["rclone", "pg_restore", "psql"]) if (!commandExists(bin)) die(`${bin} not found`);
+  if (!commandExists("rclone")) die("rclone not found");
 
   process.env.RCLONE_CONFIG_R2_TYPE = "s3";
   process.env.RCLONE_CONFIG_R2_PROVIDER = "Cloudflare";
@@ -128,6 +140,15 @@ async function main(): Promise<void> {
   if (!tierOf(key)) die(`--key must start with a tier (${TIERS.join(" | ")}) — got "${key}"`);
   if (key.endsWith(".dump.age") && !core.ageIdentity) {
     die("that object is age-encrypted but AGE_IDENTITY is unset — this drill exists to use the OFFLINE identity");
+  }
+
+  // The drill's age, pg_restore and psql come from the stored recovery kit, first on PATH for every
+  // child process from here on.
+  const tools = await prepareKitTools(new R2Store(r2Bucket), loadManifest(), args.kitId);
+  process.env.PATH = `${tools.binDir}${delimiter}${process.env.PATH ?? ""}`;
+  for (const bin of KIT_BINARIES) {
+    const at = capture("sh", ["-c", `command -v ${bin}`]).out.trim();
+    if (!at.startsWith(tools.binDir)) die(`${bin} resolves to ${at || "nothing"}, not the kit's ${tools.binDir}`);
   }
 
   const tmp = mkdtempSync(join(tmpdir(), "pg-manual-drill-"));
@@ -171,6 +192,7 @@ async function main(): Promise<void> {
       counts: res.counts,
       reason: res.reason,
       durationMs: tookMs,
+      kit: tools.kitId,
     });
     console.log("Recorded a manual restore verification in the run-log.");
   } else {
@@ -179,7 +201,7 @@ async function main(): Promise<void> {
 
   const secs = Math.round(tookMs / 1000);
   if (!res.ok) die(`drill FAILED after ${secs}s — ${res.reason}`);
-  console.log(`\n✓ restore-verified ${backupPrefix}/${key} in ${secs}s`);
+  console.log(`\n✓ restore-verified ${backupPrefix}/${key} in ${secs}s, with recovery kit ${tools.kitId}'s tools`);
   console.log(`  rows: ${Object.entries(res.counts).map(([t, n]) => `${t}=${n}`).join(", ") || "(none probed)"}`);
   console.log("  Record the object key and this result in the drill log.");
 }

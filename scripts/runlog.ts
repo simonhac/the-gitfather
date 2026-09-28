@@ -222,6 +222,8 @@ export interface VerifyRecordInput {
   /** How long THIS verification took. Separate from the run's own durationMs, so the cost of
    * verifying every dump can be judged from numbers rather than impressions. */
   durationMs?: number | null;
+  /** The recovery kit whose tools ran a manual drill (drill-object.ts). */
+  kit?: string;
 }
 
 /** Append a verification record to the private R2 run-log. Best-effort (never throws). */
@@ -241,6 +243,7 @@ export function appendVerify(input: VerifyRecordInput): void {
     reason: input.reason ?? null,
     by: input.by ?? "ci",
     durationMs: input.durationMs ?? null,
+    ...(input.kit ? { kit: input.kit } : {}),
   };
   appendRecord("verifications", input.ts, record);
 }

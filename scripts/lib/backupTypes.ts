@@ -236,6 +236,9 @@ export interface LogVerification {
    * carries no runId/runUrl — but those are nullable for other reasons too, so absence cannot stand
    * in for provenance. Missing on records written before this field → "ci". */
   by?: "ci" | "manual";
+  /** The stored recovery kit whose tools ran this drill. Only manual drills set it; missing on
+   * records written before drills ran on the kit. */
+  kit?: string;
 }
 
 /**

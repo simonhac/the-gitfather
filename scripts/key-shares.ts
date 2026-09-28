@@ -17,6 +17,11 @@
 //                open. Needs no real key, so it can be run whenever a drill is wanted.
 //                  npm run key-shares -- practice --ceremony ceremony.yaml [--issue <label>] [--out <dir>]
 //   demo         `practice` with built-in sample holders — to show someone what a card looks like.
+//   drill        prove the RECOVERY KIT is complete (recovery-kit.ts): make a throwaway practice issue,
+//                then run the whole recovery — rebuild both keys from two holders' shares, open a
+//                zstd+age archive file, restore an encrypted dump — in a container with --network none
+//                and nothing but the kit. Needs Docker (or OrbStack, Podman: DOCKER=<binary>).
+//                  npm run key-shares -- drill --kit <dir> [--image python:3.12-bookworm]
 //   check-share  check ONE holder's words on their own (word list + checksum) and say which share
 //                of which set they are. Prints the words to stdout when redirected, so a share given
 //                today can be kept until the second holder is reachable — one share reveals nothing.
@@ -33,13 +38,13 @@
 // throwaway profile of its own); the PDFs themselves are secret — print them, then delete them.
 //
 // Needs: age + age-keygen, Python 3 with `shamir-mnemonic` (SLIP39_PYTHON), and Chrome/Chromium
-// (CHROME) for the commands that print cards.
+// (CHROME) for the commands that print cards; `drill` needs zstd and Docker instead of Chrome.
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { createInterface, type Interface } from "node:readline/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parse as parseYaml } from "yaml";
@@ -54,16 +59,24 @@ import {
   type CeremonyKey,
 } from "./lib/keyCard.js";
 import { commandExists } from "./lib/proc.js";
+import { MANIFEST_PATH, checkLocalKit, loadManifest } from "./recovery-kit.js";
 import { WORDS_PER_SHARE, combine, expandWords, inspectShare, setIdOf, split, wordlist } from "./lib/slip39.js";
 
 export type Command =
   | { cmd: "cards"; ceremony: string; out?: string }
   | { cmd: "practice"; ceremony: string; issue?: string; out?: string }
   | { cmd: "demo"; out?: string }
+  | { cmd: "drill"; kit: string; image: string }
   | { cmd: "check-share" }
   | { cmd: "recover"; recipient: string; shares: string[] };
 
-const FLAGS = ["--ceremony", "--out", "--recipient", "--issue", "--share"];
+const FLAGS = ["--ceremony", "--out", "--recipient", "--issue", "--share", "--kit", "--image"];
+
+/**
+ * The offline drill's container: a stock OS image with Python 3 and a C toolchain, which is what the
+ * kit's README asks a stranger to have. Nothing else in it is used.
+ */
+export const DRILL_IMAGE = "python:3.12-bookworm";
 
 /** Pure, and exported so the argument grammar is testable without a key. */
 export function parseArgs(argv: string[]): Command {
@@ -94,6 +107,10 @@ export function parseArgs(argv: string[]): Command {
     case "demo":
       only(["out"]);
       return { cmd, out: flags.out };
+    case "drill":
+      only(["kit", "image"]);
+      if (!flags.kit) throw new Error("drill needs --kit <dir> (a kit from `npm run recovery-kit -- build`)");
+      return { cmd, kit: flags.kit, image: flags.image ?? DRILL_IMAGE };
     case "check-share":
       only([]);
       return { cmd };
@@ -104,7 +121,7 @@ export function parseArgs(argv: string[]): Command {
       return { cmd, recipient: flags.recipient, shares };
     default:
       throw new Error(
-        "usage: key-shares cards|practice --ceremony <file> [--issue <label>] [--out <dir>] | demo | check-share | recover --recipient <age1…> [--share <file>]…",
+        "usage: key-shares cards|practice --ceremony <file> [--issue <label>] [--out <dir>] | demo | check-share | recover --recipient <age1…> [--share <file>]… | drill --kit <dir> [--image <image>]",
       );
   }
 }
@@ -282,6 +299,77 @@ function demo(out?: string): void {
   practice(sample, { out });
 }
 
+/** Which holders' shares the offline drill hands over: not the first two, so it is not the easy case. */
+export const DRILL_HOLDERS: [number, number] = [0, 2];
+
+/**
+ * The practice issue for the offline drill, as files: for each key, two holders' shares (one per line,
+ * as `shamir recover` reads them) and the recipient the rebuilt key must derive. Plus an archive file
+ * made the way table archives are — rows, zstd, then age — so the kit's zstd has something real to
+ * decompress. The keys are throwaway and are never written here; only their shares are.
+ */
+function writeDrillIssue(dir: string, sentinel: string): void {
+  const keys = (["dump", "archive"] as const).map((name) => {
+    const { identity, recipient } = freshIdentity();
+    const key: CeremonyKey = { title: `Practice ${name} key`, blurb: "", "identity-env": "", recipient };
+    return { name, recipient, split: splitAndVerify([{ key, identity }])[0] };
+  });
+  for (const { name, recipient, split } of keys) {
+    writeFileSync(join(dir, `shares-${name}.txt`), DRILL_HOLDERS.map((h) => `${split.shares[h].join(" ")}\n`).join(""));
+    writeFileSync(join(dir, `holders-${name}.txt`), DRILL_HOLDERS.map((h) => h + 1).join(" and "));
+    writeFileSync(join(dir, `recipient-${name}.txt`), recipient);
+  }
+  writeFileSync(join(dir, "sentinel.txt"), sentinel);
+  const rows = `${JSON.stringify({ id: 1, note: sentinel })}\n${JSON.stringify({ id: 2, note: "second row" })}\n`;
+  const zst = spawnSync("zstd", ["-q", "-c"], { input: rows });
+  if (zst.status !== 0) throw new Error(`zstd failed: ${zst.stderr}`);
+  const archive = keys.find((k) => k.name === "archive")!;
+  const enc = spawnSync("age", ["-r", archive.recipient, "-o", join(dir, "drill-archive.ndjson.zst.age")], { input: zst.stdout });
+  if (enc.status !== 0) throw new Error(`age failed: ${enc.stderr}`);
+}
+
+function findDocker(): string {
+  if (process.env.DOCKER) return process.env.DOCKER;
+  for (const c of ["docker", "podman"]) if (commandExists(c)) return c;
+  const orb = "/Applications/OrbStack.app/Contents/MacOS/xbin/docker";
+  if (existsSync(orb)) return orb;
+  throw new Error("the offline drill needs Docker (or OrbStack, or Podman) — set DOCKER to its binary if it is not on PATH");
+}
+
+/**
+ * Prove the recovery kit is complete: run recovery-kit/offline-drill.sh in a container with no
+ * network, the kit and the practice issue mounted read-only. The script follows the kit's README;
+ * if the kit is missing anything a recovery needs, a step fails.
+ */
+function drill(kitDir: string, image: string): void {
+  const kit = resolve(kitDir);
+  checkLocalKit(kit, loadManifest());
+  const docker = findDocker();
+  const dir = mkdtempSync(join(tmpdir(), "kit-drill-"));
+  try {
+    const sentinel = `practice issue P-${today().iso}-${process.pid}`;
+    writeDrillIssue(dir, sentinel);
+    copyFileSync(join(dirname(MANIFEST_PATH), "offline-drill.sh"), join(dir, "offline-drill.sh"));
+    console.error(`✓ practice issue: two throwaway keys, shares ${DRILL_HOLDERS.map((h) => h + 1).join(" and ")} of each, in ${dir}`);
+    console.error(`  running the recovery in ${image} with --network none…`);
+    // The image is pulled (with the network) before the run; the container itself never has one.
+    // initdb refuses to run as root, so the drill runs as an ordinary user created for it.
+    const r = spawnSync(
+      docker,
+      [
+        "run", "--rm", "--network", "none",
+        "-v", `${kit}:/kit:ro`, "-v", `${dir}:/drill:ro`,
+        image, "bash", "-c", "useradd -m drill && runuser -u drill -- bash /drill/offline-drill.sh",
+      ],
+      { stdio: "inherit" },
+    );
+    if (r.error) throw new Error(`${docker}: ${r.error.message}`);
+    if (r.status !== 0) throw new Error(`the offline drill FAILED (exit ${r.status}) — the kit is missing something a recovery needs, or its README is wrong`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 /** Parse one share's words and check it on its own. Throws a message fit to show the person typing. */
 function checkShare(typed: string, list: string[]): { words: string[]; number: number } {
   const words = expandWords(typed, list);
@@ -385,6 +473,7 @@ async function main(): Promise<void> {
   if (c.cmd === "cards") cards(c.ceremony, c.out);
   else if (c.cmd === "practice") practice(loadCeremony(c.ceremony), c);
   else if (c.cmd === "demo") demo(c.out);
+  else if (c.cmd === "drill") drill(c.kit, c.image);
   else if (c.cmd === "check-share") await checkShareCmd();
   else await recover(c.recipient, c.shares);
 }
