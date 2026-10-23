@@ -44,7 +44,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
           cache: npm
       # Both inputs matter now that the integration tests actually run here, and the assertion
       # below turns a skip into a failure: without `pg-client-major` the runner's preinstalled
