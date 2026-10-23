@@ -82,8 +82,10 @@ jobs:
         run: |
           set -euo pipefail
           npm test 2>&1 | tee /tmp/test.out
-          if ! grep -qE "^# skipped 0$" /tmp/test.out; then
+          # The summary line is `# skipped N` under the TAP reporter (Node 20's non-TTY default)
+          # and `ℹ skipped N` under spec (Node 24's). Accept either, but only with N = 0.
+          if ! grep -qE "^(#|ℹ) skipped 0$" /tmp/test.out; then
             echo "::error::a test SKIPPED — Postgres unreachable? CI proved less than its green tick suggests"
-            grep -E "SKIPPED|^# skipped" /tmp/test.out || true
+            grep -E "SKIPPED|^(#|ℹ) skipped" /tmp/test.out || true
             exit 1
           fi
